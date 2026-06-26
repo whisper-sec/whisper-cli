@@ -158,9 +158,18 @@ func (f *fakeEgress) handle(c net.Conn) {
 	}
 	defer up.Close()
 	_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
+	// Splice WITH half-close semantics (a correct CONNECT proxy propagates each side's FIN
+	// independently and only fully closes once BOTH halves are done) — so this fake faithfully
+	// carries the half-closed keep-alive shape the #154 regression test depends on.
+	halfCloser := func(w net.Conn) {
+		if cw, ok := w.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+	}
 	done := make(chan struct{}, 2)
-	go func() { _, _ = io.Copy(up, br); done <- struct{}{} }()
-	go func() { _, _ = io.Copy(c, up); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(up, br); halfCloser(up); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(c, up); halfCloser(c); done <- struct{}{} }()
+	<-done
 	<-done
 }
 
@@ -228,6 +237,47 @@ func TestProxy_StopDrainsWithIdleTunnel(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Stop() hung with an idle tunnel open — the splice close-both regression is back")
 	}
+}
+
+// halfWriteBackend models the #154 ERR_SOCKET_CLOSED shape: on the accepted tunnel it
+// reads the first request, writes ONE response, then CloseWrite()s its OWN write half
+// (sends a FIN — an HTTP/1.1 origin that answered and ended that response) while KEEPING
+// its READ half open, exactly as a keep-alive origin awaiting the client's next request.
+// Any further bytes the client sends after the FIN are delivered on the `got` channel, so
+// the test can prove the client→egress→target (WRITE) half SURVIVED the target's FIN —
+// i.e. the proxy did NOT force the whole tunnel shut (which is the ERR_SOCKET_CLOSED bug).
+func halfWriteBackend(t *testing.T, firstResp string, got chan<- string) string {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("halfwrite backend: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				buf := make([]byte, 256)
+				_, _ = c.Read(buf) // first request from the client
+				_, _ = io.WriteString(c, firstResp)
+				if cw, ok := c.(interface{ CloseWrite() error }); ok {
+					_ = cw.CloseWrite() // FIN on the TARGET→client half only
+				}
+				// Read half stays open: capture the follow-up the client sends so the test can
+				// confirm the client→egress→target direction is still alive after the FIN.
+				more := make([]byte, 256)
+				n, _ := c.Read(more)
+				if n > 0 && got != nil {
+					got <- string(more[:n])
+				}
+			}()
+		}
+	}()
+	return ln.Addr().String()
 }
 
 // startProxy boots the local forward proxy pointed at the fake egress with TLS verify
@@ -320,6 +370,76 @@ func TestProxy_HTTPConnectTunnels(t *testing.T) {
 	}
 	if string(buf) != msg {
 		t.Fatalf("echo = %q, want %q", buf, msg)
+	}
+}
+
+// TestProxy_HalfClosedTunnelSurvives is THE #154 regression guard: ERR_SOCKET_CLOSED.
+//
+// Claude Code's startup connectivity preflight runs through HTTPS_PROXY → our local proxy
+// as an HTTP CONNECT (Node/undici). The target answers ONE response and FINs its write
+// half (a Connection: close origin, or one keep-alive cycle), which makes the egress→client
+// io.Copy reach EOF. The OLD splice slammed BOTH ends shut on that first EOF, RSTing the
+// tunnel out from under a request undici still meant to finish/reuse — surfacing as
+// ERR_SOCKET_CLOSED. The fix: on a natural one-way EOF we only HALF-close (propagate the
+// FIN); the client→target direction stays open. This test drives exactly that shape and
+// asserts a follow-up the client sends after the FIN still reaches the target and echoes
+// back — i.e. the tunnel was NOT force-closed.
+func TestProxy_HalfClosedTunnelSurvives(t *testing.T) {
+	got := make(chan string, 1)
+	backend := halfWriteBackend(t, "RESP1", got)
+	fe := newFakeEgress(t, backend, nil)
+	p := startProxy(t, fe.addr(), "et_preflight")
+
+	raw, err := net.Dial("tcp", p.Addr())
+	if err != nil {
+		t.Fatalf("dial local proxy: %v", err)
+	}
+	defer raw.Close()
+	if _, err := io.WriteString(raw, "CONNECT example.com:80 HTTP/1.1\r\nHost: example.com:80\r\n\r\n"); err != nil {
+		t.Fatalf("write CONNECT: %v", err)
+	}
+	br := bufio.NewReader(raw)
+	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read CONNECT reply: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("local CONNECT status = %d, want 200", resp.StatusCode)
+	}
+
+	// First tunneled request → the target answers "RESP1" and FINs its write half.
+	if _, err := io.WriteString(raw, "GET / HTTP/1.1\r\nHost: x\r\n\r\n"); err != nil {
+		t.Fatalf("write tunneled req 1: %v", err)
+	}
+	first := make([]byte, len("RESP1"))
+	_ = raw.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.ReadFull(br, first); err != nil {
+		t.Fatalf("read first response: %v", err)
+	}
+	if string(first) != "RESP1" {
+		t.Fatalf("first response = %q, want RESP1", first)
+	}
+
+	// Give the egress→client FIN time to propagate through both splices. With the bug, the
+	// proxy force-closes the client tunnel HERE; with the fix, the client→target half lives.
+	time.Sleep(150 * time.Millisecond)
+
+	// A follow-up the client sends AFTER the target's FIN must still REACH the target. If the
+	// proxy force-closed the whole tunnel on that FIN (the old behaviour), this write is RST
+	// and the target never sees it — the ERR_SOCKET_CLOSED the preflight saw. With the
+	// half-close fix the client→egress→target half is still open and the target receives it.
+	const followup = "SECOND-REQUEST"
+	_ = raw.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	if _, err := io.WriteString(raw, followup); err != nil {
+		t.Fatalf("the tunnel was force-closed after the target's FIN (the #154 ERR_SOCKET_CLOSED bug): write failed: %v", err)
+	}
+	select {
+	case msg := <-got:
+		if msg != followup {
+			t.Fatalf("target received %q after the FIN, want %q", msg, followup)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the client→target half did not survive the target FIN (the #154 ERR_SOCKET_CLOSED bug): the follow-up never reached the target")
 	}
 }
 

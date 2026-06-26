@@ -76,6 +76,7 @@ func renderFleet(res *client.Result) {
 				name,
 				field(item, "address", "addr128"),
 				orDash(field(item, "label")),
+				orDash(agentDomain(field(item, "fqdn"))),
 				orVal(field(item, "state"), "active"),
 				humanTime(created),
 				field(item, "contact"),
@@ -91,7 +92,7 @@ func renderFleet(res *client.Result) {
 	for i, r := range rows {
 		cells[i] = r.cells
 	}
-	printTable([]string{"AGENT", "ADDRESS", "LABEL", "STATE", "CREATED", "CONTACT"}, cells)
+	printTable([]string{"AGENT", "ADDRESS", "LABEL", "DOMAIN", "STATE", "CREATED", "CONTACT"}, cells)
 	fmt.Fprintf(os.Stderr, "%d agent(s)\n", len(rows))
 }
 
@@ -474,6 +475,22 @@ func humanTime(s string) string {
 		return time.UnixMilli(n).UTC().Format("2006-01-02 15:04")
 	}
 	return time.Unix(n, 0).UTC().Format("2006-01-02 15:04")
+}
+
+// agentDomain returns the zone an agent's FQDN sits under — its parent domain, i.e. the
+// FQDN minus its first (per-agent) label. This is what distinguishes a hosted identity
+// ("agents.whisper.online") from a BYOD-domain one ("example.com"). Liberal in what it
+// reads (trailing dot or not, empty in → empty out); a bare apex with no dot returns the
+// FQDN itself (it IS the zone).
+func agentDomain(fqdn string) string {
+	s := trimDot(strings.TrimSpace(fqdn))
+	if s == "" {
+		return ""
+	}
+	if i := strings.IndexByte(s, '.'); i >= 0 && i+1 < len(s) {
+		return s[i+1:]
+	}
+	return s
 }
 
 func trimDot(s string) string {

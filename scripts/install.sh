@@ -46,6 +46,8 @@ CLI_BASE="${WHISPER_CLI_BASE:-https://github.com/whisper-sec/whisper-cli/release
 # The AS219419 release-signing key fingerprint + where its public key is published.
 PGP_FPR="${WHISPER_PGP_FPR:-EFF1663D992539682106A5EAD0F70908CF3B7929}"
 PGP_KEY_URL="${WHISPER_PGP_KEY_URL:-https://as219419.net/whisper-release.asc}"
+# Fallback key mirror served by the Whisper gateway itself, used if the canonical as219419.net copy is unreachable.
+PGP_KEY_FALLBACK="${WHISPER_PGP_KEY_FALLBACK:-https://cli.whisper.online/dl/whisper-pgp.asc}"
 DEST_DIR="${WHISPER_DIR:-$HOME/.local/bin}"
 NO_PATH=0
 FORCE_SHELL=""
@@ -141,9 +143,14 @@ pgp_verify() {  # → 0 = verified or skipped-cleanly; dies on a present-but-BAD
   chmod 700 "$_gnupghome" 2>/dev/null || true
   _keyfile="$_gnupghome/whisper-release.asc"
   if ! fetch "$PGP_KEY_URL" "$_keyfile" 2>/dev/null; then
-    vsay "couldn't fetch the AS219419 release key from $PGP_KEY_URL — skipping PGP (sha256 already verified)"
-    rm -rf "$_gnupghome" "$_asc" 2>/dev/null || true
-    return 0
+    # Canonical as219419.net copy unreachable — fall back to the gateway-served mirror before skipping.
+    if [ -n "$PGP_KEY_FALLBACK" ] && fetch "$PGP_KEY_FALLBACK" "$_keyfile" 2>/dev/null; then
+      vsay "fetched the AS219419 release key from the fallback mirror ($PGP_KEY_FALLBACK)"
+    else
+      vsay "couldn't fetch the AS219419 release key from $PGP_KEY_URL or the fallback — skipping PGP (sha256 already verified)"
+      rm -rf "$_gnupghome" "$_asc" 2>/dev/null || true
+      return 0
+    fi
   fi
   if ! GNUPGHOME="$_gnupghome" gpg --batch --quiet --import "$_keyfile" 2>/dev/null; then
     vsay "couldn't import the release key — skipping PGP (sha256 already verified)"

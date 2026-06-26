@@ -292,7 +292,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
 	}
-	splice(conn, br, up)
+	splice(ctx, conn, br, up)
 }
 
 // readSocks5Target reads DST.ADDR + DST.PORT for the given ATYP and returns
@@ -366,7 +366,7 @@ func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader)
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
 	}
-	splice(conn, br, up)
+	splice(ctx, conn, br, up)
 }
 
 // --- the upstream HTTPS-CONNECT tunnel ---------------------------------------------
@@ -454,30 +454,57 @@ func stripScheme(s string) string {
 
 // --- plumbing ----------------------------------------------------------------------
 
-// splice wires the local client (its bufio.Reader holds any already-read bytes) to
-// the upstream tunnel in both directions and blocks until either side closes.
-func splice(client net.Conn, clientBuf *bufio.Reader, up net.Conn) {
+// splice wires the local client (its bufio.Reader holds any already-read bytes) to the
+// upstream tunnel in both directions and blocks until the tunnel is fully done.
+//
+// HALF-CLOSE IS LOAD-BEARING (issue #154). A TCP tunnel is two independent half-streams:
+// one direction reaching EOF means only THAT peer is done writing — the OTHER direction
+// may still have data to carry. So on a natural peer EOF we ONLY half-close (CloseWrite)
+// the corresponding far end, propagating the FIN, and let the other io.Copy run to its
+// own EOF. We must NOT force the whole tunnel shut on the first EOF: doing so severs a
+// pooled keep-alive proxy connection mid-flight, which is exactly what surfaces to a
+// Node/undici client (Claude Code's connectivity preflight) as ERR_SOCKET_CLOSED — the
+// proxy RSTs the socket out from under a request it still intended to complete/reuse.
+//
+// STOP() STILL DRAINS PROMPTLY. The earlier Stop()-hang fix (whisper ip/run exiting 124
+// on an idle keep-alive upstream) is preserved a different, surgical way: when ctx
+// (the proxy's OWN p.life, cancelled ONLY by Stop()) fires, we force BOTH ends shut so a
+// copy parked reading an idle-but-open peer unblocks at once and wg.Wait() returns. The
+// natural-EOF path no longer slams the tunnel — only Stop() does.
+func splice(ctx context.Context, client net.Conn, clientBuf *bufio.Reader, up net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
 		_, _ = io.Copy(up, clientBuf) // client → egress (drains buffered bytes first)
-		halfClose(up)
+		halfClose(up)                 // propagate the client's FIN to the egress
 		done <- struct{}{}
 	}()
 	go func() {
 		_, _ = io.Copy(client, up) // egress → client
-		halfClose(client)
+		halfClose(client)          // propagate the egress's FIN to the client
 		done <- struct{}{}
 	}()
-	<-done
-	// One direction ended — peer EOF, or Stop() cancelled p.life and the serve watcher
-	// closed the client. Force BOTH ends shut so the other io.Copy unblocks immediately:
-	// the half-close above only shuts the writer, so a copy parked READING a still-open
-	// peer (egress → client reading an idle keep-alive upstream) would otherwise hang the
-	// handler forever — and with it Stop()'s wg.Wait(). The response is already fully
-	// delivered by the time either side ends, so this never truncates.
-	_ = client.Close()
-	_ = up.Close()
-	<-done
+
+	// Wait for the tunnel to finish on its own (both half-streams reached EOF), OR for
+	// Stop() to cancel p.life. ONLY Stop() force-closes both ends; a natural one-way EOF
+	// does not — the half-close above already signalled the peer and the other direction
+	// keeps streaming until it, too, ends. This is what lets a half-closed keep-alive
+	// tunnel deliver its remaining direction instead of being RST (the #154 fix).
+	n := 0
+	for n < 2 {
+		select {
+		case <-done:
+			n++
+		case <-ctx.Done():
+			// Stop() — tear both ends so any copy parked on an idle peer unblocks now.
+			_ = client.Close()
+			_ = up.Close()
+			for n < 2 {
+				<-done
+				n++
+			}
+			return
+		}
+	}
 }
 
 // halfClose signals EOF to the peer's read side where the conn supports it, so a

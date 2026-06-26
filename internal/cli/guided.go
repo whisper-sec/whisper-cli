@@ -58,10 +58,13 @@ func stdGuidedIO() guidedIO {
 	return guidedIO{in: bufio.NewReader(os.Stdin), out: os.Stdout, err: os.Stderr}
 }
 
-// agentChoice is one selectable agent distilled from op:list: a display name + its /128.
+// agentChoice is one selectable agent distilled from op:list: a display name, its /128,
+// and the domain (zone) its FQDN sits under — so a BYOD-domain identity is distinguishable
+// from a hosted agents.whisper.online one in the picker.
 type agentChoice struct {
-	name string
-	addr string
+	name   string
+	addr   string
+	domain string
 }
 
 // runGuided is the entry point for bare `whisper`. It resolves the credential (guiding
@@ -184,7 +187,7 @@ func choicesFromResult(res *client.Result) []agentChoice {
 		if name == "" && addr == "" {
 			continue
 		}
-		out = append(out, agentChoice{name: name, addr: addr})
+		out = append(out, agentChoice{name: name, addr: addr, domain: agentDomain(field(item, "fqdn"))})
 	}
 	return out
 }
@@ -248,8 +251,23 @@ func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []ag
 	}
 	fmt.Fprintln(gio.err, "Which agent?")
 	fmt.Fprintln(gio.err, "  0) + create a new agent")
+	// Align the name+addr block so the trailing domain (BYOD vs hosted) lines up — a user
+	// must be able to tell a BYOD-domain identity from a hosted agents.whisper.online one.
+	nameW, addrW := 0, 0
+	for _, ch := range choices {
+		if l := len(ch.name); l > nameW {
+			nameW = l
+		}
+		if l := len(orDash(ch.addr)); l > addrW {
+			addrW = l
+		}
+	}
 	for i, ch := range choices {
-		fmt.Fprintf(gio.err, "  %d) %s — %s\n", i+1, ch.name, orDash(ch.addr))
+		line := fmt.Sprintf("  %d) %-*s  %-*s", i+1, nameW, ch.name, addrW, orDash(ch.addr))
+		if ch.domain != "" {
+			line += "  " + ch.domain
+		}
+		fmt.Fprintln(gio.err, line)
 	}
 	// Re-prompt on garbage (out-of-range / non-numeric / blank) exactly like requireName
 	// loops on a blank name: a fat-fingered '9' or 'xyz' must NEVER silently connect to the
