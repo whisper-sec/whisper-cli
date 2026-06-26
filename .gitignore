@@ -1,0 +1,25 @@
+# Built binaries
+/whisper
+/whisper.exe
+whisper-*-*           # release-named cross-compiled binaries (whisper-linux-amd64, …)
+*.exe
+
+# Release/build output
+/dist/
+/build/
+
+# Checksums + signatures produced by build-all.sh / the release workflow
+*.sha256
+*.asc
+checksums.txt
+
+# Go test/coverage artifacts
+*.test
+*.out
+coverage.txt
+
+# Editor / OS cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store

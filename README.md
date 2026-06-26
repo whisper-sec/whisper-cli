@@ -1,0 +1,183 @@
+# whisper
+
+**Give your agent a real, routable Whisper IPv6 identity — one command.**
+
+`whisper` is the command-line client for [Whisper](https://whisper.online): a single
+static binary that gives an agent a real, routable IPv6 `/128` on **AS219419**, wires
+egress so the agent's traffic sources *from* that address, and verifies it end-to-end.
+The address *is* the identity — DNSSEC-signed, DANE-pinned, and resolvable in public
+[RDAP](https://rdap.whisper.online). One binary, standard ports, no config to get
+started.
+
+It is two surfaces over one core: a fully scriptable [Cobra](https://github.com/spf13/cobra)
+CLI, and a full-screen [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI when
+you run `whisper` on a terminal with no subcommand.
+
+---
+
+## Install
+
+The one-liner fetches the signed binary straight from this repo's **GitHub Releases**,
+verifies its SHA-256 (and its PGP signature when `gpg` is present), and puts it on your
+`PATH`:
+
+```sh
+curl get.whisper.online | sh
+```
+
+Windows (PowerShell):
+
+```powershell
+irm get.whisper.online/install.ps1 | iex
+```
+
+With Go:
+
+```sh
+go install github.com/whisper-sec/whisper-cli/cmd/whisper@latest
+```
+
+Or download the binary for your platform from the
+[Releases page](https://github.com/whisper-sec/whisper-cli/releases/latest), make it
+executable, and put it on your `PATH`.
+
+> The installers (`scripts/install.sh`, `scripts/install.ps1`) are the exact scripts
+> `get.whisper.online` serves — published here so the whole install path is inspectable.
+> They download `whisper-<os>-<arch>` (plus `.sha256` and `.asc`) from this repo's
+> releases; SHA-256 is a hard gate (a mismatch aborts the install), and the PGP check is
+> an extra layer. Point `WHISPER_CLI_BASE` at any mirror to override the source.
+
+### Verify the download
+
+Releases are signed with the **AS219419** PGP key:
+
+```
+Fingerprint: EFF1663D992539682106A5EAD0F70908CF3B7929
+```
+
+The public key is published at <https://as219419.net/>. To verify a binary you
+downloaded manually:
+
+```sh
+# 1. SHA-256 — compare against the asset's .sha256 (and the release checksums.txt)
+sha256sum -c whisper-linux-amd64.sha256
+
+# 2. PGP — import the AS219419 key, then verify the detached signature
+curl -fsSL https://as219419.net/whisper-release.asc | gpg --import
+gpg --verify whisper-linux-amd64.asc whisper-linux-amd64
+```
+
+A good signature reports `Good signature` from the key with the fingerprint above.
+
+---
+
+## Quickstart
+
+Run `whisper` with no arguments for the guided flow. It signs you in (browser device
+login or a pasted API key), helps you name and create an agent if you don't have one,
+then connects and verifies:
+
+```text
+$ whisper
+whisper: signed in.
+whisper: name your agent: my-first-agent
+whisper: created my-first-agent → 2a04:2a01:…::1
+whisper: connecting…
+2a04:2a01:…::1  ✓ egress verified
+Connected ✓
+```
+
+Naming is mandatory — an agent's name is part of its identity, so the flow asks before
+it creates one. The same steps are scriptable:
+
+```sh
+whisper connect            # bring up egress bound to your /128 (Tier-1.5 SOCKS5/HTTPS)
+whisper ip                 # print your egress IP and verify it IS your /128 (exit 0 = verified)
+whisper run -- curl ifconfig.co   # run any command with your Whisper egress wired in
+whisper claude             # run Claude Code through your Whisper egress, one step
+whisper use my-agent       # choose the agent the rest of `whisper` binds to
+whisper status             # key state, selected agent, connection state
+```
+
+`whisper ip` is exit-code-first: `0` when the observed egress address is inside
+`2a04:2a01::/32` *and* equals your selected agent's `/128`, `1` otherwise — so scripts
+and agents can gate on it. Add `--json` to any command for the raw, scriptable envelope.
+
+Other useful commands: `whisper list`, `whisper logs`, `whisper policy`, `whisper rdap
+<address>`, `whisper verify <address>`, `whisper login`, `whisper dash` (the full-screen
+dashboard), `whisper config`. Run `whisper <command> --help` for details.
+
+---
+
+## What you get
+
+- **A real, routable `/128`** out of `2a04:2a01::/32`, announced by **AS219419** — your
+  own internet address, not a shared NAT pool.
+- **Identity that's verifiable from the outside.** Forward DNS is DNSSEC-signed and
+  DANE-pinned; reverse DNS (`ip6.arpa` PTR) resolves to the agent; the assignment is
+  visible in public RDAP at [rdap.whisper.online](https://rdap.whisper.online).
+- **Egress that binds your identity.** `whisper connect` provisions a local proxy whose
+  traffic sources *from* your `/128`; `whisper ip` proves the source address is yours,
+  node-free and with no third party in the loop.
+- **One binary, zero config.** Static, CGO-free, with an embedded CA bundle — it runs on
+  a bare host or a stripped container and just works.
+
+---
+
+## Build from source
+
+Requires Go 1.24+.
+
+```sh
+git clone https://github.com/whisper-sec/whisper-cli
+cd whisper-cli
+go build -o whisper ./cmd/whisper
+./whisper --version
+```
+
+Cross-compile every supported platform into `dist/` (binaries + `.sha256`, named exactly
+as the release assets):
+
+```sh
+./build-all.sh                 # → dist/whisper-<os>-<arch>[.exe] + .sha256
+./build-all.sh dist v1.0.0     # stamp a version into `whisper --version`
+```
+
+`platforms.txt` is the single source of truth for the target matrix — shared by
+`build-all.sh`, the release workflow, and the installers.
+
+### Platforms
+
+| OS \ Arch | amd64 | arm64 |
+|-----------|:-----:|:-----:|
+| linux     |   ✓   |   ✓   |
+| darwin    |   ✓   |   ✓   |
+| windows   |   ✓   |   ✓   |
+
+---
+
+## Links
+
+- **Whisper** — [whisper.online](https://whisper.online)
+- **Registry / NIC** — [nic.whisper.online](https://nic.whisper.online)
+- **RDAP** — [rdap.whisper.online](https://rdap.whisper.online)
+- **AS219419** (release-signing key, network info) — [as219419.net](https://as219419.net)
+
+---
+
+## Contributing
+
+Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Run
+`go build ./...`, `go vet ./...`, `go test ./...`, and `gofmt -l .` before opening a PR.
+
+To report a security issue, see [SECURITY.md](SECURITY.md).
+
+---
+
+## License
+
+[MIT](LICENSE) © 2026 viaGraph B.V. (Whisper Security).
+
+The embedded Mozilla CA certificate list
+(`internal/client/cabundle/mozilla-cacert.pem`) is distributed under the Mozilla Public
+License 2.0.

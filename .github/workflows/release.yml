@@ -1,0 +1,87 @@
+name: Release
+
+# Cut a release by pushing a version tag, e.g.:  git tag v1.0.0 && git push origin v1.0.0
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write   # required to create the GitHub Release and upload assets
+
+jobs:
+  release:
+    name: build · sign · publish
+    runs-on: ubuntu-latest
+    # Surface the signing secrets as job-level env so the sign step's `if:` can test
+    # for their presence. They are never printed; the values only flow into gpg.
+    env:
+      PGP_SIGNING_KEY: ${{ secrets.PGP_SIGNING_KEY }}
+      PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Derive version from the tag
+        id: ver
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # build-all.sh reads platforms.txt and emits, for every (os, arch):
+      #   dist/whisper-<os>-<arch>[.exe]        the static binary
+      #   dist/whisper-<os>-<arch>[.exe].sha256 its SHA-256
+      # These names match exactly what install.sh / install.ps1 download.
+      - name: Cross-compile all platforms
+        run: ./build-all.sh dist "${{ steps.ver.outputs.version }}"
+
+      # PGP-sign each binary into a detached .asc — ONLY if the signing secrets are
+      # present. The key is imported into an ephemeral keyring; nothing is hardcoded.
+      # If the secrets are absent the step skips cleanly (the release still ships with
+      # SHA-256 checksums).
+      - name: Sign artifacts (PGP)
+        if: ${{ env.PGP_SIGNING_KEY != '' && env.PGP_PASSPHRASE != '' }}
+        run: |
+          set -eu
+          export GNUPGHOME="$(mktemp -d)"
+          chmod 700 "$GNUPGHOME"
+          printf '%s' "$PGP_SIGNING_KEY" | gpg --batch --import
+          for f in dist/whisper-*; do
+            case "$f" in
+              *.sha256|*.asc) continue ;;
+            esac
+            echo "signing $f"
+            printf '%s' "$PGP_PASSPHRASE" | \
+              gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+                  --detach-sign --armor --output "$f.asc" "$f"
+          done
+          # Scrub the ephemeral keyring.
+          rm -rf "$GNUPGHOME"
+
+      # One release-wide checksum manifest over every binary asset.
+      - name: Generate checksums.txt
+        run: |
+          set -eu
+          cd dist
+          : > checksums.txt
+          for f in whisper-*; do
+            case "$f" in
+              *.sha256|*.asc|checksums.txt) continue ;;
+            esac
+            sha256sum "$f" >> checksums.txt
+          done
+          echo "----- checksums.txt -----"
+          cat checksums.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          files: |
+            dist/whisper-*
+            dist/checksums.txt

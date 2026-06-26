@@ -1,0 +1,21 @@
+# platforms.txt — the SINGLE source of truth for which (os, arch) targets the
+# `whisper` CLI ships. Read by the consumers so they can never drift:
+#
+#   1. build-all.sh                — cross-compiles one static binary per line
+#   2. .github/workflows/release.yml — uploads one release asset per binary
+#   3. the installer os/arch map   — install.sh (uname) + install.ps1 ($PROCESSOR_ARCHITECTURE)
+#
+# Format: one `os-arch` token per line. Blank lines and `#` comments are ignored.
+# `os` is a GOOS, `arch` is a GOARCH. Windows targets emit `whisper-<os>-<arch>.exe`;
+# all others emit `whisper-<os>-<arch>`.
+#
+# Order is stable so the supported-platforms list is deterministic.
+#
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 viaGraph B.V. (Whisper Security)
+linux-amd64
+linux-arm64
+darwin-amd64
+darwin-arm64
+windows-amd64
+windows-arm64
