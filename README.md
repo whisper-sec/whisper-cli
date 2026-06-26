@@ -92,6 +92,7 @@ it creates one. The same steps are scriptable:
 
 ```sh
 whisper connect            # bring up egress bound to your /128 (Tier-1.5 SOCKS5/HTTPS)
+whisper connect --tier wireguard   # Tier-1: routed /128 over a userspace WireGuard tunnel (no root)
 whisper ip                 # print your egress IP and verify it IS your /128 (exit 0 = verified)
 whisper run -- curl ifconfig.co   # run any command with your Whisper egress wired in
 whisper claude             # run Claude Code through your Whisper egress, one step
@@ -118,7 +119,10 @@ dashboard), `whisper config`. Run `whisper <command> --help` for details.
   visible in public RDAP at [rdap.whisper.online](https://rdap.whisper.online).
 - **Egress that binds your identity.** `whisper connect` provisions a local proxy whose
   traffic sources *from* your `/128`; `whisper ip` proves the source address is yours,
-  node-free and with no third party in the loop.
+  node-free and with no third party in the loop. `--tier wireguard` brings the `/128` up
+  as a **routed** address over a userspace WireGuard tunnel (wireguard-go netstack — still
+  no root, no kernel `wg`, no TUN device), fronted by the same local proxy so tools need
+  no change.
 - **One binary, zero config.** Static, CGO-free, with an embedded CA bundle — it runs on
   a bare host or a stripped container and just works.
 

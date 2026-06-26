@@ -353,7 +353,8 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 	if name == "" {
 		name = displayName(env.Result)
 	}
-	sess, cerr := connectAndVerify(cx, c, env.Result, name)
+	// The guided front door uses the default (socks5) tier — nil wgKey.
+	sess, cerr := connectAndVerify(cx, c, env.Result, name, nil)
 	cancel() // ends ONLY the control ctx; the proxy lives on until sess.Stop()
 	if cerr != nil {
 		return cerr

@@ -23,9 +23,17 @@ func newConnectCmd() *cobra.Command {
 	var verbose bool
 	cmd := &cobra.Command{
 		Use:   "connect",
-		Short: "Provision egress bound to your /128 (Tier-1.5 SOCKS5/HTTPS proxy)",
-		Long: "Provision egress (op:connect) bound to an existing agent's /128 — returns\n" +
-			"ready-to-use proxy strings with a bearer baked in. tier defaults to socks5.\n\n" +
+		Short: "Connect egress bound to your /128 (Tier-1.5 SOCKS5 proxy, or Tier-1 WireGuard)",
+		Long: "Bring up a local, no-config egress bound to an existing agent's /128 and hold it\n" +
+			"open. It prints ONE bearer/key-free local proxy string (socks5h://127.0.0.1:<port>)\n" +
+			"— point ALL_PROXY / http_proxy at it and every connection leaves from your /128.\n\n" +
+			"Tiers (--tier):\n" +
+			"  socks5  (default)  Tier-1.5: a userspace SOCKS5/HTTPS egress, source-bound to your\n" +
+			"                     /128 — no root, works everywhere.\n" +
+			"  wireguard          Tier-1: a ROUTED Whisper /128 over a userspace WireGuard tunnel\n" +
+			"                     (wireguard-go netstack — still no root, no kernel wg, no TUN).\n" +
+			"                     Your key is generated locally and never leaves this host; the\n" +
+			"                     same local SOCKS5 endpoint fronts it, so tools need no change.\n\n" +
 			"Which identity it binds (#110): --agent <id|/128> pins a specific one; else the\n" +
 			"agent persisted in ~/.config/whisper-ns/agent (written when you pick/create one);\n" +
 			"else, if you already have an agent, the server's reuse-most-recent default.\n\n" +
@@ -96,6 +104,15 @@ func newConnectCmd() *cobra.Command {
 				args["agent"] = sel
 			}
 
+			// --tier wireguard (#188): mint a local WG keypair and inject ONLY the public half
+			// into the op:connect args (the server registers us as a peer; our private key never
+			// leaves this host). No-op for socks5/anyip; wgKey threads our private key into the
+			// userspace tunnel bring-up below.
+			wgKey, werr := prepareWireGuard(tier, args)
+			if werr != nil {
+				return werr
+			}
+
 			// cx is the SHORT control ctx — it bounds op:connect + the one-shot verify and
 			// is cancelled on return. It is NOT the proxy's lifetime: the proxy is
 			// Background-rooted and ends ONLY on Stop() (see egress.StartLocalProxy), so the
@@ -108,17 +125,18 @@ func newConnectCmd() *cobra.Command {
 			}
 			// Check ONLY for a control-plane error here — do NOT fall through to the shared
 			// renderEnvelope --json dump: the raw op:connect envelope carries the et_ bearer
-			// in http_proxy/connection_string, so dumping it would LEAK the egress credential
+			// (egress tier) or the minted WG private key, so dumping it would LEAK a credential
 			// (and skip actually connecting). connect's own --json (renderConnect) emits a
-			// sanitized, bearer-free shape after the proxy is up.
+			// sanitized, secret-free shape after the proxy/tunnel is up.
 			if perr := envelopeError(env); perr != nil {
 				return perr
 			}
-			// #172 WB3: op:connect returns an et_ bearer + the egress endpoint as INTERNAL
-			// values. We bring up the PURE-GO local forward proxy, fold verify in (echo
-			// through the proxy → assert == the agent /128), then print ONE success line.
-			// The bearer NEVER appears in any output, env, or persisted file.
-			sess, cerr := connectAndVerify(cx, c, env.Result, displayName(env.Result))
+			// op:connect returns the transport as INTERNAL values: the et_ bearer + egress
+			// endpoint (Tier-1.5), or the WireGuard config + (zero-key) private key (Tier-1).
+			// We bring up the local proxy/tunnel, fold verify in (echo through it → assert ==
+			// the agent /128), then print ONE success line. No secret ever appears in output,
+			// env, or a persisted file.
+			sess, cerr := connectAndVerify(cx, c, env.Result, displayName(env.Result), wgKey)
 			if cerr != nil {
 				return cerr
 			}
@@ -132,7 +150,7 @@ func newConnectCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&tier, "tier", "", "egress tier: socks5 (default) | anyip")
+	cmd.Flags().StringVar(&tier, "tier", "", "egress tier: socks5 (default) | wireguard (routed /128, userspace) | anyip")
 	cmd.Flags().StringVar(&label, "label", "", "legacy alias for --name (--name wins)")
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in)")
 	cmd.Flags().StringVar(&name, "name", "", "the agent's human name (required to create one; maps to the server label)")
@@ -163,29 +181,59 @@ func resolveAgentSelector(flagAgent, agentFile string) string {
 // bearer hygiene).
 func renderConnect(sess *egressSession, verbose bool) {
 	if g.jsonOut {
-		// Scriptable, SANITIZED shape — the bearer-free local endpoint + the verified /128.
-		// NEVER the raw control-plane envelope (it carries the et_ bearer in its proxy URLs).
-		emitJSONValue(map[string]any{
-			"endpoint": sess.endpoint, // socks5h://127.0.0.1:<port> (no bearer)
+		// Scriptable, SANITIZED shape — the bearer/key-free local endpoint + the verified /128
+		// + the active tier (and, for WireGuard, tunnel health). NEVER the raw control-plane
+		// envelope (it carries the et_ bearer / minted WG private key in its fields).
+		out := map[string]any{
+			"endpoint": sess.endpoint, // socks5h://127.0.0.1:<port> (no secret)
 			"address":  sess.addr,
 			"verified": sess.verified,
-		})
+			"tier":     orVal(sess.tier, "socks5"),
+		}
+		if h, ok := sess.tunnelHealthy(); ok {
+			out["tunnel_healthy"] = h
+		}
+		emitJSONValue(out)
 		return
 	}
 	if g.quiet {
-		// Only the load-bearing value: the bearer-free local endpoint.
+		// Only the load-bearing value: the bearer/key-free local endpoint.
 		fmt.Fprintln(os.Stdout, sess.endpoint)
 		return
 	}
 	writeSuccessLine(io.Discard, os.Stderr, sess, false)
 	if verbose {
-		// The local connection detail ONLY — never a server proxy string (bearer-free).
+		// The local connection detail ONLY — never a server proxy string / WG key (secret-free).
+		if sess.tier != "" {
+			fmt.Fprintf(os.Stderr, "  %-12s %s\n", "tier", connectTierLabel(sess.tier))
+		}
 		if sess.endpoint != "" {
 			fmt.Fprintf(os.Stderr, "  %-12s %s\n", "proxy", sess.endpoint)
 		}
 		if sess.addr != "" {
 			fmt.Fprintf(os.Stderr, "  %-12s %s\n", "address", sess.addr)
 		}
+		if h, ok := sess.tunnelHealthy(); ok {
+			state := "up"
+			if !h {
+				state = "handshaking…"
+			}
+			fmt.Fprintf(os.Stderr, "  %-12s %s\n", "tunnel", state)
+		}
+	}
+}
+
+// connectTierLabel renders an honest, human label for the active tier (§5 framing, #188):
+// WireGuard is a routed Whisper /128 over a userspace tunnel; socks5/anyip is the source-bound
+// egress. Never overclaims — the label matches what the transport actually is.
+func connectTierLabel(tier string) string {
+	switch strings.ToLower(strings.TrimSpace(tier)) {
+	case "wireguard", "wg":
+		return "wireguard (Tier-1 routed /128, userspace, no root)"
+	case "anyip":
+		return "anyip (Tier-1.5 egress)"
+	default:
+		return "socks5 (Tier-1.5 egress)"
 	}
 }
 

@@ -35,7 +35,7 @@ import (
 // here; we keep WB3 lean and rootless).
 
 func newRunCmd() *cobra.Command {
-	var agent, agentFile string
+	var agent, agentFile, tier string
 	cmd := &cobra.Command{
 		Use:   "run <command> [args…]",
 		Short: "Run a command with your Whisper egress wired in (no proxy string to copy)",
@@ -43,16 +43,18 @@ func newRunCmd() *cobra.Command {
 			"injected into the command's environment at launch — you never copy or paste a\n" +
 			"proxy string, and no bearer ever touches your shell history or arguments.\n\n" +
 			"Example:  whisper run curl https://example.com\n" +
-			"          whisper run git clone https://github.com/you/repo\n\n" +
+			"          whisper run git clone https://github.com/you/repo\n" +
+			"          whisper run --tier wireguard curl https://example.com   (routed /128)\n\n" +
 			"Catches curl/git/Node and every tool that honours the standard *_PROXY env.",
 		Args:               cobra.MinimumNArgs(1),
 		DisableFlagParsing: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWithEgress(agent, agentFile, args[0], args[1:])
+			return runWithEgress(agent, agentFile, tier, args[0], args[1:])
 		},
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "use THIS agent's egress (id or /128); overrides the persisted agent")
 	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
+	cmd.Flags().StringVar(&tier, "tier", "", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
 	// Stop flag-parsing at the first positional so `whisper run curl -v …` passes -v to
 	// curl, not to us (Postel: the child owns its own flags).
 	cmd.Flags().SetInterspersed(false)
@@ -62,21 +64,23 @@ func newRunCmd() *cobra.Command {
 // newClaudeCmd is `whisper claude` — sugar for `whisper run claude` (the primary
 // spawned-agent path: a Claude Code child gets a real Whisper /128 with zero wiring).
 func newClaudeCmd() *cobra.Command {
-	var agent, agentFile string
+	var agent, agentFile, tier string
 	cmd := &cobra.Command{
 		Use:   "claude [args…]",
 		Short: "Run Claude Code through your Whisper egress (one step)",
 		Long: "Shorthand for `whisper run claude` — bring your Whisper connection up and launch\n" +
 			"Claude Code with the egress wired into its environment at spawn (no proxy string,\n" +
-			"no bearer in the prompt). Any extra args are passed straight through to claude.",
+			"no bearer in the prompt). Any extra args are passed straight through to claude.\n\n" +
+			"Use --tier wireguard for a routed Whisper /128 over a userspace WireGuard tunnel.",
 		Args:               cobra.ArbitraryArgs,
 		DisableFlagParsing: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWithEgress(agent, agentFile, "claude", args)
+			return runWithEgress(agent, agentFile, tier, "claude", args)
 		},
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "use THIS agent's egress (id or /128); overrides the persisted agent")
 	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
+	cmd.Flags().StringVar(&tier, "tier", "", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
 	cmd.Flags().SetInterspersed(false)
 	return cmd
 }
@@ -85,7 +89,7 @@ func newClaudeCmd() *cobra.Command {
 // the proxy env at spawn, and execs the child — forwarding stdio and the exit code. On
 // any bring-up failure it returns a plain remediation (never a stack trace) and never
 // spawns the child uncovered.
-func runWithEgress(agent, agentFile, name string, childArgs []string) error {
+func runWithEgress(agent, agentFile, tier, name string, childArgs []string) error {
 	c, err := resolveClient(true, false)
 	if err != nil {
 		return err
@@ -94,6 +98,16 @@ func runWithEgress(agent, agentFile, name string, childArgs []string) error {
 	args := map[string]any{}
 	if sel != "" {
 		args["agent"] = sel
+	}
+	if t := strings.TrimSpace(tier); t != "" {
+		args["tier"] = t
+	}
+	// --tier wireguard (#188): mint a local WG keypair, inject ONLY the public half into the
+	// op:connect args; our private key never leaves this host. No-op otherwise; wgKey threads
+	// the private key into the userspace tunnel bring-up.
+	wgKey, werr := prepareWireGuard(tier, args)
+	if werr != nil {
+		return werr
 	}
 	// cx is the SHORT control-plane ctx: it bounds op:connect and the one-shot verify HTTP
 	// GET, and is cancelled the moment they return. It does NOT bound the local proxy — the
@@ -109,7 +123,7 @@ func runWithEgress(agent, agentFile, name string, childArgs []string) error {
 		cancel()
 		return perr
 	}
-	sess, err := connectAndVerify(cx, c, env.Result, "")
+	sess, err := connectAndVerify(cx, c, env.Result, "", wgKey)
 	cancel() // ends ONLY the control ctx; the proxy stays up (its lifetime is Stop(), below)
 	if err != nil {
 		return err

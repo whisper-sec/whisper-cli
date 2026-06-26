@@ -49,8 +49,27 @@ import (
 	"time"
 )
 
+// Dialer opens ONE upstream byte-pipe to target ("host:port") on behalf of an accepted
+// local client. It is the ONE seam the generic front-end (SOCKS5 / HTTP-CONNECT accept,
+// splice, lifetime) is parameterised over: the egress tier dials the HTTPS-CONNECT egress
+// (upstream below); the WireGuard tier (internal/wgtun) dials straight through the
+// userspace tunnel's netstack. Both reuse the SAME battle-tested front-end (half-close
+// #154, Stop-drain, Background-rooted lifetime #172) — DRY, so every fix lands once.
+//
+// target is always a NAME or IP literal as the local client gave it; a Dialer that egresses
+// remotely (the egress) forwards the NAME so the far side resolves it from the /128 (no
+// local DNS); a Dialer that owns the resolver path (the WG netstack) resolves it over the
+// tunnel. connect MUST NOT log target or any secret it holds.
+type Dialer interface {
+	// Dial is EXPORTED so a Dialer implemented in ANOTHER package (internal/wgtun) can
+	// satisfy this interface — Go only lets the defining package satisfy an interface with
+	// an unexported method, so the cross-package WG dialer requires an exported method here.
+	Dial(ctx context.Context, target string) (net.Conn, error)
+}
+
 // Proxy is a running local forward proxy. Its zero value is not usable; build one
-// with StartLocalProxy. Stop() is idempotent and blocks until the listener is shut.
+// with StartLocalProxy (egress tier) or StartWithDialer (any Dialer, e.g. the WG tunnel).
+// Stop() is idempotent and blocks until the listener is shut.
 //
 // LIFETIME (the load-bearing #172 WB3 fix): the proxy's serving loop is keyed off its
 // OWN context (life/cancel below), cancelled ONLY by Stop(). It is deliberately NOT tied
@@ -67,7 +86,9 @@ type Proxy struct {
 	cancel   context.CancelFunc // cancels life; called by Stop() (and only Stop())
 	stopOnce sync.Once
 	wg       sync.WaitGroup
-	dialer   *upstream
+	osMu     sync.Mutex
+	onStop   func() // optional extra teardown (e.g. the WG device) — run once, under Stop()
+	dialer   Dialer
 }
 
 // Endpoint is the load-bearing connection string: socks5h://127.0.0.1:<port>.
@@ -92,6 +113,24 @@ func (p *Proxy) Stop() {
 		}
 	})
 	p.wg.Wait()
+	// Run any owner teardown (the WG device/health goroutine) AFTER the accept loop and all
+	// tunnels have drained, so no splice can still be dialing the netstack when it closes.
+	// Guarded by stopOnce-effect: onStop is cleared after the first run so a second Stop is a
+	// no-op (Stop is idempotent). wg.Wait is outside stopOnce so concurrent Stops both block.
+	if f := p.takeOnStop(); f != nil {
+		f()
+	}
+}
+
+// takeOnStop atomically returns p.onStop once and nils it, so the teardown runs exactly
+// once even if Stop is called concurrently. (stopOnce already guards listener close/cancel;
+// this guards the heavier device teardown the same way without widening the Once's body.)
+func (p *Proxy) takeOnStop() func() {
+	p.osMu.Lock()
+	defer p.osMu.Unlock()
+	f := p.onStop
+	p.onStop = nil
+	return f
 }
 
 // upstream holds everything needed to open ONE tunnel to the HTTPS-CONNECT egress.
@@ -162,6 +201,36 @@ func StartLocalProxy(ctx context.Context, upstreamHostPort, bearer string, opts 
 		dialTO = 30 * time.Second
 	}
 
+	_ = ctx // accepted for API symmetry + setup, but deliberately NOT the lifetime signal
+	return startWithDialer(&upstream{
+		host:    host,
+		auth:    "Basic " + base64.StdEncoding.EncodeToString([]byte("w:"+tok)),
+		tlsConf: tlsConf,
+		dialTO:  dialTO,
+	}, nil)
+}
+
+// StartWithDialer starts the SAME local forward proxy front-end (SOCKS5 + HTTP-CONNECT,
+// half-close splice, Background-rooted lifetime, Stop-drain) over an arbitrary Dialer.
+// It is how the WireGuard tier (internal/wgtun) reuses every hardened front-end property
+// without re-implementing it: the WG side supplies a Dialer that dials through the userspace
+// tunnel's netstack. onStop (may be nil) runs ONCE under Stop() AFTER the accept loop and all
+// tunnels have drained — the seam to tear down the WG device + its health goroutine cleanly.
+//
+// The returned proxy's lifetime is Stop() ONLY (never a caller ctx), exactly like the egress
+// path — so a persistent connect/run/guided hold gets a live endpoint, not a dead one (#172).
+func StartWithDialer(d Dialer, onStop func()) (*Proxy, error) {
+	if d == nil {
+		return nil, errors.New("egress: nil dialer")
+	}
+	return startWithDialer(d, onStop)
+}
+
+// startWithDialer is the shared constructor both StartLocalProxy and StartWithDialer use:
+// open a loopback port, root the proxy's OWN lifetime at Background (NOT a control ctx), and
+// launch the accept loop. This is the ONE place the front-end is wired, so the egress and WG
+// tiers can never drift on the lifetime/drain contract.
+func startWithDialer(d Dialer, onStop func()) (*Proxy, error) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("egress: cannot open a local proxy port: %w", err)
@@ -171,7 +240,6 @@ func StartLocalProxy(ctx context.Context, upstreamHostPort, bearer string, opts 
 	// The proxy's OWN lifetime — rooted at Background, NOT at the caller's control ctx.
 	// Cancelled only by Stop(). This is what every accept + per-tunnel dial keys off, so
 	// the proxy keeps serving long after the (short-lived) control ctx has been cancelled.
-	_ = ctx // accepted for API symmetry + setup, but deliberately NOT the lifetime signal
 	life, cancel := context.WithCancel(context.Background())
 
 	p := &Proxy{
@@ -180,12 +248,8 @@ func StartLocalProxy(ctx context.Context, upstreamHostPort, bearer string, opts 
 		ln:       ln,
 		life:     life,
 		cancel:   cancel,
-		dialer: &upstream{
-			host:    host,
-			auth:    "Basic " + base64.StdEncoding.EncodeToString([]byte("w:"+tok)),
-			tlsConf: tlsConf,
-			dialTO:  dialTO,
-		},
+		onStop:   onStop,
+		dialer:   d,
 	}
 
 	p.wg.Add(1)
@@ -279,7 +343,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 		return
 	}
 
-	up, err := p.dialer.connect(ctx, target)
+	up, err := p.dialer.Dial(ctx, target)
 	if err != nil {
 		socks5Reply(conn, 0x05) // connection refused (a generic, non-leaky failure)
 		return
@@ -357,7 +421,7 @@ func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader)
 		_, _ = io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
-	up, err := p.dialer.connect(ctx, target)
+	up, err := p.dialer.Dial(ctx, target)
 	if err != nil {
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
@@ -375,7 +439,7 @@ func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader)
 // the et_ bearer in Proxy-Authorization. On a 2xx the returned conn is the live byte
 // pipe to <target> (sourced from the agent's /128). The bearer is read from u.auth
 // (in-memory only) and is NEVER logged or returned in any error.
-func (u *upstream) connect(ctx context.Context, target string) (net.Conn, error) {
+func (u *upstream) Dial(ctx context.Context, target string) (net.Conn, error) {
 	d := &net.Dialer{Timeout: u.dialTO}
 	raw, err := d.DialContext(ctx, "tcp", u.host)
 	if err != nil {

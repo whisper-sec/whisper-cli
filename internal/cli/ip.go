@@ -52,8 +52,9 @@ func newIPCmd() *cobra.Command {
 			if perr := envelopeError(env); perr != nil {
 				return perr
 			}
-			// Bring the egress up, fetch the echo THROUGH it, assert == /128.
-			sess, err := connectAndVerify(cx, c, env.Result, "")
+			// Bring the egress up, fetch the echo THROUGH it, assert == /128. `whisper ip`
+			// uses the default tier (the verify is identical across tiers) — nil wgKey.
+			sess, err := connectAndVerify(cx, c, env.Result, "", nil)
 			if err != nil {
 				// A clean, non-leaky failure: render the remediation + a non-zero exit.
 				if g.jsonOut {

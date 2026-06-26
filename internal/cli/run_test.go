@@ -79,7 +79,7 @@ func TestRun_EnvInjectedAtSpawn(t *testing.T) {
 
 	// The child prints its inherited ALL_PROXY; we capture the real stdout fd.
 	stdout, _ := captureStd(t, func() {
-		_ = runWithEgress("2a04:2a01:9::abcd", "", "sh", []string{"-c", "printf '%s' \"$ALL_PROXY\""})
+		_ = runWithEgress("2a04:2a01:9::abcd", "", "", "sh", []string{"-c", "printf '%s' \"$ALL_PROXY\""})
 	})
 	if !strings.HasPrefix(stdout, "socks5h://127.0.0.1:") {
 		t.Fatalf("child did not inherit ALL_PROXY at spawn, child stdout=%q", stdout)
@@ -100,7 +100,7 @@ func TestRun_MissingBinaryCleanError(t *testing.T) {
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", quiet: true, timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 
-	err := runWithEgress("2a04:2a01:9::abcd", "", "definitely-not-a-real-binary-xyzzy", nil)
+	err := runWithEgress("2a04:2a01:9::abcd", "", "", "definitely-not-a-real-binary-xyzzy", nil)
 	if err == nil || !isUsageError(err) {
 		t.Fatalf("a missing child binary must be a clean usage error, got %v", err)
 	}

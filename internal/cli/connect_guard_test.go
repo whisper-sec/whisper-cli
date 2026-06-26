@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
 // recordingServer stubs the control plane for the connect/create command tests: it records
@@ -33,12 +34,12 @@ func stubEgressTail(t *testing.T) func() {
 	t.Helper()
 	savedConnect := connectAndVerify
 	savedHold := holdUntilSignal
-	connectAndVerify = func(_ context.Context, _ *client.Client, res *client.Result, name string) (*egressSession, error) {
+	connectAndVerify = func(_ context.Context, _ *client.Client, res *client.Result, name string, _ *wgtun.Keypair) (*egressSession, error) {
 		ce, err := parseConnectEnvelope(res)
 		if err != nil {
 			return nil, err
 		}
-		return &egressSession{endpoint: "socks5h://127.0.0.1:1080", addr: ce.address, name: name, verified: true}, nil
+		return &egressSession{endpoint: "socks5h://127.0.0.1:1080", addr: ce.address, name: name, tier: firstNonBlank(ce.tier, "socks5"), verified: true}, nil
 	}
 	holdUntilSignal = func(sess *egressSession) { sess.Stop() } // never park on a signal in a test
 	return func() { connectAndVerify = savedConnect; holdUntilSignal = savedHold }
