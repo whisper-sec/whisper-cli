@@ -19,8 +19,9 @@ import (
 // --- connect ---------------------------------------------------------------------
 
 func newConnectCmd() *cobra.Command {
-	var tier, label, email, name, agent, agentFile string
-	var verbose bool
+	var tier, label, email, name, agent, agentFile, configFile string
+	var verbose, ensure bool
+	var port int
 	cmd := &cobra.Command{
 		Use:   "connect",
 		Short: "Connect egress bound to your /128 (Tier-1.5 SOCKS5 proxy, or Tier-1 WireGuard)",
@@ -42,6 +43,14 @@ func newConnectCmd() *cobra.Command {
 			"required). connect never mints an unnamed agent.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// --ensure: the IDEMPOTENT daemon path (used by `whisper init claude` + the
+			// SessionStart hook). Reuse a live proxy on the project's pinned port, else spawn
+			// the tunnel DETACHED and wait (bounded) until it's live. It does NOT hold this
+			// process open — the daemon does. Reads .whisper/config (via --config or discovery).
+			if ensure {
+				return runEnsure(configFile, port)
+			}
+
 			args := map[string]any{}
 			if tier != "" {
 				args["tier"] = tier
@@ -136,7 +145,17 @@ func newConnectCmd() *cobra.Command {
 			// We bring up the local proxy/tunnel, fold verify in (echo through it → assert ==
 			// the agent /128), then print ONE success line. No secret ever appears in output,
 			// env, or a persisted file.
-			sess, cerr := connectAndVerify(cx, c, env.Result, displayName(env.Result), wgKey)
+			//
+			// --port pins the local loopback port (0 ⇒ a free one). A pinned port goes through
+			// connectAndVerifyOnPort directly (the connectAndVerify var is the test stub seam;
+			// a pinned port binds a REAL socket those stubs must not shadow).
+			var sess *egressSession
+			var cerr error
+			if port > 0 {
+				sess, cerr = connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), wgKey, port)
+			} else {
+				sess, cerr = connectAndVerify(cx, c, env.Result, displayName(env.Result), wgKey)
+			}
 			if cerr != nil {
 				return cerr
 			}
@@ -158,7 +177,37 @@ func newConnectCmd() *cobra.Command {
 	_ = cmd.Flags().MarkHidden("label") // --name is the documented spelling
 	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show the full egress detail block (default: one line)")
+	cmd.Flags().BoolVar(&ensure, "ensure", false, "idempotent: reuse a live proxy on the project's port, else start the tunnel as a detached daemon (used by `whisper init claude`)")
+	cmd.Flags().IntVar(&port, "port", 0, "pin the local proxy to a fixed loopback port (default: a free one)")
+	cmd.Flags().StringVar(&configFile, "config", "", "path to a project's .whisper/config (for --ensure; default: discovered from the cwd)")
 	return cmd
+}
+
+// runEnsure is the body of `whisper connect --ensure`: resolve the project config (a pinned
+// --port overrides the config's port — used by `init` before the config exists / to re-pin),
+// then idempotently reuse-or-spawn the detached daemon and print a calm one-liner. It returns
+// 0 when the proxy is live (reused OR freshly started), so a SessionStart hook gates on the
+// exit code.
+func runEnsure(configFile string, portOverride int) error {
+	p, cfg, err := loadProjectConfig(configFile)
+	if err != nil {
+		return err
+	}
+	if portOverride > 0 {
+		cfg.Port = portOverride
+	}
+	_, alreadyLive, derr := ensureDaemon(p, cfg)
+	if derr != nil {
+		return derr
+	}
+	if !g.quiet {
+		if alreadyLive {
+			fmt.Fprintf(os.Stderr, "whisper: connection already live on 127.0.0.1:%d\n", cfg.Port)
+		} else {
+			fmt.Fprintf(os.Stderr, "whisper: connection up on 127.0.0.1:%d\n", cfg.Port)
+		}
+	}
+	return nil
 }
 
 // resolveAgentSelector picks the agent selector for op:connect in precedence order:

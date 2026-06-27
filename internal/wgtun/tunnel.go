@@ -74,6 +74,10 @@ type Options struct {
 	// Logf, if set, receives one-line operational notes (reconnects). nil ⇒ silent. It must
 	// NEVER be handed a secret — callers pass a plain stderr writer; we only emit safe text.
 	Logf func(format string, args ...any)
+	// Port pins the LOCAL loopback port the tunnel's front-end proxy listens on. 0 ⇒ a free
+	// port (the default). `whisper init --tier wireguard` sets the project's DETERMINISTIC
+	// port so a re-ensure reuses the same 127.0.0.1:<port>.
+	Port int
 }
 
 // Tunnel is a live userspace WireGuard egress: the bearer-free local SOCKS5/HTTP endpoint a

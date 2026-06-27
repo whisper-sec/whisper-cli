@@ -153,6 +153,11 @@ type Options struct {
 	Insecure bool
 	// DialTimeout bounds a single upstream dial+CONNECT. 0 ⇒ 30s.
 	DialTimeout time.Duration
+	// Port pins the LOCAL loopback port the proxy listens on. 0 ⇒ pick a free port
+	// (the zero-config default, every persistent connect today). `whisper init` sets a
+	// DETERMINISTIC per-project port here so the same project always reuses the same
+	// 127.0.0.1:<port> across runs (and Claude Code's settings env can point at it).
+	Port int
 }
 
 // StartLocalProxy starts the in-process forward proxy on 127.0.0.1:<free port> and
@@ -207,7 +212,7 @@ func StartLocalProxy(ctx context.Context, upstreamHostPort, bearer string, opts 
 		auth:    "Basic " + base64.StdEncoding.EncodeToString([]byte("w:"+tok)),
 		tlsConf: tlsConf,
 		dialTO:  dialTO,
-	}, nil)
+	}, nil, opts.Port)
 }
 
 // StartWithDialer starts the SAME local forward proxy front-end (SOCKS5 + HTTP-CONNECT,
@@ -220,20 +225,29 @@ func StartLocalProxy(ctx context.Context, upstreamHostPort, bearer string, opts 
 // The returned proxy's lifetime is Stop() ONLY (never a caller ctx), exactly like the egress
 // path — so a persistent connect/run/guided hold gets a live endpoint, not a dead one (#172).
 func StartWithDialer(d Dialer, onStop func()) (*Proxy, error) {
+	return StartWithDialerPort(d, onStop, 0)
+}
+
+// StartWithDialerPort is StartWithDialer with an explicit local loopback port (0 ⇒ a free
+// port). `whisper init --tier wireguard` threads the project's DETERMINISTIC port through
+// here so the WG tier listens on the same fixed 127.0.0.1:<port> the egress tier would —
+// the two tiers stay byte-identical on the local surface (only the upstream leg differs).
+func StartWithDialerPort(d Dialer, onStop func(), port int) (*Proxy, error) {
 	if d == nil {
 		return nil, errors.New("egress: nil dialer")
 	}
-	return startWithDialer(d, onStop)
+	return startWithDialer(d, onStop, port)
 }
 
 // startWithDialer is the shared constructor both StartLocalProxy and StartWithDialer use:
 // open a loopback port, root the proxy's OWN lifetime at Background (NOT a control ctx), and
 // launch the accept loop. This is the ONE place the front-end is wired, so the egress and WG
-// tiers can never drift on the lifetime/drain contract.
-func startWithDialer(d Dialer, onStop func()) (*Proxy, error) {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
+// tiers can never drift on the lifetime/drain contract. wantPort pins the loopback port
+// (0 ⇒ a free one); a pinned port already in use is a clean, non-leaky error.
+func startWithDialer(d Dialer, onStop func(), wantPort int) (*Proxy, error) {
+	ln, err := listenLoopback(wantPort)
 	if err != nil {
-		return nil, fmt.Errorf("egress: cannot open a local proxy port: %w", err)
+		return nil, err
 	}
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
 
@@ -255,6 +269,26 @@ func startWithDialer(d Dialer, onStop func()) (*Proxy, error) {
 	p.wg.Add(1)
 	go p.serve()
 	return p, nil
+}
+
+// listenLoopback opens a TCP listener on 127.0.0.1. wantPort 0 ⇒ the OS picks a free port
+// (the zero-config default); a non-zero wantPort pins that exact port so a project's
+// deterministic proxy is always reachable at the same address. A pinned port already in
+// use (e.g. a stale or foreign listener) is a clean, actionable error — never an opaque
+// stack trace (Postel: fail with a clear message).
+func listenLoopback(wantPort int) (net.Listener, error) {
+	addr := "127.0.0.1:0"
+	if wantPort > 0 {
+		addr = "127.0.0.1:" + strconv.Itoa(wantPort)
+	}
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		if wantPort > 0 {
+			return nil, fmt.Errorf("egress: local port %d is already in use — is another whisper proxy running?", wantPort)
+		}
+		return nil, fmt.Errorf("egress: cannot open a local proxy port: %w", err)
+	}
+	return ln, nil
 }
 
 // serve is the accept loop. Each accepted local conn is handled on its own goroutine

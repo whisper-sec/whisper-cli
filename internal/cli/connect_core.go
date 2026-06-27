@@ -223,14 +223,18 @@ func extractUpstream(proxyURL string) (host, bearer string, isTLS bool) {
 // in via verifyEgress. For the egress tier the bearer is handed to StartLocalProxy and never
 // kept; for the WireGuard tier wgKey carries OUR private key (in-memory only) — handed to the
 // userspace device and never surfaced. wgKey is nil for the egress tiers.
-func bringUpEgress(ctx context.Context, ce connectEnvelope, wgKey *wgtun.Keypair) (*egressSession, error) {
+//
+// port pins the LOCAL loopback port (0 ⇒ a free one). Every interactive caller passes 0
+// (zero-config); `whisper init`/`connect --ensure` pass the project's DETERMINISTIC port so
+// the daemon always binds the same 127.0.0.1:<port> Claude Code's settings point at.
+func bringUpEgress(ctx context.Context, ce connectEnvelope, wgKey *wgtun.Keypair, port int) (*egressSession, error) {
 	if ce.isWireGuard() {
-		return bringUpWireGuard(ce, wgKey)
+		return bringUpWireGuard(ce, wgKey, port)
 	}
-	proxy, err := egress.StartLocalProxy(ctx, ce.upstreamHostPort, ce.bearer, egress.Options{})
+	proxy, err := egress.StartLocalProxy(ctx, ce.upstreamHostPort, ce.bearer, egress.Options{Port: port})
 	if err != nil {
 		return nil, &client.ProblemError{Status: 502,
-			Detail: "couldn't start the local connection — please try again"}
+			Detail: cleanProxyError(err)}
 	}
 	return &egressSession{
 		endpoint: proxy.Endpoint(),
@@ -240,12 +244,23 @@ func bringUpEgress(ctx context.Context, ce connectEnvelope, wgKey *wgtun.Keypair
 	}, nil
 }
 
+// cleanProxyError maps a local-proxy bring-up error to a plain remediation. A pinned-port
+// collision (egress reports the port is in use) is surfaced verbatim — it is already a
+// clear, secret-free, actionable line ("local port N is already in use…"); everything else
+// collapses to the generic retry line (never a stack trace).
+func cleanProxyError(err error) string {
+	if err != nil && strings.Contains(err.Error(), "already in use") {
+		return strings.TrimPrefix(err.Error(), "egress: ")
+	}
+	return "couldn't start the local connection — please try again"
+}
+
 // bringUpWireGuard brings up the userspace WireGuard tunnel (Tier-1, #188) and returns a live
 // session whose local SOCKS5/HTTP endpoint egresses from the agent's /128 over the tunnel. The
 // private key is OURS (wgKey, generated locally) on the best-practice path; only if the server
 // minted one (zero-key path) do we fall back to its returned base64 client_private_key. The
 // key is handed ONLY to the device and never surfaced/logged/persisted.
-func bringUpWireGuard(ce connectEnvelope, wgKey *wgtun.Keypair) (*egressSession, error) {
+func bringUpWireGuard(ce connectEnvelope, wgKey *wgtun.Keypair, port int) (*egressSession, error) {
 	privHex := ""
 	if wgKey != nil {
 		privHex = wgKey.PrivateKeyHex
@@ -268,7 +283,7 @@ func bringUpWireGuard(ce connectEnvelope, wgKey *wgtun.Keypair) (*egressSession,
 	if !g.quiet {
 		logf = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
 	}
-	tun, err := wgtun.Start(cfg, wgtun.Options{Logf: logf})
+	tun, err := wgtun.Start(cfg, wgtun.Options{Logf: logf, Port: port})
 	if err != nil {
 		return nil, &client.ProblemError{Status: 502, Detail: cleanWgError(err)}
 	}
@@ -329,11 +344,21 @@ func verifyEgress(ctx context.Context, c *client.Client, s *egressSession) error
 var connectAndVerify = connectAndVerifyLive
 
 func connectAndVerifyLive(ctx context.Context, c *client.Client, res *client.Result, name string, wgKey *wgtun.Keypair) (*egressSession, error) {
+	// Interactive callers (connect/run/ip/guided) use a free port — pin nothing.
+	return connectAndVerifyOnPort(ctx, c, res, name, wgKey, 0)
+}
+
+// connectAndVerifyOnPort is connectAndVerifyLive with an explicit pinned local port (0 ⇒ a
+// free one). The daemon path (`connect --ensure`) calls it with the project's DETERMINISTIC
+// port so the held proxy always binds the same 127.0.0.1:<port>. It deliberately does NOT
+// route through the connectAndVerify package var — the var is the stub seam for command
+// tests, and the daemon binds a REAL port that those stubs must never shadow.
+func connectAndVerifyOnPort(ctx context.Context, c *client.Client, res *client.Result, name string, wgKey *wgtun.Keypair, port int) (*egressSession, error) {
 	ce, err := parseConnectEnvelope(res)
 	if err != nil {
 		return nil, err
 	}
-	sess, err := bringUpEgress(ctx, ce, wgKey)
+	sess, err := bringUpEgress(ctx, ce, wgKey, port)
 	if err != nil {
 		return nil, err
 	}

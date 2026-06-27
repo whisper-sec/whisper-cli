@@ -96,6 +96,7 @@ whisper connect --tier wireguard   # Tier-1: routed /128 over a userspace WireGu
 whisper ip                 # print your egress IP and verify it IS your /128 (exit 0 = verified)
 whisper run -- curl ifconfig.co   # run any command with your Whisper egress wired in
 whisper claude             # run Claude Code through your Whisper egress, one step
+whisper init claude        # wire THIS project so Claude Code always egresses from its own /128
 whisper use my-agent       # choose the agent the rest of `whisper` binds to
 whisper status             # key state, selected agent, connection state
 ```
@@ -103,6 +104,15 @@ whisper status             # key state, selected agent, connection state
 `whisper ip` is exit-code-first: `0` when the observed egress address is inside
 `2a04:2a01::/32` *and* equals your selected agent's `/128`, `1` otherwise — so scripts
 and agents can gate on it. Add `--json` to any command for the raw, scriptable envelope.
+
+**Per-project agent identity for Claude Code.** `whisper init claude` makes a project
+zero-config: run it once in a directory and Claude Code there — and every subagent it
+spawns — egresses from that project's own `/128`, over SOCKS5 (default) or `--tier
+wireguard`. It pins the project's agent + tier in `.whisper/config`, wires a local proxy
+into `.claude/settings.local.json` (merge-safe — it never clobbers your settings), and
+keeps the connection up via a small auto-reconnecting daemon. Different projects, different
+identities, nothing to remember. Pass `--agent <name|/128>` to reuse an existing agent or
+`--name <new>` to mint one.
 
 Other useful commands: `whisper list`, `whisper logs`, `whisper policy`, `whisper rdap
 <address>`, `whisper verify <address>`, `whisper login`, `whisper dash` (the full-screen

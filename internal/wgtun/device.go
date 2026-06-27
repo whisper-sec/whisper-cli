@@ -89,9 +89,11 @@ func Start(cfg Config, opts Options) (*Tunnel, error) {
 
 	// 4. The shared egress front-end over a netstack dialer. onStop closes the device AFTER
 	//    the accept loop + all splices drain (Stop ordering), so nothing dials a dead netstack.
-	proxy, err := egress.StartWithDialer(&netDialer{tnet: tnet, timeout: t.dialTO}, func() {
+	//    opts.Port (0 ⇒ a free port) pins the loopback port so `whisper init --tier wireguard`
+	//    reuses the project's deterministic 127.0.0.1:<port> across re-ensures.
+	proxy, err := egress.StartWithDialerPort(&netDialer{tnet: tnet, timeout: t.dialTO}, func() {
 		dev.Close()
-	})
+	}, opts.Port)
 	if err != nil {
 		dev.Close()
 		return nil, errors.New("could not open the local connection — please try again")

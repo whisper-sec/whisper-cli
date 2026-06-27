@@ -459,6 +459,43 @@ func TestProxy_RejectedBearerSurfacesCleanFailure(t *testing.T) {
 
 // TestProxy_EndpointShapeAndStop: the endpoint is a loopback socks5h URL, and Stop() is
 // clean + idempotent (the listener is closed; a second Stop is a no-op).
+// TestProxy_PinnedPort verifies the #191 deterministic-port path: Options.Port pins the local
+// proxy to an exact loopback port, and a port already in use surfaces a clean, actionable
+// "already in use" error (never an opaque stack trace). The interactive default (Port:0) keeps
+// picking a free port.
+func TestProxy_PinnedPort(t *testing.T) {
+	backend := echoBackend(t)
+	fe := newFakeEgress(t, backend, nil)
+
+	// Grab a known-free port (bind, capture, release) and pin the proxy to it.
+	probe, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, ps, _ := net.SplitHostPort(probe.Addr().String())
+	var want int
+	fmt.Sscanf(ps, "%d", &want)
+	_ = probe.Close()
+
+	p, err := StartLocalProxy(context.Background(), fe.addr(), "et_pin", Options{Insecure: true, Port: want})
+	if err != nil {
+		t.Fatalf("StartLocalProxy(pinned): %v", err)
+	}
+	t.Cleanup(p.Stop)
+	if p.Addr() != fmt.Sprintf("127.0.0.1:%d", want) {
+		t.Fatalf("pinned proxy addr = %q, want 127.0.0.1:%d", p.Addr(), want)
+	}
+
+	// A SECOND proxy pinned to the SAME (now-taken) port must fail with a clear in-use error.
+	_, err2 := StartLocalProxy(context.Background(), fe.addr(), "et_pin2", Options{Insecure: true, Port: want})
+	if err2 == nil {
+		t.Fatal("pinning an already-bound port must error")
+	}
+	if !strings.Contains(err2.Error(), "already in use") {
+		t.Fatalf("port-collision error = %q, want an 'already in use' message", err2.Error())
+	}
+}
+
 func TestProxy_EndpointShapeAndStop(t *testing.T) {
 	backend := echoBackend(t)
 	fe := newFakeEgress(t, backend, nil)
