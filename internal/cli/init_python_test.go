@@ -93,7 +93,7 @@ func TestInitPython_NeverClobbersUserDotEnv(t *testing.T) {
 // that, reused from init claude, could redirect a write/remove onto a user file). --agent and
 // --name remain.
 func TestInitPython_NoAgentFileFlag(t *testing.T) {
-	cmd := newInitPythonCmd()
+	cmd := newInitEnvToolCmd(pythonProfile())
 	if f := cmd.Flags().Lookup("agent-file"); f != nil {
 		t.Fatalf("init python must NOT expose --agent-file (clobber risk)")
 	}
@@ -101,6 +101,67 @@ func TestInitPython_NoAgentFileFlag(t *testing.T) {
 		if cmd.Flags().Lookup(want) == nil {
 			t.Fatalf("init python missing expected flag --%s", want)
 		}
+	}
+}
+
+// TestEnvToolProfiles_RegisterCleanly: every env-tool profile builds a valid subcommand with the
+// expected flags and NO --agent-file (the clobber-risk flag), and the expected tools are present.
+func TestEnvToolProfiles_RegisterCleanly(t *testing.T) {
+	want := map[string]bool{"python": false, "gemini": false, "aider": false, "ai-sdk": false}
+	for _, prof := range envToolProfiles() {
+		if _, ok := want[prof.name]; !ok {
+			continue
+		}
+		want[prof.name] = true
+		cmd := newInitEnvToolCmd(prof)
+		if cmd.Use != prof.name {
+			t.Fatalf("profile %q built command Use=%q", prof.name, cmd.Use)
+		}
+		if cmd.Flags().Lookup("agent-file") != nil {
+			t.Fatalf("init %s must NOT expose --agent-file", prof.name)
+		}
+		if cmd.Flags().Lookup("agent") == nil || cmd.Flags().Lookup("tier") == nil {
+			t.Fatalf("init %s missing core flags", prof.name)
+		}
+		if prof.runExample == "" || prof.covers == "" {
+			t.Fatalf("profile %q missing runExample/covers", prof.name)
+		}
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Fatalf("expected env-tool profile %q to be registered", name)
+		}
+	}
+}
+
+// TestInitGemini_WritesProxyEnv: a non-python env-tool (gemini) writes the same wholly-owned
+// proxy.env + config and does NOT touch .claude/.
+func TestInitGemini_WritesProxyEnv(t *testing.T) {
+	srv := recordingServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:9::abcd"}}, nil)
+	defer srv.Close()
+	defer stubEnsureDaemon(t)()
+
+	dir := t.TempDir()
+	savedG := g
+	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
+	defer func() { g = savedG }()
+
+	var gemini envToolProfile
+	for _, p := range envToolProfiles() {
+		if p.name == "gemini" {
+			gemini = p
+		}
+	}
+	if err := runInitEnvTool(initOptions{tier: "socks5", agent: "2a04:2a01:9::abcd", dir: dir}, gemini); err != nil {
+		t.Fatalf("runInitEnvTool gemini: %v", err)
+	}
+	p := projcfg.PathsFor(dir)
+	body := readFileTrim(t, p.ProxyEnvFile)
+	if !strings.Contains(body, "HTTPS_PROXY=http://127.0.0.1:") || !strings.Contains(body, "NODE_USE_ENV_PROXY=1") {
+		t.Fatalf("gemini proxy.env wrong:\n%s", body)
+	}
+	if _, err := os.Stat(p.ClaudeLocal); !os.IsNotExist(err) {
+		t.Fatalf("init gemini must not write .claude/settings.local.json")
 	}
 }
 
