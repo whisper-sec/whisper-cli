@@ -134,6 +134,58 @@ func TestEnvToolProfiles_RegisterCleanly(t *testing.T) {
 	}
 }
 
+// TestRecipeProfiles_HaveRecipes: the Node/browser targets carry a printed code recipe (they do
+// NOT auto-read proxy env) and register with their aliases.
+func TestRecipeProfiles_HaveRecipes(t *testing.T) {
+	want := map[string]bool{"browser-use": false, "discord": false, "telegram": false}
+	for _, prof := range envToolProfiles() {
+		if _, ok := want[prof.name]; !ok {
+			continue
+		}
+		want[prof.name] = true
+		if len(prof.recipe) == 0 {
+			t.Fatalf("%s must carry a code recipe (frameworks don't auto-read proxy env)", prof.name)
+		}
+		if cmd := newInitEnvToolCmd(prof); cmd.Flags().Lookup("agent-file") != nil {
+			t.Fatalf("init %s must NOT expose --agent-file", prof.name)
+		}
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Fatalf("expected recipe profile %q registered", name)
+		}
+	}
+}
+
+// TestInitNotebook_WritesProxyEnvAndCell: `init notebook` wires proxy.env + config and the cell
+// renderer interpolates the actual port.
+func TestInitNotebook_WritesProxyEnvAndCell(t *testing.T) {
+	srv := recordingServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:9::abcd"}}, nil)
+	defer srv.Close()
+	defer stubEnsureDaemon(t)()
+
+	dir := t.TempDir()
+	savedG := g
+	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
+	defer func() { g = savedG }()
+
+	if err := runInitNotebook(initOptions{tier: "socks5", agent: "2a04:2a01:9::abcd", dir: dir}); err != nil {
+		t.Fatalf("runInitNotebook: %v", err)
+	}
+	p := projcfg.PathsFor(dir)
+	cfg, _ := projcfg.Load(p)
+	if cfg == nil {
+		t.Fatal("no config written")
+	}
+	cell := strings.Join(notebookCell(cfg.Port), "\n")
+	if !strings.Contains(cell, itoaTest(cfg.Port)) || !strings.Contains(cell, "os.environ.update") {
+		t.Fatalf("notebook cell missing port/os.environ:\n%s", cell)
+	}
+	if strings.Contains(cell, "whisper_live_") && !strings.Contains(cell, "whisper_live_xxx") {
+		t.Fatalf("notebook cell must only use the redacted key placeholder")
+	}
+}
+
 // TestInitGemini_WritesProxyEnv: a non-python env-tool (gemini) writes the same wholly-owned
 // proxy.env + config and does NOT touch .claude/.
 func TestInitGemini_WritesProxyEnv(t *testing.T) {

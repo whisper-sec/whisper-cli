@@ -50,7 +50,11 @@ func newInitCmd() *cobra.Command {
 			"  whisper init gemini   the Google Gemini CLI (proxy env)\n" +
 			"  whisper init aider    aider, the AI pair programmer (proxy env)\n" +
 			"  whisper init ai-sdk   the Vercel AI SDK / Node agents (proxy env)\n" +
-			"  whisper init zed      the Zed editor (proxy env; + a printed global-settings line)",
+			"  whisper init zed      the Zed editor (proxy env; + a printed global-settings line)\n" +
+			"  whisper init browser-use   browser-use + browser launch proxy (recipe)\n" +
+			"  whisper init discord  a discord.js bot (undici proxy agent recipe)\n" +
+			"  whisper init telegram a grammY/Telegraf bot (SOCKS agent recipe)\n" +
+			"  whisper init notebook a one-cell Colab/Kaggle/Jupyter kernel egress",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Bare `whisper init` with no subcommand: guide, don't dump help.
@@ -63,7 +67,100 @@ func newInitCmd() *cobra.Command {
 	for _, prof := range envToolProfiles() {
 		cmd.AddCommand(newInitEnvToolCmd(prof))
 	}
+	cmd.AddCommand(newInitNotebookCmd())
 	return cmd
+}
+
+// newInitNotebookCmd builds `whisper init notebook`: prints a paste-ready FIRST cell that points a
+// Colab/Kaggle/Jupyter kernel at the project's /128. Unlike the env-tools, the cell SETS os.environ
+// (it provides the env rather than consuming it), so it needs the actual port baked in — hence a
+// dedicated command rather than a static-recipe profile.
+func newInitNotebookCmd() *cobra.Command {
+	var tier, agent, name, dir string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "notebook",
+		Short: "Zero-config: a one-cell Colab/Kaggle/Jupyter kernel egress from a Whisper /128",
+		Long: "Wire the current project and print a paste-ready FIRST cell that makes a notebook\n" +
+			"kernel (Colab/Kaggle/Jupyter) egress from the project's Whisper /128.\n\n" +
+			"Local Jupyter: the cell just sets os.environ (the local daemon is already up). Hosted\n" +
+			"Colab/Kaggle: the proxy must run inside the VM — uncomment the bootstrap lines in the cell.",
+		Args: cobraNoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runInitNotebook(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force})
+		},
+	}
+	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
+	cmd.Flags().StringVar(&agent, "agent", "", "use this existing agent (id or /128)")
+	cmd.Flags().StringVar(&name, "name", "", "create a new agent with this human name")
+	cmd.Flags().StringVar(&dir, "dir", "", "the project directory (default: the current directory)")
+	cmd.Flags().BoolVar(&force, "force", false, "re-init / overwrite the Whisper-managed setup")
+	return cmd
+}
+
+// runInitNotebook wires the project (backbone + proxy.env + daemon) and prints the paste-ready cell.
+func runInitNotebook(opts initOptions) error {
+	p, cfg, err := initBackbone(opts)
+	if err != nil {
+		return err
+	}
+	pres, err := projcfg.WriteProxyEnv(p, cfg.Port)
+	if err != nil {
+		return err
+	}
+	ignored, _ := projcfg.EnsureGitignoredEntries(p, []string{".whisper/"})
+	_, alreadyLive, derr := ensureDaemon(p, cfg)
+	daemonNote := ""
+	if derr != nil {
+		daemonNote = derr.Error()
+	}
+
+	if g.jsonOut {
+		j := initSummaryJSON(p, cfg, alreadyLive, daemonNote)
+		j["tool"] = "notebook"
+		j["proxyEnv"] = p.ProxyEnvFile
+		j["created"] = pres.Created
+		emitJSONValue(j)
+		return nil
+	}
+	if g.quiet {
+		fmt.Fprintf(os.Stdout, "http://127.0.0.1:%d\n", cfg.Port)
+		return nil
+	}
+
+	w := os.Stderr
+	fmt.Fprintln(w, "whisper: this project is wired for notebook ✓")
+	printInitHeader(w, p, cfg)
+	fmt.Fprintf(w, "  env      %s\n", p.ProxyEnvFile)
+	if len(ignored) > 0 {
+		fmt.Fprintf(w, "  gitignored %s\n", strings.Join(ignored, ", "))
+	}
+	printConnectionStatus(w, alreadyLive, daemonNote, "`whisper connect --ensure` will bring it up")
+
+	for _, line := range notebookCell(cfg.Port) {
+		fmt.Fprintf(w, "%s\n", line)
+	}
+	fmt.Fprintf(w, "\nverify (in the kernel, after the cell):\n    import urllib.request as u; print(u.urlopen('https://api64.ipify.org').read().decode())\n    # → %s\n", cfg.Agent)
+	return nil
+}
+
+// notebookCell renders the paste-ready first cell for the given local proxy port.
+func notebookCell(port int) []string {
+	httpForm := fmt.Sprintf("http://127.0.0.1:%d", port)
+	socks := fmt.Sprintf("socks5h://127.0.0.1:%d", port)
+	return []string{
+		"\npaste this as the FIRST cell of your notebook:",
+		"    # --- Whisper egress (run first) ---",
+		"    import os",
+		fmt.Sprintf("    _P, _S = %q, %q", httpForm, socks),
+		"    os.environ.update(HTTP_PROXY=_P, HTTPS_PROXY=_P, ALL_PROXY=_S,",
+		"                      http_proxy=_P, https_proxy=_P, all_proxy=_S,",
+		"                      NO_PROXY=\"localhost,127.0.0.1,::1\", no_proxy=\"localhost,127.0.0.1,::1\")",
+		"    # Hosted Colab/Kaggle? the proxy must run INSIDE the VM — uncomment:",
+		"    # import subprocess; key = os.environ.get(\"WHISPER_API_KEY\", \"whisper_live_xxx\")",
+		"    # subprocess.run(\"curl -fsSL https://cli.whisper.online/dl/linux-amd64/whisper -o /tmp/whisper && chmod +x /tmp/whisper\", shell=True, check=True)",
+		fmt.Sprintf("    # subprocess.Popen(f\"WHISPER_API_KEY={key} /tmp/whisper connect --port %d\", shell=True)", port),
+	}
 }
 
 func newInitClaudeCmd() *cobra.Command {
@@ -109,10 +206,16 @@ func newInitClaudeCmd() *cobra.Command {
 // This is the seam that makes adding a new `whisper init <tool>` a one-line profile.
 type envToolProfile struct {
 	name       string   // subcommand + display token, e.g. "python", "gemini"
+	aliases    []string // alternate names (e.g. "discordjs" for "discord")
 	short      string   // one-line cobra Short
 	covers     string   // human note of what it covers (frameworks/runtimes)
 	runExample string   // the command shown after `whisper run`, e.g. "python script.py", "gemini"
 	notes      []string // honest caveats printed in the summary (silent-wrong-source traps etc.)
+	// recipe is an optional verbatim code block printed under "wire it into your code:". Some
+	// runtimes (Node bot frameworks, browser automation) do NOT auto-read the proxy env — they
+	// need an explicit proxy agent in source. For those, proxy.env supplies the values and this
+	// recipe shows the (small) code that consumes them. Empty for pure auto-env tools.
+	recipe []string
 }
 
 // envToolProfiles is the registry of env-proxy init targets. Add a tool here and it gets a fully
@@ -153,6 +256,62 @@ func envToolProfiles() []envToolProfile {
 			},
 		},
 		{
+			name: "browser-use", aliases: []string{"browseruse"},
+			short:      "Zero-config: make browser-use (and its browser) egress from a Whisper /128",
+			covers:     "browser-use — its LLM calls (httpx) honor the proxy env; the browser itself needs the proxy passed at launch (recipe below)",
+			runExample: "python agent.py",
+			notes: []string{
+				"the LLM/httpx leg uses the proxy env (activate above); the BROWSER leg needs the proxy passed at launch — see the recipe.",
+			},
+			recipe: []string{
+				"from browser_use import Agent, BrowserSession, BrowserProfile",
+				"from browser_use.browser import ProxySettings  # also re-exported from browser_use",
+				"import os",
+				"p = os.environ[\"HTTPS_PROXY\"]            # http://127.0.0.1:<port> (from .whisper/proxy.env)",
+				"profile = BrowserProfile(",
+				"    proxy=ProxySettings(server=p, bypass=\"localhost,127.0.0.1,::1\"),",
+				"    args=[f\"--proxy-server={p}\", \"--proxy-bypass-list=localhost;127.0.0.1;[::1]\", \"--disable-quic\"],",
+				")",
+				"session = BrowserSession(browser_profile=profile)",
+				"agent = Agent(task=..., llm=..., browser_session=session)",
+			},
+		},
+		{
+			name: "discord", aliases: []string{"discordjs"},
+			short:      "Zero-config: make a discord.js bot egress from a Whisper /128",
+			covers:     "a discord.js bot (its REST + gateway calls go through an undici proxy agent)",
+			runExample: "node bot.js",
+			notes: []string{
+				"discord.js does NOT read proxy env — wire the agent below (REST), and for the gateway WebSocket use `--tier wireguard` for code-free kernel routing.",
+			},
+			recipe: []string{
+				"const { ProxyAgent } = require('undici');",
+				"const client = new Client({",
+				"  intents: [GatewayIntentBits.Guilds],",
+				"  rest: { agent: new ProxyAgent(process.env.HTTPS_PROXY) }, // http://127.0.0.1:<port>",
+				"});",
+				"// gateway WS: run with `--tier wireguard` (kernel routing, no extra code).",
+			},
+		},
+		{
+			name: "telegram", aliases: []string{"grammy", "telegraf"},
+			short:      "Zero-config: make a grammY/Telegraf bot egress from a Whisper /128",
+			covers:     "a Telegram bot (grammY or Telegraf) via a SOCKS proxy agent",
+			runExample: "node bot.js",
+			notes: []string{
+				"grammY/Telegraf do NOT read proxy env — wire the agent below (uses ALL_PROXY from .whisper/proxy.env).",
+			},
+			recipe: []string{
+				"// grammY:",
+				"import { SocksProxyAgent } from 'socks-proxy-agent';",
+				"const bot = new Bot(token, { client: { baseFetchConfig: {",
+				"  agent: new SocksProxyAgent(process.env.ALL_PROXY) } } }); // socks5h://127.0.0.1:<port>",
+				"// Telegraf:",
+				"const { SocksProxyAgent } = require('socks-proxy-agent');",
+				"const bot = new Telegraf(token, { telegram: { agent: new SocksProxyAgent(process.env.ALL_PROXY) } });",
+			},
+		},
+		{
 			name: "zed", short: "Zero-config: make the Zed editor in this dir egress from a Whisper /128",
 			covers:     "the Zed editor (it honors HTTP(S)_PROXY/ALL_PROXY when launched from a shell)",
 			runExample: "zed .",
@@ -170,8 +329,9 @@ func newInitEnvToolCmd(prof envToolProfile) *cobra.Command {
 	var tier, agent, name, dir string
 	var force bool
 	cmd := &cobra.Command{
-		Use:   prof.name,
-		Short: prof.short,
+		Use:     prof.name,
+		Aliases: prof.aliases,
+		Short:   prof.short,
 		Long: "Set up the current project so " + prof.covers + " routes its traffic through a\n" +
 			"Whisper agent over SOCKS5 (default) or WireGuard.\n\n" +
 			"It writes .whisper/config + a wholly-owned proxy env file .whisper/proxy.env (it NEVER\n" +
@@ -546,6 +706,14 @@ func printInitEnvToolSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.P
 		fmt.Fprintf(w, "  • whisper run %s            (zero-config, works everywhere)\n", prof.runExample)
 		fmt.Fprintf(w, "  • or load the env into your shell:  set -a; . %s; set +a\n", filepath.ToSlash(rel))
 		fmt.Fprintf(w, "  • (install direnv for auto-egress on cd: `dotenv_if_exists %s` in .envrc)\n", filepath.ToSlash(rel))
+	}
+
+	// Some runtimes don't auto-read proxy env — print the small code that consumes it.
+	if len(prof.recipe) > 0 {
+		fmt.Fprintln(w, "\nwire it into your code (values come from .whisper/proxy.env):")
+		for _, line := range prof.recipe {
+			fmt.Fprintf(w, "    %s\n", line)
+		}
 	}
 
 	// Honest caveats — the silent-wrong-source traps, surfaced loudly (conservative emit).
