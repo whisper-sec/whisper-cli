@@ -31,8 +31,9 @@ const SchemaVersion = 1
 const Dir = ".whisper"
 
 const (
-	configName = "config"
-	pidName    = "connect.pid"
+	configName   = "config"
+	pidName      = "connect.pid"
+	proxyEnvName = "proxy.env"
 )
 
 // Config is the machine-readable `.whisper/config` shape. It carries ONLY non-secret
@@ -55,6 +56,7 @@ type Paths struct {
 	WhisperDir    string // <root>/.whisper
 	ConfigFile    string // <root>/.whisper/config
 	PIDFile       string // <root>/.whisper/connect.pid
+	ProxyEnvFile  string // <root>/.whisper/proxy.env (dotenv proxy block — `whisper init python`)
 	ClaudeDir     string // <root>/.claude
 	ClaudeLocal   string // <root>/.claude/settings.local.json
 	GitignoreFile string // <root>/.gitignore
@@ -77,10 +79,46 @@ func PathsFor(root string) Paths {
 		WhisperDir:    whisper,
 		ConfigFile:    filepath.Join(whisper, configName),
 		PIDFile:       filepath.Join(whisper, pidName),
+		ProxyEnvFile:  filepath.Join(whisper, proxyEnvName),
 		ClaudeDir:     claude,
 		ClaudeLocal:   filepath.Join(claude, "settings.local.json"),
 		GitignoreFile: filepath.Join(root, ".gitignore"),
 	}
+}
+
+// AssertSafeNamespace verifies the per-project `.whisper/` namespace is real and self-contained
+// BEFORE any init target reads or writes inside it. It is the single guard every
+// `whisper init <tool>` calls first, so the never-clobber-a-user-file invariant holds on the
+// DEFAULT path — not merely inside one writer.
+//
+// Two escapes it closes: (1) a symlinked `.whisper` directory (`.whisper -> /outside`) would let
+// every "namespaced" read/write land outside; (2) a planted leaf symlink (`.whisper/config` or
+// `.whisper/agent -> ../.env`, which git can ship in a cloned repo) would let a plain read
+// EXFILTRATE a user's secrets (ReadAgentFile/Load follow the link) or a plain write CLOBBER them
+// (SaveAgent/Save use O_TRUNC, which follows a leaf symlink). We refuse with a clear, actionable
+// error rather than an opaque failure (Postel: never a surprise, never an opaque 500).
+func AssertSafeNamespace(p Paths) error {
+	// (1) The directory: if it exists, it must be a real directory, not a symlink — and must
+	// still resolve to a path inside the project root (defense against a symlinked component).
+	if fi, err := os.Lstat(p.WhisperDir); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a symlink — refusing to use it (remove it and re-run)", p.WhisperDir)
+		}
+		if real, rerr := filepath.EvalSymlinks(p.WhisperDir); rerr == nil {
+			if root, perr := filepath.EvalSymlinks(p.Root); perr == nil {
+				if rel, relErr := filepath.Rel(root, real); relErr != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+					return fmt.Errorf("%s resolves outside the project — refusing to use it", p.WhisperDir)
+				}
+			}
+		}
+	}
+	// (2) The leaf files we read or write: none may be a symlink.
+	for _, f := range []string{p.ConfigFile, p.PIDFile, p.ProxyEnvFile, filepath.Join(p.WhisperDir, "agent")} {
+		if err := refuseSymlink(f); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Load reads + decodes `.whisper/config` at p.ConfigFile. A missing file returns (nil, nil) —
@@ -117,8 +155,13 @@ func Save(p Paths, c Config) error {
 		return err
 	}
 	b = append(b, '\n')
-	if err := os.WriteFile(p.ConfigFile, b, 0o600); err != nil {
-		return fmt.Errorf("could not write %s: %w", p.ConfigFile, err)
+	// Never follow a symlinked target (a planted .whisper/config -> ../.env would otherwise be
+	// truncated), and write atomically (temp+rename) so a crash can't leave a half file.
+	if err := refuseSymlink(p.ConfigFile); err != nil {
+		return err
+	}
+	if err := writeFileAtomic(p.ConfigFile, b, 0o600); err != nil {
+		return err
 	}
 	return nil
 }

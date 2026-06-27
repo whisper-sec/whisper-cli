@@ -5,7 +5,9 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -39,17 +41,20 @@ import (
 func newInitCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init",
-		Short: "Set up a project for an AI tool to egress from a Whisper /128 (e.g. `init claude`)",
+		Short: "Set up a project for an AI tool to egress from a Whisper /128 (e.g. `init claude`, `init python`)",
 		Long: "Give a project its own Whisper agent identity + connectivity, so the tool you run\n" +
 			"in it leaves the internet from that project's IPv6 /128 with zero further config.\n\n" +
-			"Today: `whisper init claude` wires up Claude Code.",
+			"Targets:\n" +
+			"  whisper init claude   wire up Claude Code (managed env + SessionStart hook)\n" +
+			"  whisper init python   any Python agent framework (httpx/requests) via a managed proxy env",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Bare `whisper init` with no subcommand: guide, don't dump help.
-			return usageErr("tell init what to set up — e.g. `whisper init claude`")
+			return usageErr("tell init what to set up — e.g. `whisper init claude` or `whisper init python`")
 		},
 	}
 	cmd.AddCommand(newInitClaudeCmd())
+	cmd.AddCommand(newInitPythonCmd())
 	return cmd
 }
 
@@ -70,7 +75,7 @@ func newInitClaudeCmd() *cobra.Command {
 			"Idempotent — re-run any time to update. Use --force to overwrite an existing setup.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runInitClaude(initClaudeOptions{
+			return runInitClaude(initOptions{
 				tier:      tier,
 				agent:     agent,
 				name:      name,
@@ -89,8 +94,54 @@ func newInitClaudeCmd() *cobra.Command {
 	return cmd
 }
 
-// initClaudeOptions is the resolved request for one `init claude` run.
-type initClaudeOptions struct {
+// newInitPythonCmd builds `whisper init python`: the same project-identity + connectivity setup
+// as `init claude`, but instead of merging Claude Code settings it writes a wholly-owned managed
+// proxy env file (`.whisper/proxy.env`) so ANY Python agent framework (httpx/requests/urllib —
+// LangChain, CrewAI, LlamaIndex, OpenAI-Agents-SDK, smolagents, AutoGen, the openai/anthropic
+// SDKs) egresses from the project's /128.
+//
+// Deliberately NO --agent-file flag (unlike `init claude`): the project agent file is always
+// <root>/.whisper/agent, so every write/remove target is provably inside our namespace and a
+// user-owned ./.env can never be reached.
+func newInitPythonCmd() *cobra.Command {
+	var tier, agent, name, dir string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "python",
+		Short: "Zero-config: make any Python agent in this dir egress from a Whisper /128",
+		Long: "Set up the current project so any Python agent framework (httpx/requests-based:\n" +
+			"LangChain, CrewAI, LlamaIndex, OpenAI-Agents-SDK, smolagents, AutoGen, the openai/anthropic\n" +
+			"SDKs) routes its traffic through a Whisper agent over SOCKS5 (default) or WireGuard.\n\n" +
+			"It writes .whisper/config + a wholly-owned proxy env file .whisper/proxy.env (it NEVER\n" +
+			"touches your ./.env), gitignores .whisper/, and starts the connection now.\n\n" +
+			"Activation (the summary tailors this to whether direnv is installed):\n" +
+			"  • `whisper run python script.py`   — zero-config, all-OS (recommended)\n" +
+			"  • direnv: add `dotenv_if_exists .whisper/proxy.env` to .envrc, then plain `python`\n" +
+			"  • `set -a; . .whisper/proxy.env; set +a`  then `python ...`\n\n" +
+			"Pick the identity: --agent <id|/128> uses an existing one; --name <new> creates one;\n" +
+			"else the project's persisted agent, else the server's most-recent default.\n\n" +
+			"Idempotent — re-run any time to update. Use --force to overwrite an existing setup.",
+		Args: cobraNoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runInitPython(initOptions{
+				tier:  tier,
+				agent: agent,
+				name:  name,
+				dir:   dir,
+				force: force,
+			})
+		},
+	}
+	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
+	cmd.Flags().StringVar(&agent, "agent", "", "use this existing agent (id or /128)")
+	cmd.Flags().StringVar(&name, "name", "", "create a new agent with this human name")
+	cmd.Flags().StringVar(&dir, "dir", "", "the project directory (default: the current directory)")
+	cmd.Flags().BoolVar(&force, "force", false, "re-init / overwrite the Whisper-managed setup")
+	return cmd
+}
+
+// initOptions is the resolved request for one `init claude` run.
+type initOptions struct {
 	tier      string
 	agent     string
 	name      string
@@ -99,13 +150,16 @@ type initClaudeOptions struct {
 	force     bool
 }
 
-// runInitClaude executes the whole init flow (steps a–g of the design). Each step is
-// fail-fast with a clear, actionable error — never an opaque 500.
-func runInitClaude(opts initClaudeOptions) error {
+// initBackbone runs the TOOL-AGNOSTIC part of every init target (steps a–c of the design):
+// validate the tier, resolve + persist the project agent, pick the deterministic local port, and
+// write .whisper/config. It returns the resolved paths + config so each target can do its own
+// tool-specific wiring (claude → settings merge; python → proxy.env). Each step is fail-fast with
+// a clear, actionable error — never an opaque 500.
+func initBackbone(opts initOptions) (projcfg.Paths, projcfg.Config, error) {
 	// Validate the tier up front (Postel: liberal-accept the spelling, but reject a true typo
 	// with a clear message rather than silently defaulting).
 	if !projcfg.ValidTier(opts.tier) {
-		return usageErr("unknown --tier %q — use socks5 or wireguard", opts.tier)
+		return projcfg.Paths{}, projcfg.Config{}, usageErr("unknown --tier %q — use socks5 or wireguard", opts.tier)
 	}
 	tier := projcfg.NormalizeTier(opts.tier)
 
@@ -113,14 +167,23 @@ func runInitClaude(opts initClaudeOptions) error {
 	if strings.TrimSpace(root) == "" {
 		cwd, err := os.Getwd()
 		if err != nil {
-			return &client.ProblemError{Status: 500, Detail: "couldn't determine the current directory"}
+			return projcfg.Paths{}, projcfg.Config{}, &client.ProblemError{Status: 500, Detail: "couldn't determine the current directory"}
 		}
 		root = cwd
 	}
 	p := projcfg.PathsFor(root)
 
+	// Guard the .whisper/ namespace BEFORE any read or write: refuse a symlinked .whisper dir or a
+	// planted leaf symlink (e.g. a cloned repo shipping `.whisper/config -> ../.env`), which would
+	// otherwise let a plain read exfiltrate or a plain write clobber a user file. This single guard
+	// makes the never-clobber-a-user-file invariant hold for EVERY `init <tool>` on the default path.
+	if err := projcfg.AssertSafeNamespace(p); err != nil {
+		return projcfg.Paths{}, projcfg.Config{}, err
+	}
+
 	// If an agent file override was given, honour it; otherwise the PROJECT agent file lives
-	// at <project>/.whisper/agent (per-project, not the global ~/.config one).
+	// at <project>/.whisper/agent (per-project, not the global ~/.config one). Targets that do
+	// NOT expose --agent-file (e.g. `init python`) always land here — provably under .whisper/.
 	projectAgentFile := opts.agentFile
 	if strings.TrimSpace(projectAgentFile) == "" {
 		projectAgentFile = filepath.Join(p.WhisperDir, "agent")
@@ -141,15 +204,15 @@ func runInitClaude(opts initClaudeOptions) error {
 	//   --agent > --name (create) > the project agent file > the existing config's agent.
 	c, err := resolveClient(true, false)
 	if err != nil {
-		return err
+		return projcfg.Paths{}, projcfg.Config{}, err
 	}
 	agentSel, fqdn, err := resolveProjectAgent(c, opts, p, projectAgentFile, existing)
 	if err != nil {
-		return err
+		return projcfg.Paths{}, projcfg.Config{}, err
 	}
 	// Persist the chosen /128 to the PROJECT agent file (SaveAgent semantics, mode 0600).
 	if err := client.SaveAgent(projectAgentFile, agentSel); err != nil {
-		return fmt.Errorf("could not persist the project agent: %w", err)
+		return projcfg.Paths{}, projcfg.Config{}, fmt.Errorf("could not persist the project agent: %w", err)
 	}
 
 	// (b) Deterministic, collision-avoiding port from the project's abs path. Reuse the
@@ -161,19 +224,29 @@ func runInitClaude(opts initClaudeOptions) error {
 	} else {
 		port, err = projcfg.ProbeFreePort(p.Root)
 		if err != nil {
-			return &client.ProblemError{Status: 500, Detail: err.Error()}
+			return projcfg.Paths{}, projcfg.Config{}, &client.ProblemError{Status: 500, Detail: err.Error()}
 		}
 	}
 
 	// (c) Write .whisper/config.
 	cfg := projcfg.Config{Agent: agentSel, Tier: tier, Port: port, FQDN: fqdn}
 	if err := projcfg.Save(p, cfg); err != nil {
+		return projcfg.Paths{}, projcfg.Config{}, err
+	}
+	return p, cfg, nil
+}
+
+// runInitClaude executes the whole `init claude` flow: the shared backbone (a–c) then the
+// Claude-specific wiring (d–g). Each step is fail-fast with a clear, actionable error.
+func runInitClaude(opts initOptions) error {
+	p, cfg, err := initBackbone(opts)
+	if err != nil {
 		return err
 	}
 
 	// (d) MERGE into .claude/settings.local.json (never clobber the user's keys).
 	configRel := relTo(p.Root, p.ConfigFile)
-	sres, err := projcfg.MergeClaudeSettings(p, port, configRel)
+	sres, err := projcfg.MergeClaudeSettings(p, cfg.Port, configRel)
 	if err != nil {
 		return err
 	}
@@ -197,11 +270,43 @@ func runInitClaude(opts initClaudeOptions) error {
 	return nil
 }
 
+// runInitPython executes the `init python` flow: the shared backbone (a–c) then the Python
+// wiring — write the wholly-owned .whisper/proxy.env (NEVER ./.env), gitignore ONLY .whisper/,
+// start the daemon, and print the Python activation summary.
+func runInitPython(opts initOptions) error {
+	p, cfg, err := initBackbone(opts)
+	if err != nil {
+		return err
+	}
+
+	// (d) Write the wholly-owned proxy env file. We never read/open/write a user ./.env or
+	// ./.envrc — proxy.env lives entirely inside our .whisper/ namespace (clobber-safe).
+	pres, err := projcfg.WriteProxyEnv(p, cfg.Port)
+	if err != nil {
+		return err
+	}
+
+	// (e) gitignore ONLY .whisper/ — `init python` writes no .claude/ file, so adding that line
+	// would be a needless, non-load-bearing emit (conservative output).
+	ignored, _ := projcfg.EnsureGitignoredEntries(p, []string{".whisper/"})
+
+	// (f) START the daemon now so the proxy is live for `whisper run python` / direnv / sourcing.
+	_, alreadyLive, derr := ensureDaemon(p, cfg)
+	daemonNote := ""
+	if derr != nil {
+		daemonNote = derr.Error()
+	}
+
+	// (g) Friendly, honestly-ranked activation summary (tailored to whether direnv is installed).
+	printInitPythonSummary(p, cfg, pres, ignored, alreadyLive, daemonNote)
+	return nil
+}
+
 // resolveProjectAgent picks the agent for the project per the documented precedence and
 // returns its /128 selector + canonical FQDN (for display). It mints a NAMED agent for
 // --name (never an unnamed allocation), validates --agent against the fleet, and falls back
 // to the persisted project agent / the existing config.
-func resolveProjectAgent(c *client.Client, opts initClaudeOptions, p projcfg.Paths, projectAgentFile string, existing *projcfg.Config) (sel, fqdn string, err error) {
+func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, projectAgentFile string, existing *projcfg.Config) (sel, fqdn string, err error) {
 	// 1. --agent: an explicit existing agent (validated to its /128 so config holds the
 	//    canonical address).
 	if v := strings.TrimSpace(opts.agent); v != "" {
@@ -269,17 +374,51 @@ func relTo(base, target string) string {
 // printInitSummary prints the calm, friendly result of a successful init: the agent /128 (+
 // fqdn), the tier, the port, what was wired, any conflict warning, and the one-line "now run
 // claude" call to action.
+// --- shared summary seam (so every `init <tool>` reuses one header/status/json shape) ---
+
+// initSummaryJSON is the base machine-readable summary every init target emits; a caller adds its
+// tool-specific keys (e.g. python's "proxyEnv"/"created") before passing it to emitJSONValue.
+func initSummaryJSON(p projcfg.Paths, cfg projcfg.Config, alreadyLive bool, daemonNote string) map[string]any {
+	return map[string]any{
+		"agent":   cfg.Agent,
+		"fqdn":    cfg.FQDN,
+		"tier":    cfg.Tier,
+		"port":    cfg.Port,
+		"config":  p.ConfigFile,
+		"live":    daemonNote == "",
+		"already": alreadyLive,
+	}
+}
+
+// printInitHeader prints the shared identity block (agent (+fqdn), tier, port, config) common to
+// every init target's human summary.
+func printInitHeader(w io.Writer, p projcfg.Paths, cfg projcfg.Config) {
+	if cfg.FQDN != "" {
+		fmt.Fprintf(w, "  agent    %s  (%s)\n", cfg.Agent, trimDot(cfg.FQDN))
+	} else {
+		fmt.Fprintf(w, "  agent    %s\n", cfg.Agent)
+	}
+	fmt.Fprintf(w, "  tier     %s\n", connectTierLabel(cfg.Tier))
+	fmt.Fprintf(w, "  port     127.0.0.1:%d\n", cfg.Port)
+	fmt.Fprintf(w, "  config   %s\n", p.ConfigFile)
+}
+
+// printConnectionStatus prints the shared daemon-state line. bringUpHint names the tool-specific
+// path that will bring a not-yet-live daemon up (the SessionStart hook for claude; `whisper run`
+// for python).
+func printConnectionStatus(w io.Writer, alreadyLive bool, daemonNote, bringUpHint string) {
+	if daemonNote != "" {
+		fmt.Fprintf(w, "  note: %s — %s.\n", daemonNote, bringUpHint)
+	} else if alreadyLive {
+		fmt.Fprintln(w, "  connection: already live")
+	} else {
+		fmt.Fprintln(w, "  connection: up")
+	}
+}
+
 func printInitSummary(p projcfg.Paths, cfg projcfg.Config, sres projcfg.SettingsResult, ignored []string, alreadyLive bool, daemonNote string) {
 	if g.jsonOut {
-		emitJSONValue(map[string]any{
-			"agent":   cfg.Agent,
-			"fqdn":    cfg.FQDN,
-			"tier":    cfg.Tier,
-			"port":    cfg.Port,
-			"config":  p.ConfigFile,
-			"live":    daemonNote == "",
-			"already": alreadyLive,
-		})
+		emitJSONValue(initSummaryJSON(p, cfg, alreadyLive, daemonNote))
 		return
 	}
 	if g.quiet {
@@ -290,14 +429,7 @@ func printInitSummary(p projcfg.Paths, cfg projcfg.Config, sres projcfg.Settings
 
 	w := os.Stderr
 	fmt.Fprintln(w, "whisper: this project is wired for Claude Code ✓")
-	if cfg.FQDN != "" {
-		fmt.Fprintf(w, "  agent    %s  (%s)\n", cfg.Agent, trimDot(cfg.FQDN))
-	} else {
-		fmt.Fprintf(w, "  agent    %s\n", cfg.Agent)
-	}
-	fmt.Fprintf(w, "  tier     %s\n", connectTierLabel(cfg.Tier))
-	fmt.Fprintf(w, "  port     127.0.0.1:%d\n", cfg.Port)
-	fmt.Fprintf(w, "  config   %s\n", p.ConfigFile)
+	printInitHeader(w, p, cfg)
 
 	// Conflict warning (a pre-existing proxy env var we overrode).
 	if conflicts := sres.ConflictingProxy; len(conflicts) > 0 {
@@ -306,14 +438,59 @@ func printInitSummary(p projcfg.Paths, cfg projcfg.Config, sres projcfg.Settings
 	if len(ignored) > 0 {
 		fmt.Fprintf(w, "  gitignored %s\n", strings.Join(ignored, ", "))
 	}
-
-	if daemonNote != "" {
-		fmt.Fprintf(w, "  note: %s — the SessionStart hook will bring it up.\n", daemonNote)
-	} else if alreadyLive {
-		fmt.Fprintln(w, "  connection: already live")
-	} else {
-		fmt.Fprintln(w, "  connection: up")
-	}
+	printConnectionStatus(w, alreadyLive, daemonNote, "the SessionStart hook will bring it up")
 
 	fmt.Fprintf(w, "\n→ run `claude` in this dir and all its traffic (and its subagents) leaves from %s\n", cfg.Agent)
+}
+
+// printInitPythonSummary prints the result of `init python`: the identity/port/files, then the
+// honestly-ranked activation story. It leads with whichever path is lowest-friction for THIS
+// machine — the direnv one-liner when direnv is installed (zero-config per run after a one-time
+// opt-in), else `whisper run python` (zero-config, all-OS, but a per-invocation prefix). It is
+// deliberately honest about the gaps: a bare `python script.py` in an un-prepared shell does NOT
+// egress, and aiohttp ignores proxy env unless you pass trust_env=True.
+func printInitPythonSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.PyEnvResult, ignored []string, alreadyLive bool, daemonNote string) {
+	rel := relTo(p.Root, p.ProxyEnvFile)
+
+	if g.jsonOut {
+		j := initSummaryJSON(p, cfg, alreadyLive, daemonNote)
+		j["proxyEnv"] = p.ProxyEnvFile
+		j["created"] = pres.Created
+		emitJSONValue(j)
+		return
+	}
+	if g.quiet {
+		// Just the load-bearing value: the local HTTP-CONNECT endpoint the project now uses.
+		fmt.Fprintf(os.Stdout, "http://127.0.0.1:%d\n", cfg.Port)
+		return
+	}
+
+	w := os.Stderr
+	fmt.Fprintln(w, "whisper: this project is wired for Python ✓")
+	printInitHeader(w, p, cfg)
+	fmt.Fprintf(w, "  env      %s\n", p.ProxyEnvFile)
+	if len(ignored) > 0 {
+		fmt.Fprintf(w, "  gitignored %s\n", strings.Join(ignored, ", "))
+	}
+	printConnectionStatus(w, alreadyLive, daemonNote, "`whisper run python` (or `whisper connect --ensure`) will bring it up")
+
+	// Activation — lead with the lowest-friction path for THIS machine.
+	fmt.Fprintln(w, "\nactivate egress (pick one):")
+	_, haveDirenv := exec.LookPath("direnv")
+	if haveDirenv == nil {
+		fmt.Fprintf(w, "  • direnv (recommended — then plain `python` egresses on every cd):\n")
+		fmt.Fprintf(w, "      echo 'dotenv_if_exists %s' >> .envrc && direnv allow\n", filepath.ToSlash(rel))
+		fmt.Fprintf(w, "  • or, no setup needed:  whisper run python script.py\n")
+	} else {
+		fmt.Fprintf(w, "  • whisper run python script.py            (zero-config, works everywhere)\n")
+		fmt.Fprintf(w, "  • or load the env into your shell:  set -a; . %s; set +a\n", filepath.ToSlash(rel))
+		fmt.Fprintf(w, "  • (install direnv for auto-egress on cd: `dotenv_if_exists %s` in .envrc)\n", filepath.ToSlash(rel))
+	}
+
+	// Honest caveats — the silent-wrong-source traps, surfaced loudly (conservative emit).
+	fmt.Fprintln(w, "\nnote: a bare `python script.py` only egresses after you activate (above) — `whisper run` always works.")
+	fmt.Fprintln(w, "      aiohttp ignores proxy env by default — pass `ClientSession(trust_env=True)`, or use `--tier wireguard` for code-free routing.")
+
+	// Verify-after (RULE 4): give the user a one-liner to confirm their code really egresses.
+	fmt.Fprintf(w, "\nverify your egress:\n  whisper run python -c \"import urllib.request as u; print(u.urlopen('https://api64.ipify.org').read().decode())\"\n  → should print %s\n", cfg.Agent)
 }

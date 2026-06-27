@@ -89,3 +89,37 @@ func TestGitignore_Idempotent(t *testing.T) {
 		t.Fatal("EnsureGitignored clobbered the user's existing .gitignore")
 	}
 }
+
+// TestGitignoreEntries_PythonIgnoresOnlyWhisper: the `init python` call site passes only
+// `.whisper/` — it must NOT add the Claude-specific `.claude/settings.local.json` line (that
+// would be a needless, non-load-bearing emit for a Python project).
+func TestGitignoreEntries_PythonIgnoresOnlyWhisper(t *testing.T) {
+	dir := t.TempDir()
+	mkGitRepo(t, dir)
+	p := PathsFor(dir)
+
+	added, err := EnsureGitignoredEntries(p, []string{".whisper/"})
+	if err != nil {
+		t.Fatalf("EnsureGitignoredEntries: %v", err)
+	}
+	if len(added) != 1 || added[0] != ".whisper/" {
+		t.Fatalf("python init should add only .whisper/, got %v", added)
+	}
+	body := string(mustReadFile(t, p.GitignoreFile))
+	if strings.Contains(body, ".claude/settings.local.json") {
+		t.Fatalf("python init must NOT add the Claude settings line:\n%s", body)
+	}
+	// The banner is tool-neutral (no per-tool name).
+	if strings.Contains(body, "init claude") {
+		t.Fatalf("gitignore banner should be tool-neutral:\n%s", body)
+	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return b
+}

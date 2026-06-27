@@ -43,7 +43,7 @@ func TestInitClaude_ExistingAgent_WritesEverything(t *testing.T) {
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 
-	err := runInitClaude(initClaudeOptions{tier: "socks5", agent: "2a04:2a01:9::abcd", dir: dir})
+	err := runInitClaude(initOptions{tier: "socks5", agent: "2a04:2a01:9::abcd", dir: dir})
 	if err != nil {
 		t.Fatalf("runInitClaude: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestInitClaude_NameCreatesAgent(t *testing.T) {
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 
-	if err := runInitClaude(initClaudeOptions{tier: "socks5", name: "scout", dir: dir}); err != nil {
+	if err := runInitClaude(initOptions{tier: "socks5", name: "scout", dir: dir}); err != nil {
 		t.Fatalf("runInitClaude --name: %v", err)
 	}
 	body, ok := bodyForOp(seen, "identity")
@@ -128,12 +128,12 @@ func TestInitClaude_IdempotentReusesPort(t *testing.T) {
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 
-	if err := runInitClaude(initClaudeOptions{tier: "socks5", agent: "2a04:2a01:9::abcd", dir: dir}); err != nil {
+	if err := runInitClaude(initOptions{tier: "socks5", agent: "2a04:2a01:9::abcd", dir: dir}); err != nil {
 		t.Fatalf("first init: %v", err)
 	}
 	cfg1, _ := projcfg.Load(projcfg.PathsFor(dir))
 
-	if err := runInitClaude(initClaudeOptions{tier: "wireguard", agent: "2a04:2a01:9::abcd", dir: dir}); err != nil {
+	if err := runInitClaude(initOptions{tier: "wireguard", agent: "2a04:2a01:9::abcd", dir: dir}); err != nil {
 		t.Fatalf("re-init: %v", err)
 	}
 	cfg2, _ := projcfg.Load(projcfg.PathsFor(dir))
@@ -158,7 +158,7 @@ func TestInitClaude_IdempotentReusesPort(t *testing.T) {
 // default.
 func TestInitClaude_BadTierIsUsageError(t *testing.T) {
 	dir := t.TempDir()
-	err := runInitClaude(initClaudeOptions{tier: "wormhole", dir: dir})
+	err := runInitClaude(initOptions{tier: "wormhole", dir: dir})
 	if err == nil || !isUsageError(err) {
 		t.Fatalf("a bad --tier must be a usage error, got %v", err)
 	}

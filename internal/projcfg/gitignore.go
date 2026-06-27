@@ -12,30 +12,38 @@ import (
 	"strings"
 )
 
-// gitignoreEntries are the per-project paths `whisper init` keeps out of version control: the
+// claudeGitignoreEntries are the paths `whisper init claude` keeps out of version control: the
 // whole `.whisper/` directory (its `connect.pid` + config are machine-local) and Claude Code's
 // per-user LOCAL settings (which carry this machine's proxy port + hook). The shared
 // `.claude/settings.json` is deliberately NOT here — init never touches it.
-var gitignoreEntries = []string{
+var claudeGitignoreEntries = []string{
 	".whisper/",
 	".claude/settings.local.json",
 }
 
-// EnsureGitignored appends any of the Whisper-managed entries that are not already present to
-// the project's `.gitignore` — but ONLY when root is inside a git working tree (a `.git`
-// exists at root). It is idempotent (a re-init adds nothing if the entries are there) and
-// fail-soft: a non-git project, or an unwritable .gitignore, is NOT an error — gitignore
-// hygiene is a courtesy, never a blocker (Postel: liberal, never fail the user's flow on it).
+// EnsureGitignored is the `whisper init claude` wrapper: it ignores `.whisper/` AND Claude Code's
+// `.claude/settings.local.json`. Other init targets call EnsureGitignoredEntries with only the
+// entries relevant to them (e.g. `init python` passes just `.whisper/` — it never writes a
+// `.claude/` file, so adding that line would be a needless, non-load-bearing emit).
+func EnsureGitignored(p Paths) ([]string, error) {
+	return EnsureGitignoredEntries(p, claudeGitignoreEntries)
+}
+
+// EnsureGitignoredEntries appends any of the given entries that are not already present to the
+// project's `.gitignore` — but ONLY when root is inside a git working tree (a `.git` exists at
+// root). It is idempotent (a re-init adds nothing if the entries are there) and fail-soft: a
+// non-git project, or an unwritable .gitignore, is NOT an error — gitignore hygiene is a
+// courtesy, never a blocker (Postel: liberal, never fail the user's flow on it).
 //
 // It returns the list of entries it actually ADDED (empty if all were already ignored or root
 // is not a git repo) so the caller can mention them in the summary.
-func EnsureGitignored(p Paths) ([]string, error) {
+func EnsureGitignoredEntries(p Paths, entries []string) ([]string, error) {
 	if !isGitRepo(p.Root) {
 		return nil, nil
 	}
 	existing := readGitignoreLines(p.GitignoreFile)
 	var toAdd []string
-	for _, e := range gitignoreEntries {
+	for _, e := range entries {
 		if !ignoreHas(existing, e) {
 			toAdd = append(toAdd, e)
 		}
@@ -52,7 +60,7 @@ func EnsureGitignored(p Paths) ([]string, error) {
 	if len(old) > 0 && old[len(old)-1] != '\n' {
 		buf.WriteByte('\n')
 	}
-	buf.WriteString("\n# Whisper (whisper init claude) — machine-local agent state\n")
+	buf.WriteString("\n# Whisper — machine-local agent state\n")
 	for _, e := range toAdd {
 		buf.WriteString(e)
 		buf.WriteByte('\n')

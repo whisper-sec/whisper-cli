@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -13,6 +15,14 @@ import (
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
+
+// isProjectNotFound reports whether err from discoverProjectConfig means "no .whisper/config
+// here" (a genuine not-found, Status 404) as opposed to a present-but-unreadable/corrupt config.
+// run uses it to fail OPEN silently on not-found but SURFACE a corrupt project config.
+func isProjectNotFound(err error) bool {
+	var pe *client.ProblemError
+	return errors.As(err, &pe) && pe.Status == 404
+}
 
 // run.go is `whisper run <cmd…>` and the `whisper claude` convenience (#172 WB3).
 // It brings the local egress proxy up, then EXECS the child with the proxy env
@@ -95,17 +105,45 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 		return err
 	}
 	sel := resolveAgentSelector(agent, agentFile)
+	selTier := strings.TrimSpace(tier)
+	// Project-aware (keystone of `whisper init python` #195): when the user gave NO explicit
+	// --agent / --agent-file, and we're inside a `whisper init`'d project, prefer THAT project's
+	// identity + tier — so `whisper run python` egresses from the same /128 `whisper init python`
+	// set up (otherwise run would fall through to the global default agent and the two would
+	// disagree). Fully backward-compatible: an explicit flag still wins, and a non-init'd dir
+	// (discover returns an error) keeps today's behavior exactly.
+	if strings.TrimSpace(agent) == "" && strings.TrimSpace(agentFile) == "" {
+		_, cfg, derr := discoverProjectConfig()
+		switch {
+		case derr == nil:
+			if strings.TrimSpace(cfg.Agent) != "" {
+				sel = cfg.Agent
+				if selTier == "" {
+					selTier = cfg.Tier
+				}
+			}
+		case isProjectNotFound(derr):
+			// No project here — keep today's behavior (global default agent). Zero-config, silent.
+		default:
+			// A project EXISTS but its .whisper/config is unreadable/corrupt. Fail OPEN to the
+			// global agent (Postel: never block the run) but make the identity divergence VISIBLE —
+			// `whisper connect` surfaces this same case, so run must not silently disagree.
+			if !g.quiet {
+				fmt.Fprintf(os.Stderr, "whisper: project .whisper/config unreadable (%v) — using the global agent\n", derr)
+			}
+		}
+	}
 	args := map[string]any{}
 	if sel != "" {
 		args["agent"] = sel
 	}
-	if t := strings.TrimSpace(tier); t != "" {
-		args["tier"] = t
+	if selTier != "" {
+		args["tier"] = selTier
 	}
 	// --tier wireguard (#188): mint a local WG keypair, inject ONLY the public half into the
 	// op:connect args; our private key never leaves this host. No-op otherwise; wgKey threads
 	// the private key into the userspace tunnel bring-up.
-	wgKey, werr := prepareWireGuard(tier, args)
+	wgKey, werr := prepareWireGuard(selTier, args)
 	if werr != nil {
 		return werr
 	}
