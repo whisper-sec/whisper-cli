@@ -19,10 +19,3 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-
----
-
-This repository embeds the Mozilla CA certificate list at
-internal/client/cabundle/mozilla-cacert.pem. That file is not Whisper-authored
-content; it is the set of trust roots published by Mozilla and is distributed
-under the Mozilla Public License 2.0.
