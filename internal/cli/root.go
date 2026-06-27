@@ -117,6 +117,7 @@ func NewRootCommand() *cobra.Command {
 		newConnectCmd(),
 		newConnectDaemonCmd(),
 		newInitCmd(),
+		newMCPCmd(),
 		newIPCmd(),
 		newRunCmd(),
 		newClaudeCmd(),
