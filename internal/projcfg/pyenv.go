@@ -96,6 +96,9 @@ func proxyEnvContent(port int) []byte {
 	fmt.Fprintf(&b, "https_proxy=%s\n", httpForm)
 	fmt.Fprintf(&b, "all_proxy=%s\n", socks)
 	fmt.Fprintf(&b, "no_proxy=%s\n", noProxy)
+	// Node >=22.21/>=24 honors HTTP(S)_PROXY for global fetch/undici only when this is set;
+	// harmless (ignored) for Python and other runtimes — so the one file works for Node tools too.
+	b.WriteString("NODE_USE_ENV_PROXY=1\n")
 	return b.Bytes()
 }
 

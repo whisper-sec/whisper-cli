@@ -46,7 +46,11 @@ func newInitCmd() *cobra.Command {
 			"in it leaves the internet from that project's IPv6 /128 with zero further config.\n\n" +
 			"Targets:\n" +
 			"  whisper init claude   wire up Claude Code (managed env + SessionStart hook)\n" +
-			"  whisper init python   any Python agent framework (httpx/requests) via a managed proxy env",
+			"  whisper init python   any Python agent framework (httpx/requests) via a managed proxy env\n" +
+			"  whisper init gemini   the Google Gemini CLI (proxy env)\n" +
+			"  whisper init aider    aider, the AI pair programmer (proxy env)\n" +
+			"  whisper init ai-sdk   the Vercel AI SDK / Node agents (proxy env)\n" +
+			"  whisper init zed      the Zed editor (proxy env; + a printed global-settings line)",
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Bare `whisper init` with no subcommand: guide, don't dump help.
@@ -54,7 +58,11 @@ func newInitCmd() *cobra.Command {
 		},
 	}
 	cmd.AddCommand(newInitClaudeCmd())
-	cmd.AddCommand(newInitPythonCmd())
+	// Env-proxy targets: each just wires .whisper/proxy.env + the project daemon, differing only
+	// in the human summary/notes. They all share newInitEnvToolCmd over an envToolProfile.
+	for _, prof := range envToolProfiles() {
+		cmd.AddCommand(newInitEnvToolCmd(prof))
+	}
 	return cmd
 }
 
@@ -94,42 +102,90 @@ func newInitClaudeCmd() *cobra.Command {
 	return cmd
 }
 
-// newInitPythonCmd builds `whisper init python`: the same project-identity + connectivity setup
-// as `init claude`, but instead of merging Claude Code settings it writes a wholly-owned managed
-// proxy env file (`.whisper/proxy.env`) so ANY Python agent framework (httpx/requests/urllib —
-// LangChain, CrewAI, LlamaIndex, OpenAI-Agents-SDK, smolagents, AutoGen, the openai/anthropic
-// SDKs) egresses from the project's /128.
-//
-// Deliberately NO --agent-file flag (unlike `init claude`): the project agent file is always
-// <root>/.whisper/agent, so every write/remove target is provably inside our namespace and a
-// user-owned ./.env can never be reached.
-func newInitPythonCmd() *cobra.Command {
+// envToolProfile describes an ENV-PROXY init target: a tool/runtime that egresses when the
+// standard HTTP(S)_PROXY/ALL_PROXY environment variables are set. Every such target shares the
+// exact same machinery (backbone → .whisper/proxy.env → daemon) and differs ONLY in the human
+// summary: its name, what frameworks it covers, the example run command, and any honest caveats.
+// This is the seam that makes adding a new `whisper init <tool>` a one-line profile.
+type envToolProfile struct {
+	name       string   // subcommand + display token, e.g. "python", "gemini"
+	short      string   // one-line cobra Short
+	covers     string   // human note of what it covers (frameworks/runtimes)
+	runExample string   // the command shown after `whisper run`, e.g. "python script.py", "gemini"
+	notes      []string // honest caveats printed in the summary (silent-wrong-source traps etc.)
+}
+
+// envToolProfiles is the registry of env-proxy init targets. Add a tool here and it gets a fully
+// working `whisper init <tool>` for free.
+func envToolProfiles() []envToolProfile {
+	return []envToolProfile{
+		{
+			name: "python", short: "Zero-config: make any Python agent in this dir egress from a Whisper /128",
+			covers:     "any Python agent framework (httpx/requests/urllib — LangChain, CrewAI, LlamaIndex, OpenAI-Agents-SDK, smolagents, AutoGen, the openai/anthropic SDKs)",
+			runExample: "python script.py",
+			notes: []string{
+				"a bare `python script.py` only egresses after you activate (above) — `whisper run` always works.",
+				"aiohttp ignores proxy env by default — pass `ClientSession(trust_env=True)`, or use `--tier wireguard` for code-free routing.",
+			},
+		},
+		{
+			name: "gemini", short: "Zero-config: make the Google Gemini CLI in this dir egress from a Whisper /128",
+			covers:     "the Google Gemini CLI (it reads HTTP_PROXY/HTTPS_PROXY from the environment)",
+			runExample: "gemini",
+			notes: []string{
+				"the Gemini CLI picks up the proxy from the environment — activate (above) or use `whisper run gemini`.",
+			},
+		},
+		{
+			name: "aider", short: "Zero-config: make aider in this dir egress from a Whisper /128",
+			covers:     "aider, the AI pair programmer (its LLM calls go through httpx, which honors the proxy env)",
+			runExample: "aider",
+			notes: []string{
+				"aider reads the proxy from the environment — activate (above) or just `whisper run aider`.",
+			},
+		},
+		{
+			name: "ai-sdk", short: "Zero-config: make a Vercel AI SDK / Node agent in this dir egress from a Whisper /128",
+			covers:     "the Vercel AI SDK and Node agents (global fetch/undici via the proxy env)",
+			runExample: "node app.js",
+			notes: []string{
+				"Node honors the proxy env for global fetch only on Node >=22.21/>=24 (NODE_USE_ENV_PROXY=1 is set in proxy.env); on older Node, use `whisper run node ...` or an undici ProxyAgent.",
+			},
+		},
+		{
+			name: "zed", short: "Zero-config: make the Zed editor in this dir egress from a Whisper /128",
+			covers:     "the Zed editor (it honors HTTP(S)_PROXY/ALL_PROXY when launched from a shell)",
+			runExample: "zed .",
+			notes: []string{
+				"recommended: launch with `whisper run zed .` — that uses THIS project's /128 and touches nothing global.",
+				"GUI/Dock launch instead? Zed reads the proxy only from its GLOBAL ~/.config/zed/settings.json — add the ALL_PROXY value from .whisper/proxy.env as `\"proxy\": \"socks5h://127.0.0.1:<port>\"` (one shared value across projects; quit Zed fully and relaunch). We don't auto-edit that file — it's your hand-curated global config (JSONC with comments).",
+			},
+		},
+	}
+}
+
+// newInitEnvToolCmd builds `whisper init <profile.name>`. Like `init python`, it deliberately
+// exposes NO --agent-file flag (every write target is provably inside .whisper/).
+func newInitEnvToolCmd(prof envToolProfile) *cobra.Command {
 	var tier, agent, name, dir string
 	var force bool
 	cmd := &cobra.Command{
-		Use:   "python",
-		Short: "Zero-config: make any Python agent in this dir egress from a Whisper /128",
-		Long: "Set up the current project so any Python agent framework (httpx/requests-based:\n" +
-			"LangChain, CrewAI, LlamaIndex, OpenAI-Agents-SDK, smolagents, AutoGen, the openai/anthropic\n" +
-			"SDKs) routes its traffic through a Whisper agent over SOCKS5 (default) or WireGuard.\n\n" +
+		Use:   prof.name,
+		Short: prof.short,
+		Long: "Set up the current project so " + prof.covers + " routes its traffic through a\n" +
+			"Whisper agent over SOCKS5 (default) or WireGuard.\n\n" +
 			"It writes .whisper/config + a wholly-owned proxy env file .whisper/proxy.env (it NEVER\n" +
 			"touches your ./.env), gitignores .whisper/, and starts the connection now.\n\n" +
 			"Activation (the summary tailors this to whether direnv is installed):\n" +
-			"  • `whisper run python script.py`   — zero-config, all-OS (recommended)\n" +
-			"  • direnv: add `dotenv_if_exists .whisper/proxy.env` to .envrc, then plain `python`\n" +
-			"  • `set -a; . .whisper/proxy.env; set +a`  then `python ...`\n\n" +
+			"  • `whisper run " + prof.runExample + "`   — zero-config, all-OS (recommended)\n" +
+			"  • direnv: add `dotenv_if_exists .whisper/proxy.env` to .envrc, then run normally\n" +
+			"  • `set -a; . .whisper/proxy.env; set +a`  then run normally\n\n" +
 			"Pick the identity: --agent <id|/128> uses an existing one; --name <new> creates one;\n" +
 			"else the project's persisted agent, else the server's most-recent default.\n\n" +
 			"Idempotent — re-run any time to update. Use --force to overwrite an existing setup.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return runInitPython(initOptions{
-				tier:  tier,
-				agent: agent,
-				name:  name,
-				dir:   dir,
-				force: force,
-			})
+			return runInitEnvTool(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force}, prof)
 		},
 	}
 	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
@@ -139,6 +195,10 @@ func newInitPythonCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&force, "force", false, "re-init / overwrite the Whisper-managed setup")
 	return cmd
 }
+
+// pythonProfile is the profile for `whisper init python` (the keystone). Kept as a named helper
+// so tests and the thin runInitPython wrapper can reference it.
+func pythonProfile() envToolProfile { return envToolProfiles()[0] }
 
 // initOptions is the resolved request for one `init claude` run.
 type initOptions struct {
@@ -270,10 +330,10 @@ func runInitClaude(opts initOptions) error {
 	return nil
 }
 
-// runInitPython executes the `init python` flow: the shared backbone (a–c) then the Python
-// wiring — write the wholly-owned .whisper/proxy.env (NEVER ./.env), gitignore ONLY .whisper/,
-// start the daemon, and print the Python activation summary.
-func runInitPython(opts initOptions) error {
+// runInitEnvTool executes an ENV-PROXY init flow for any tool that egresses via the proxy env:
+// the shared backbone (a–c) then write the wholly-owned .whisper/proxy.env (NEVER ./.env),
+// gitignore ONLY .whisper/, start the daemon, and print the profile-driven activation summary.
+func runInitEnvTool(opts initOptions, prof envToolProfile) error {
 	p, cfg, err := initBackbone(opts)
 	if err != nil {
 		return err
@@ -286,11 +346,11 @@ func runInitPython(opts initOptions) error {
 		return err
 	}
 
-	// (e) gitignore ONLY .whisper/ — `init python` writes no .claude/ file, so adding that line
-	// would be a needless, non-load-bearing emit (conservative output).
+	// (e) gitignore ONLY .whisper/ — an env-tool init writes no tool config file, so adding any
+	// other line would be a needless, non-load-bearing emit (conservative output).
 	ignored, _ := projcfg.EnsureGitignoredEntries(p, []string{".whisper/"})
 
-	// (f) START the daemon now so the proxy is live for `whisper run python` / direnv / sourcing.
+	// (f) START the daemon now so the proxy is live for `whisper run` / direnv / sourcing.
 	_, alreadyLive, derr := ensureDaemon(p, cfg)
 	daemonNote := ""
 	if derr != nil {
@@ -298,9 +358,12 @@ func runInitPython(opts initOptions) error {
 	}
 
 	// (g) Friendly, honestly-ranked activation summary (tailored to whether direnv is installed).
-	printInitPythonSummary(p, cfg, pres, ignored, alreadyLive, daemonNote)
+	printInitEnvToolSummary(p, cfg, pres, ignored, alreadyLive, daemonNote, prof)
 	return nil
 }
+
+// runInitPython is the thin keystone wrapper (used by tests + the documented entry point).
+func runInitPython(opts initOptions) error { return runInitEnvTool(opts, pythonProfile()) }
 
 // resolveProjectAgent picks the agent for the project per the documented precedence and
 // returns its /128 selector + canonical FQDN (for display). It mints a NAMED agent for
@@ -443,17 +506,15 @@ func printInitSummary(p projcfg.Paths, cfg projcfg.Config, sres projcfg.Settings
 	fmt.Fprintf(w, "\n→ run `claude` in this dir and all its traffic (and its subagents) leaves from %s\n", cfg.Agent)
 }
 
-// printInitPythonSummary prints the result of `init python`: the identity/port/files, then the
-// honestly-ranked activation story. It leads with whichever path is lowest-friction for THIS
-// machine — the direnv one-liner when direnv is installed (zero-config per run after a one-time
-// opt-in), else `whisper run python` (zero-config, all-OS, but a per-invocation prefix). It is
-// deliberately honest about the gaps: a bare `python script.py` in an un-prepared shell does NOT
-// egress, and aiohttp ignores proxy env unless you pass trust_env=True.
-func printInitPythonSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.PyEnvResult, ignored []string, alreadyLive bool, daemonNote string) {
+// printInitEnvToolSummary prints the result of an env-proxy `init <tool>`: identity/port/files,
+// then the honestly-ranked activation story (leading with the direnv one-liner when direnv is
+// installed, else `whisper run <tool>`), the profile's honest caveats, and a verify-after line.
+func printInitEnvToolSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.PyEnvResult, ignored []string, alreadyLive bool, daemonNote string, prof envToolProfile) {
 	rel := relTo(p.Root, p.ProxyEnvFile)
 
 	if g.jsonOut {
 		j := initSummaryJSON(p, cfg, alreadyLive, daemonNote)
+		j["tool"] = prof.name
 		j["proxyEnv"] = p.ProxyEnvFile
 		j["created"] = pres.Created
 		emitJSONValue(j)
@@ -466,31 +527,32 @@ func printInitPythonSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.Py
 	}
 
 	w := os.Stderr
-	fmt.Fprintln(w, "whisper: this project is wired for Python ✓")
+	fmt.Fprintf(w, "whisper: this project is wired for %s ✓\n", prof.name)
 	printInitHeader(w, p, cfg)
 	fmt.Fprintf(w, "  env      %s\n", p.ProxyEnvFile)
 	if len(ignored) > 0 {
 		fmt.Fprintf(w, "  gitignored %s\n", strings.Join(ignored, ", "))
 	}
-	printConnectionStatus(w, alreadyLive, daemonNote, "`whisper run python` (or `whisper connect --ensure`) will bring it up")
+	printConnectionStatus(w, alreadyLive, daemonNote, "`whisper run "+prof.runExample+"` (or `whisper connect --ensure`) will bring it up")
 
 	// Activation — lead with the lowest-friction path for THIS machine.
 	fmt.Fprintln(w, "\nactivate egress (pick one):")
 	_, haveDirenv := exec.LookPath("direnv")
 	if haveDirenv == nil {
-		fmt.Fprintf(w, "  • direnv (recommended — then plain `python` egresses on every cd):\n")
+		fmt.Fprintf(w, "  • direnv (recommended — then run normally on every cd):\n")
 		fmt.Fprintf(w, "      echo 'dotenv_if_exists %s' >> .envrc && direnv allow\n", filepath.ToSlash(rel))
-		fmt.Fprintf(w, "  • or, no setup needed:  whisper run python script.py\n")
+		fmt.Fprintf(w, "  • or, no setup needed:  whisper run %s\n", prof.runExample)
 	} else {
-		fmt.Fprintf(w, "  • whisper run python script.py            (zero-config, works everywhere)\n")
+		fmt.Fprintf(w, "  • whisper run %s            (zero-config, works everywhere)\n", prof.runExample)
 		fmt.Fprintf(w, "  • or load the env into your shell:  set -a; . %s; set +a\n", filepath.ToSlash(rel))
 		fmt.Fprintf(w, "  • (install direnv for auto-egress on cd: `dotenv_if_exists %s` in .envrc)\n", filepath.ToSlash(rel))
 	}
 
 	// Honest caveats — the silent-wrong-source traps, surfaced loudly (conservative emit).
-	fmt.Fprintln(w, "\nnote: a bare `python script.py` only egresses after you activate (above) — `whisper run` always works.")
-	fmt.Fprintln(w, "      aiohttp ignores proxy env by default — pass `ClientSession(trust_env=True)`, or use `--tier wireguard` for code-free routing.")
+	for _, n := range prof.notes {
+		fmt.Fprintf(w, "\nnote: %s\n", n)
+	}
 
-	// Verify-after (RULE 4): give the user a one-liner to confirm their code really egresses.
-	fmt.Fprintf(w, "\nverify your egress:\n  whisper run python -c \"import urllib.request as u; print(u.urlopen('https://api64.ipify.org').read().decode())\"\n  → should print %s\n", cfg.Agent)
+	// Verify-after (RULE 4): give the user a one-liner to confirm egress really works.
+	fmt.Fprintf(w, "\nverify your egress:\n  whisper run curl -s https://api64.ipify.org\n  → should print %s\n", cfg.Agent)
 }
