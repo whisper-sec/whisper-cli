@@ -11,8 +11,7 @@
   "packages": [
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/whisper-sec/whisper",
-      "version": "0.124.3",
+      "identifier": "ghcr.io/whisper-sec/whisper:0.124.3",
       "transport": {
         "type": "stdio"
       },
