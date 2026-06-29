@@ -68,7 +68,140 @@ func newInitCmd() *cobra.Command {
 		cmd.AddCommand(newInitEnvToolCmd(prof))
 	}
 	cmd.AddCommand(newInitNotebookCmd())
+	cmd.AddCommand(newInitComposeCmd())
+	cmd.AddCommand(newInitK8sCmd())
 	return cmd
+}
+
+// newInitComposeCmd / newInitK8sCmd emit a Whisper egress SIDECAR manifest (Docker Compose / k8s
+// native sidecar) under .whisper/ so a containerised app egresses from the project's /128 through
+// the official image. Unlike the other targets they do NOT start a host daemon (the proxy runs in
+// the sidecar container, not on this host).
+func newInitComposeCmd() *cobra.Command {
+	var tier, agent, name, dir, service string
+	var force bool
+	cmd := &cobra.Command{
+		Use:   "compose",
+		Short: "Emit a Docker Compose egress sidecar so a container egresses from a Whisper /128",
+		Long: "Write .whisper/compose.yml — a Whisper egress sidecar (the official container image running\n" +
+			"`whisper connect`) plus .whisper/proxy.env for the app. Merge it alongside your compose:\n" +
+			"  docker compose -f docker-compose.yml -f .whisper/compose.yml up\n" +
+			"and give the app service `network_mode: \"service:whisper\"` + `env_file: [.whisper/proxy.env]`\n" +
+			"(or pass --service <name> to emit an example app service wired to the sidecar).\n\n" +
+			"No host daemon is started — the proxy runs in the sidecar container. Export WHISPER_API_KEY first.",
+		Args: cobraNoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runInitContainer(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force, service: service}, "compose")
+		},
+	}
+	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier recorded in config: socks5 (default) | wireguard")
+	cmd.Flags().StringVar(&agent, "agent", "", "use this existing agent (id or /128)")
+	cmd.Flags().StringVar(&name, "name", "", "create a new agent with this human name")
+	cmd.Flags().StringVar(&dir, "dir", "", "the project directory (default: the current directory)")
+	cmd.Flags().StringVar(&service, "service", "", "also emit an example app service of this name, wired to the sidecar")
+	cmd.Flags().BoolVar(&force, "force", false, "re-init / overwrite the Whisper-managed setup")
+	return cmd
+}
+
+func newInitK8sCmd() *cobra.Command {
+	var tier, agent, name, dir string
+	var force bool
+	cmd := &cobra.Command{
+		Use:     "k8s",
+		Aliases: []string{"kubernetes", "kube"},
+		Short:   "Emit a Kubernetes native-sidecar patch so a Pod egresses from a Whisper /128",
+		Long: "Write .whisper/whisper-sidecar.yaml — a NATIVE sidecar (initContainer restartPolicy: Always,\n" +
+			"Kubernetes >= 1.29) running the official image as `whisper connect`, plus the app-container\n" +
+			"proxy env. Merge it into your Deployment/Pod spec, set your app container's name, and create\n" +
+			"the api-key secret:  kubectl create secret generic whisper --from-literal=api-key=whisper_live_xxx\n\n" +
+			"No host daemon is started — the proxy runs in the Pod's sidecar container.",
+		Args: cobraNoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			return runInitContainer(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force}, "k8s")
+		},
+	}
+	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier recorded in config: socks5 (default) | wireguard")
+	cmd.Flags().StringVar(&agent, "agent", "", "use this existing agent (id or /128)")
+	cmd.Flags().StringVar(&name, "name", "", "create a new agent with this human name")
+	cmd.Flags().StringVar(&dir, "dir", "", "the project directory (default: the current directory)")
+	cmd.Flags().BoolVar(&force, "force", false, "re-init / overwrite the Whisper-managed setup")
+	return cmd
+}
+
+// runInitContainer wires the project (backbone + proxy.env) and emits the container sidecar
+// manifest. It deliberately does NOT start the host daemon — the proxy runs in the sidecar.
+func runInitContainer(opts initOptions, target string) error {
+	p, cfg, err := initBackbone(opts)
+	if err != nil {
+		return err
+	}
+	// App-side env (works in the shared netns: the app reaches the sidecar on 127.0.0.1:<port>).
+	pres, err := projcfg.WriteProxyEnv(p, cfg.Port)
+	if err != nil {
+		return err
+	}
+	ignored, _ := projcfg.EnsureGitignoredEntries(p, []string{".whisper/"})
+
+	var manifest string
+	var created bool
+	if target == "compose" {
+		created, err = projcfg.WriteComposeSidecar(p, cfg, opts.service)
+		manifest = composeRel(p)
+	} else {
+		created, err = projcfg.WriteK8sSidecar(p, cfg)
+		manifest = k8sRel(p)
+	}
+	if err != nil {
+		return err
+	}
+	printInitContainerSummary(p, cfg, target, manifest, created, pres, ignored, opts.service)
+	return nil
+}
+
+func composeRel(p projcfg.Paths) string {
+	return relTo(p.Root, filepath.Join(p.WhisperDir, "compose.yml"))
+}
+func k8sRel(p projcfg.Paths) string {
+	return relTo(p.Root, filepath.Join(p.WhisperDir, "whisper-sidecar.yaml"))
+}
+
+// printInitContainerSummary prints the container target's result + how to use the emitted manifest.
+func printInitContainerSummary(p projcfg.Paths, cfg projcfg.Config, target, manifest string, created bool, pres projcfg.PyEnvResult, ignored []string, service string) {
+	if g.jsonOut {
+		j := initSummaryJSON(p, cfg, false, "")
+		j["tool"] = "init " + target
+		j["manifest"] = manifest
+		j["proxyEnv"] = p.ProxyEnvFile
+		j["created"] = created
+		emitJSONValue(j)
+		return
+	}
+	if g.quiet {
+		fmt.Fprintln(os.Stdout, manifest)
+		return
+	}
+	w := os.Stderr
+	fmt.Fprintf(w, "whisper: this project is wired for %s ✓\n", target)
+	printInitHeader(w, p, cfg)
+	fmt.Fprintf(w, "  manifest %s\n", manifest)
+	fmt.Fprintf(w, "  env      %s\n", p.ProxyEnvFile)
+	if len(ignored) > 0 {
+		fmt.Fprintf(w, "  gitignored %s\n", strings.Join(ignored, ", "))
+	}
+	fmt.Fprintf(w, "  image    %s\n", projcfg.ContainerImage)
+	if target == "compose" {
+		fmt.Fprintln(w, "\nrun it (export WHISPER_API_KEY first):")
+		fmt.Fprintf(w, "  docker compose -f docker-compose.yml -f %s up\n", manifest)
+		if service == "" {
+			fmt.Fprintln(w, "  → add to your app service:  network_mode: \"service:whisper\"  +  env_file: [.whisper/proxy.env]")
+		} else {
+			fmt.Fprintf(w, "  → the example service %q is wired to the sidecar; set its image/build.\n", service)
+		}
+	} else {
+		fmt.Fprintln(w, "\napply it:")
+		fmt.Fprintf(w, "  kubectl create secret generic whisper --from-literal=api-key=$WHISPER_API_KEY\n")
+		fmt.Fprintf(w, "  → merge %s into your Deployment/Pod spec; set your app container's name (needs k8s >= 1.29).\n", manifest)
+	}
 }
 
 // newInitNotebookCmd builds `whisper init notebook`: prints a paste-ready FIRST cell that points a
@@ -368,6 +501,7 @@ type initOptions struct {
 	agentFile string
 	dir       string
 	force     bool
+	service   string // `init compose` only: name an example app service wired to the sidecar
 }
 
 // initBackbone runs the TOOL-AGNOSTIC part of every init target (steps a–c of the design):
