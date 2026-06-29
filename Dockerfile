@@ -15,6 +15,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build \
 FROM gcr.io/distroless/static-debian12:nonroot
 LABEL org.opencontainers.image.source="https://github.com/whisper-sec/whisper-cli" \
       org.opencontainers.image.description="Whisper CLI — routable agent IPv6 identity + safe egress" \
-      org.opencontainers.image.licenses="MIT"
+      org.opencontainers.image.licenses="MIT" \
+      io.modelcontextprotocol.server.name="io.github.whisper-sec/whisper"
 COPY --from=build /out/whisper /usr/local/bin/whisper
 ENTRYPOINT ["whisper"]

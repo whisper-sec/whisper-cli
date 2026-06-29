@@ -1,0 +1,27 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.whisper-sec/whisper",
+  "description": "Verify Whisper agent identities and look up RDAP for a routable /128 — keyless.",
+  "version": "0.124.3",
+  "repository": {
+    "url": "https://github.com/whisper-sec/whisper-cli",
+    "source": "github"
+  },
+  "websiteUrl": "https://whisper.online",
+  "packages": [
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/whisper-sec/whisper",
+      "version": "0.124.3",
+      "transport": {
+        "type": "stdio"
+      },
+      "runtimeArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    }
+  ]
+}
