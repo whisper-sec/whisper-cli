@@ -160,6 +160,40 @@ dashboard), `whisper config`. Run `whisper <command> --help` for details.
 
 ---
 
+## Use it from your code
+
+Same identity + egress from your language of choice — thin wrappers over this CLI:
+
+**Python** — `pip install whisper-id`
+
+```python
+from whisper_id import register, egress
+agent = register("my-bot")            # a routable /128
+with egress():                        # this block leaves from your /128
+    requests.get("https://api64.ipify.org")
+```
+
+**Node** — `npm i whisper-id`
+
+```js
+import { register, withEgress } from "whisper-id";
+const agent = await register("my-bot");
+await withEgress(async () => { /* env-aware clients leave from your /128 */ });
+```
+
+## Run it in a container
+
+The official image runs the CLI as an egress sidecar so any container leaves from your `/128`:
+
+```sh
+docker run --rm ghcr.io/whisper-sec/whisper:latest --version
+```
+
+`whisper init compose` and `whisper init k8s` emit a ready-to-merge sidecar manifest.
+Multi-arch (amd64/arm64), distroless, ~18 MB.
+
+---
+
 ## Build from source
 
 Requires Go 1.24+.
