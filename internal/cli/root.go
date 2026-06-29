@@ -15,6 +15,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime/debug"
+	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -24,13 +26,32 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/tui/theme"
 )
 
-// Version is stamped at build time via -ldflags "-X .../cli.Version=...". The release
-// path (Maven `-P cli` → build-all.sh) stamps the real ${project.version} so a served
-// binary's `whisper --version` matches the release tag exactly (#172 WB1). This literal
-// is ONLY the fallback for a plain `go build` with no ldflag; it tracks the Maven project
-// version (the repo's single version line) rather than an unrelated "2.x" — there is one
-// version for the whole product.
-var Version = "0.115.0"
+// Version is stamped at build time via -ldflags "-X .../cli.Version=...". The release path (Maven
+// `-P cli` → build-all.sh) stamps the real ${project.version} so a served binary's
+// `whisper --version` matches the release tag exactly (#172 WB1). It MUST stay a plain
+// constant-string-initialised var so `-X` can override it.
+//
+// versionFallback is used only when no ldflag was applied. For a `go install <module>@vX` binary
+// (#213) we then recover the real version from the embedded build info (the init below), so a
+// go-installed CLI reports its module version, not this literal. A plain in-repo `go build` (build
+// info version "(devel)") keeps the fallback. One version for the whole product.
+const versionFallback = "0.115.0"
+
+var Version = versionFallback
+
+// init recovers the version for a go-install binary (#213): if no ldflag was applied (Version is
+// still the fallback) and the build carries a real module version, adopt it. Runs before any
+// command reads Version. No-op for the ldflag-stamped release/`-P cli` builds.
+func init() {
+	if Version != versionFallback {
+		return // ldflag-stamped (release / -P cli) — honour it verbatim
+	}
+	if bi, ok := debug.ReadBuildInfo(); ok {
+		if mv := strings.TrimPrefix(bi.Main.Version, "v"); mv != "" && mv != "(devel)" {
+			Version = mv
+		}
+	}
+}
 
 // globalFlags are the root-level, inherited flags every subcommand honours.
 type globalFlags struct {

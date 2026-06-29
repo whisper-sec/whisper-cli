@@ -31,11 +31,33 @@ Windows (PowerShell):
 irm get.whisper.online/install.ps1 | iex
 ```
 
+Homebrew (macOS/Linux):
+
+```sh
+brew install whisper-sec/tap/whisper
+```
+
+Scoop (Windows):
+
+```powershell
+scoop bucket add whisper https://github.com/whisper-sec/scoop-bucket
+scoop install whisper
+```
+
 With Go:
 
 ```sh
 go install github.com/whisper-sec/whisper-cli/cmd/whisper@latest
 ```
+
+With [mise](https://mise.jdx.dev) (GitHub-release backend, no plugin):
+
+```sh
+mise use -g "github:whisper-sec/whisper-cli[exe=whisper]"
+```
+
+(asdf has no built-in GitHub-release backend, so on asdf use mise, or a community
+`ubi`-style plugin.)
 
 Or download the binary for your platform from the
 [Releases page](https://github.com/whisper-sec/whisper-cli/releases/latest), make it
