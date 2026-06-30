@@ -59,6 +59,31 @@ mise use -g "github:whisper-sec/whisper-cli[exe=whisper]"
 (asdf has no built-in GitHub-release backend, so on asdf use mise, or a community
 `ubi`-style plugin.)
 
+On Debian/Ubuntu (apt) — signed repo:
+
+```sh
+curl -fsSL https://get.whisper.online/whisper.gpg | sudo tee /usr/share/keyrings/whisper.gpg >/dev/null
+echo "deb [signed-by=/usr/share/keyrings/whisper.gpg] https://get.whisper.online/deb stable main" | sudo tee /etc/apt/sources.list.d/whisper.list
+sudo apt update && sudo apt install whisper
+```
+
+On Fedora/RHEL (dnf) — signed repo:
+
+```sh
+sudo tee /etc/yum.repos.d/whisper.repo >/dev/null <<'EOF'
+[whisper]
+name=Whisper
+baseurl=https://get.whisper.online/rpm
+enabled=1
+gpgcheck=1
+gpgkey=https://get.whisper.online/whisper.gpg
+EOF
+sudo dnf install whisper
+```
+
+Both repos are served from our own infrastructure (AS219419) and signed with the
+Whisper package key (`get.whisper.online/whisper.gpg`).
+
 Or download the binary for your platform from the
 [Releases page](https://github.com/whisper-sec/whisper-cli/releases/latest), make it
 executable, and put it on your `PATH`.
