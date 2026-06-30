@@ -81,8 +81,17 @@ EOF
 sudo dnf install whisper
 ```
 
-Both repos are served from our own infrastructure (AS219419) and signed with the
-Whisper package key (`get.whisper.online/whisper.gpg`).
+On Alpine (apk) — signed repo:
+
+```sh
+wget -qO /etc/apk/keys/whisper-apk.rsa.pub https://get.whisper.online/apk/whisper-apk.rsa.pub
+echo "https://get.whisper.online/apk" | sudo tee -a /etc/apk/repositories
+sudo apk add whisper
+```
+
+All three repos are served from our own infrastructure (AS219419) and signed with the
+Whisper package key (`get.whisper.online/whisper.gpg`; the apk repo uses its own
+`whisper-apk.rsa.pub`).
 
 Or download the binary for your platform from the
 [Releases page](https://github.com/whisper-sec/whisper-cli/releases/latest), make it
