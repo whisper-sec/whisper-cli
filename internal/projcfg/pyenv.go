@@ -72,6 +72,12 @@ func WriteProxyEnv(p Paths, port int) (PyEnvResult, error) {
 	return res, nil
 }
 
+// ProxyEnvContent returns the canonical Whisper proxy env block for a local proxy port —
+// EXACTLY the bytes `whisper init <tool>` writes to .whisper/proxy.env — so other surfaces
+// (the MCP whisper_egress_config tool) hand out the identical, already-proven strings
+// instead of re-deriving their own (one mechanism, Ken-Thompson lean).
+func ProxyEnvContent(port int) []byte { return proxyEnvContent(port) }
+
 // proxyEnvContent renders the canonical dotenv proxy block for the given loopback port. It
 // mirrors the canonical forms used by run.go's proxyInjectedEnv and settings.go: HTTP-CONNECT
 // is PRIMARY (deps-free; honored by requests/httpx/urllib/openai/anthropic), SOCKS is additive

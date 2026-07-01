@@ -231,10 +231,20 @@ func newCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			choice, err := createAgentWithContact(c, finalName, email)
+			env, err := createIdentity(c, finalName, email)
 			if err != nil {
 				return err
 			}
+			// #256 — under --json, emit the VERBATIM op:identity envelope (agent/address/
+			// fqdn/ptr/state) to STDOUT so a programmatic caller (the whisper-id SDKs'
+			// register()) can JSON-parse it; the human one-liner stays on stderr. This
+			// mirrors the --register path, which already routes through renderEnvelope.
+			// --json wins over --quiet (same precedence as --register).
+			handled, perr := renderEnvelope(env)
+			if handled || perr != nil {
+				return perr
+			}
+			choice := identityChoice(env, finalName)
 			if g.quiet {
 				if choice.addr != "" {
 					fmt.Fprintln(os.Stdout, choice.addr)
@@ -270,9 +280,25 @@ func createAgent(c *client.Client, name string) (agentChoice, error) {
 // RDAP). Splitting it keeps createAgent's signature exactly as §3.2 specifies while the
 // `create` command can still pass --email.
 func createAgentWithContact(c *client.Client, name, email string) (agentChoice, error) {
+	env, err := createIdentity(c, name, email)
+	if err != nil {
+		return agentChoice{}, err
+	}
+	if perr := envelopeError(env); perr != nil {
+		return agentChoice{}, perr
+	}
+	return identityChoice(env, strings.TrimSpace(name)), nil
+}
+
+// createIdentity fires the op:identity wire call and returns the RAW envelope, exactly as
+// client.Agents does — only a transport error is returned here; a server-reported ok:false
+// lives in the envelope. Splitting the call out from the (name,address) projection lets
+// `create` emit the machine JSON envelope VERBATIM to STDOUT under --json (#256) while the
+// human one-liner stays on stderr. A blank name never reaches the server (§3.2).
+func createIdentity(c *client.Client, name, email string) (*client.Envelope, error) {
 	n := strings.TrimSpace(name)
 	if n == "" {
-		return agentChoice{}, usageErr("--name is required to create an agent")
+		return nil, usageErr("--name is required to create an agent")
 	}
 	args := map[string]any{"label": n}
 	if e := strings.TrimSpace(email); e != "" {
@@ -280,23 +306,22 @@ func createAgentWithContact(c *client.Client, name, email string) (agentChoice, 
 	}
 	cx, cancel := ctx()
 	defer cancel()
-	env, err := c.Agents(cx, "identity", args)
-	if err != nil {
-		return agentChoice{}, err
-	}
-	if perr := envelopeError(env); perr != nil {
-		return agentChoice{}, perr
-	}
+	return c.Agents(cx, "identity", args)
+}
+
+// identityChoice projects an op:identity envelope to the (name,address) summary used for the
+// one-line human report, falling back to the requested name when the server echoed no label.
+func identityChoice(env *client.Envelope, name string) agentChoice {
 	recs := env.Result.Records()
 	if len(recs) == 0 {
-		return agentChoice{name: n}, nil
+		return agentChoice{name: name}
 	}
 	addr := field(recs[0], "address", "addr128")
 	disp := field(recs[0], "label")
 	if disp == "" {
-		disp = n
+		disp = name
 	}
-	return agentChoice{name: disp, addr: addr}, nil
+	return agentChoice{name: disp, addr: addr}
 }
 
 // firstNonBlank returns the first argument that is non-blank after trimming, else "".

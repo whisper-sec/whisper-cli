@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -23,6 +24,8 @@ import (
 // server's verbatim verdict. The exit code is the answer: 0 = a verified Whisper agent, 1 =
 // not an agent / a leg failed (a script can branch on it).
 func newVerifyCmd() *cobra.Command {
+	var trustless bool
+	var resolver string
 	cmd := &cobra.Command{
 		Use:   "verify <address|fqdn>",
 		Short: "Verify an address/FQDN is a real Whisper agent (DANE + DNSSEC + reverse-DNS + JWS)",
@@ -32,10 +35,20 @@ func newVerifyCmd() *cobra.Command {
 			"agent's exact certificate, so NO public CA and NO pre-installed trust anchor is needed.\n" +
 			"dane_ok is true only when a strong DANE-EE (3 1 1) pin is published AND the cert the box\n" +
 			"serves satisfies it. This command is KEYLESS (the verify surface is public).\n\n" +
+			"  --trustless   prove the identity INDEPENDENTLY, trusting NO Whisper API. Validates the\n" +
+			"                DNSSEC chain from the IANA root IN-PROCESS (TLSA + AAAA + PTR), matches the\n" +
+			"                served DANE-EE cert against the DNSSEC pin, and verifies the transparency\n" +
+			"                log + identity document against signing keys published in DNSSEC-signed\n" +
+			"                DNS (_whisper-identity/_whisper-ledger TXT) — the HTTPS-served keys are\n" +
+			"                only a cross-check. The default (no flag) uses Whisper's keyless\n" +
+			"                /verify-identity endpoint, which TRUSTS Whisper to run the chain for you.\n\n" +
 			"Exit 0 = a verified Whisper agent; exit 1 = not an agent, or a trust leg did not pass.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := args[0]
+			if trustless {
+				return runTrustless(target, resolver)
+			}
 			// Keyless: a key is NOT required (the verify surface is public). resolveClient with
 			// needKey=false tolerates a missing key and still builds a usable client.
 			c, err := resolveClient(false, false)
@@ -47,6 +60,19 @@ func newVerifyCmd() *cobra.Command {
 			v, raw, status, err := c.VerifyIdentity(cx, target)
 			if err != nil {
 				return err
+			}
+			if status == 400 {
+				// #254: a 400 is NOT a verdict — it is the server rejecting the input, with a
+				// helpful JSON detail. Surface THAT detail (never the misleading "not a verified
+				// agent" misread of an empty verdict). --json still gets the verbatim body first.
+				if g.jsonOut {
+					os.Stdout.Write(raw)
+					if len(raw) == 0 || raw[len(raw)-1] != '\n' {
+						fmt.Fprintln(os.Stdout)
+					}
+				}
+				return &client.ProblemError{Status: 400,
+					Detail: problemDetail(raw, fmt.Sprintf("verify-identity rejected %q (HTTP 400)", target))}
 			}
 			if g.jsonOut {
 				// The verdict IS the data — emit it verbatim (the server's exact bytes), like rdap.
@@ -67,7 +93,41 @@ func newVerifyCmd() *cobra.Command {
 			return &client.ProblemError{Status: status, Detail: notVerifiedReason(v, target)}
 		},
 	}
+	cmd.Flags().BoolVar(&trustless, "trustless", false,
+		"prove identity independently (DNSSEC root + DANE-EE + transparency); trust NO Whisper API")
+	cmd.Flags().StringVar(&resolver, "resolver", "",
+		"DNS resolver for --trustless (host or host:port); default public DNSSEC-capable resolvers")
 	return cmd
+}
+
+// problemDetail extracts the most helpful message from a JSON error body (#254) — liberal in
+// what it accepts: RFC-7807 {detail}/{title}, a {"message":…}, or the legacy {"error":"…"} /
+// {"error":{detail|message|title}} forms. Falls back to the caller's line when the body
+// carries nothing usable (never an empty error).
+func problemDetail(raw []byte, fallback string) string {
+	var p struct {
+		Detail  string          `json:"detail"`
+		Title   string          `json:"title"`
+		Message string          `json:"message"`
+		Error   json.RawMessage `json:"error"`
+	}
+	_ = json.Unmarshal(raw, &p)
+	if s := strings.TrimSpace(firstNonBlank(p.Detail, p.Message, p.Title)); s != "" {
+		return s
+	}
+	if len(p.Error) > 0 {
+		var es string
+		if json.Unmarshal(p.Error, &es) == nil && strings.TrimSpace(es) != "" {
+			return strings.TrimSpace(es)
+		}
+		var eo struct{ Detail, Message, Title string }
+		if json.Unmarshal(p.Error, &eo) == nil {
+			if s := strings.TrimSpace(firstNonBlank(eo.Detail, eo.Message, eo.Title)); s != "" {
+				return s
+			}
+		}
+	}
+	return fallback
 }
 
 // notVerifiedReason is the one-line reason a verify did not fully pass, for the non-zero exit

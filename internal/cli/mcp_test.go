@@ -58,13 +58,15 @@ func TestMCP_Initialize(t *testing.T) {
 	}
 }
 
-// TestMCP_ToolsList: tools/list returns exactly the keyless tools, each with an inputSchema.
+// TestMCP_ToolsList: WITHOUT a key, tools/list returns exactly the keyless tools, each with an
+// inputSchema — the control tools are NOT advertised (graceful two-tier, RULE 14).
 func TestMCP_ToolsList(t *testing.T) {
+	pinKeyState(t, "", "")
 	r := drive(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	res, _ := r[0]["result"].(map[string]any)
 	tools, _ := res["tools"].([]any)
 	if len(tools) != 2 {
-		t.Fatalf("expected 2 tools, got %d", len(tools))
+		t.Fatalf("expected 2 keyless tools without a key, got %d", len(tools))
 	}
 	names := map[string]bool{}
 	for _, ti := range tools {
@@ -77,6 +79,11 @@ func TestMCP_ToolsList(t *testing.T) {
 	for _, want := range []string{"whisper_verify", "whisper_rdap"} {
 		if !names[want] {
 			t.Fatalf("missing tool %q (have %v)", want, names)
+		}
+	}
+	for _, banned := range []string{"whisper_register", "whisper_list", "whisper_policy", "whisper_logs", "whisper_revoke", "whisper_egress_config"} {
+		if names[banned] {
+			t.Fatalf("control tool %q must not be listed without a key", banned)
 		}
 	}
 }
