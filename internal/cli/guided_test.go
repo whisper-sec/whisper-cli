@@ -43,7 +43,7 @@ func guidedTestServer(t *testing.T, agents []agentChoice, seen *[]string) *httpt
 
 // sniffOp pulls the op token out of the Cypher body whisper.agents({op:'...'}).
 func sniffOp(body string) string {
-	for _, op := range []string{"identity", "register", "connect", "list", "agent", "revoke"} {
+	for _, op := range []string{"identity", "register", "connect", "list", "logs", "policy", "agent", "revoke"} {
 		if strings.Contains(body, "'"+op+"'") || strings.Contains(body, `"`+op+`"`) {
 			return op
 		}
