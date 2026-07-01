@@ -170,8 +170,8 @@ func mcpClientMatrix() string {
 		"  Goose                  ~/.config/goose/config.yaml (YAML, key \"extensions\") — add a `whisper` extension running `whisper mcp`\n" +
 		"  Continue               ~/.continue/config.yaml (YAML list \"mcpServers\") — add a `whisper` entry running `whisper mcp`\n" +
 		"\nthen restart the client. Verify in-chat: ask it to run the `whisper_verify` tool.\n" +
-			"keyless verify/RDAP work as-is; with WHISPER_API_KEY in the client's env (or after\n" +
-			"`whisper login`) the control tools — register/list/policy/logs/revoke/egress — unlock too.\n"
+		"keyless verify/RDAP work as-is; with WHISPER_API_KEY in the client's env (or after\n" +
+		"`whisper login`) the control tools — register/list/policy/logs/revoke/egress — unlock too.\n"
 }
 
 // --- JSON-RPC 2.0 wire types ---------------------------------------------------------------
@@ -342,7 +342,7 @@ func mcpTools() []map[string]any {
 func mcpControlTools() []map[string]any {
 	return []map[string]any{
 		{
-			"name": "whisper_register",
+			"name":        "whisper_register",
 			"description": "Create (register) a new Whisper agent in YOUR tenant: give it a human name and receive its routable IPv6 /128 address plus DNS name — a real, verifiable network identity (reverse-DNS and RDAP resolve to it worldwide). Use this to give an agent or workload an identity before connecting it. Set with_key:true ONLY when the agent needs its OWN separate API key — that key appears ONCE in the result and can never be retrieved again, so store it immediately.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
@@ -356,7 +356,7 @@ func mcpControlTools() []map[string]any {
 			},
 		},
 		{
-			"name": "whisper_list",
+			"name":        "whisper_list",
 			"description": "List the agents in YOUR tenant — name, /128 address, DNS name, state, created. Call this first to discover what exists before registering, revoking, or fetching logs. kind can also be 'records' (DNS records) or 'identities'.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
@@ -367,7 +367,7 @@ func mcpControlTools() []map[string]any {
 			},
 		},
 		{
-			"name": "whisper_policy",
+			"name":        "whisper_policy",
 			"description": "Read or set YOUR tenant's DNS resolver policy (what your agents may resolve). Call with NO arguments to READ the current policy. To SET it, pass block and/or allow (lists of domain names) and/or default ('allow' or 'deny' — the action for names on no list).",
 			"inputSchema": map[string]any{
 				"type":                 "object",
@@ -380,7 +380,7 @@ func mcpControlTools() []map[string]any {
 			},
 		},
 		{
-			"name": "whisper_logs",
+			"name":        "whisper_logs",
 			"description": "Query YOUR agents' recent activity — DNS queries (with allow/block decisions), connections, and allocations. Narrow with agent (an agent id or its /128 address from whisper_list), kind ('dns' | 'conn' | 'alloc'), a time window (from/to: epoch-ms, RFC-3339, or relative like '-1h'), and limit. Use this to audit what an agent actually did on the network.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
@@ -395,7 +395,7 @@ func mcpControlTools() []map[string]any {
 			},
 		},
 		{
-			"name": "whisper_revoke",
+			"name":        "whisper_revoke",
 			"description": "IRREVERSIBLY revoke an agent: withdraw its /128 address, reverse-DNS, tokens, and (if it had one) its API key. The identity stops verifying immediately. Use whisper_list first to confirm the exact agent; there is no undo. Requires the agent id or its /128 address.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
@@ -407,7 +407,7 @@ func mcpControlTools() []map[string]any {
 			},
 		},
 		{
-			"name": "whisper_egress_config",
+			"name":        "whisper_egress_config",
 			"description": "Get the ready-to-use egress configuration for running a workload FROM a Whisper agent's /128 address: the local proxy endpoints, the exact proxy environment block (the same .whisper/proxy.env that `whisper init` writes), and the `whisper connect` / `whisper run` commands that bring the tunnel up. The MCP server itself cannot hold a tunnel open — run the returned start command in the workload's environment. Pass agent to pin a specific identity, port to pin the local proxy port.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
