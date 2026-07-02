@@ -27,7 +27,7 @@ const (
 )
 
 // agentFixture is a complete, hermetic agent: a signed DNSSEC hierarchy (AAAA + PTR + TLSA +
-// the #260 _whisper-identity/_whisper-ledger key anchors), a DANE-EE cert matching the TLSA
+// the _whisper-identity/_whisper-ledger key anchors), a DANE-EE cert matching the TLSA
 // pin, and a Fetcher serving a signed transparency object + identity_doc.
 type agentFixture struct {
 	opts Options
@@ -94,7 +94,7 @@ func buildAgentFixture(t *testing.T, idDocAddr, ptrName string) agentFixture {
 
 	jwks := `{"keys":[` + fx.esJWKJSON + `,` + jwkJSON(idJWK) + `]}`
 
-	// #260: publish the DNSSEC-anchored key TXT records in the signed test zone -- the fleet
+	// publish the DNSSEC-anchored key TXT records in the signed test zone -- the fleet
 	// ES256 set (transparency root + identity-doc keys) and the Ed25519 ledger key -- exactly
 	// what production serves at _whisper-identity/_whisper-ledger under whisper.online.
 	idSpki, err := x509.MarshalPKIXPublicKey(&idPriv.PublicKey)
@@ -167,7 +167,7 @@ func TestVerify_FullHappyPath(t *testing.T) {
 	if rep.TLSAPin != hex.EncodeToString(func() []byte { s := SPKISHA256(fx.cert); return s[:] }()) {
 		t.Errorf("tlsa pin not reported correctly")
 	}
-	// #260: with the key anchors published in the signed zone, steps 3-4 are DNSSEC-root --
+	// with the key anchors published in the signed zone, steps 3-4 are DNSSEC-root --
 	// the whole chain is fully trustless, no trust-on-pin anywhere.
 	if lvl := trustLevelOf(rep, "transparency"); lvl != TrustDNSSECRoot {
 		t.Errorf("transparency trust level = %s, want %s", lvl, TrustDNSSECRoot)
@@ -181,9 +181,9 @@ func TestVerify_FullHappyPath(t *testing.T) {
 }
 
 func TestVerify_FallsBackToTrustOnPinWithoutDNSAnchor(t *testing.T) {
-	// #260 graceful degradation: a pre-#260 server (no _whisper-identity/_whisper-ledger TXT)
+	// graceful degradation: a pre- server (no _whisper-identity/_whisper-ledger TXT)
 	// still verifies everything -- but steps 3-4 are honestly LABELLED trust-on-pin, exactly
-	// the pre-#260 behavior. The verdict (DNSSEC + DANE) is unaffected.
+	// the pre- behavior. The verdict (DNSSEC + DANE) is unaffected.
 	fx := buildAgentFixture(t, "", "")
 	delete(fx.h.res.answers, rkey("_whisper-identity."+agentZone, dns.TypeTXT))
 	delete(fx.h.res.answers, rkey("_whisper-ledger."+agentZone, dns.TypeTXT))
@@ -206,7 +206,7 @@ func TestVerify_FallsBackToTrustOnPinWithoutDNSAnchor(t *testing.T) {
 }
 
 func TestVerify_IdentityDocKeyOutsideAnchorFailsClosed(t *testing.T) {
-	// #260 fail-closed: the anchor RRset exists but does NOT contain the key that signed the
+	// fail-closed: the anchor RRset exists but does NOT contain the key that signed the
 	// identity_doc (only the transparency root key is anchored) ⇒ identity_doc FAILs and the
 	// verdict sinks -- a foreign signing key is a fraud signal, never a silent fallback.
 	fx := buildAgentFixture(t, "", "")

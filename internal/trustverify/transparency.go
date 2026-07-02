@@ -60,7 +60,7 @@ type transparencyResult struct {
 	leafCount int
 	events    int
 
-	// #260 trust bookkeeping: which signatures verified, and whether each verified against a
+	// trust bookkeeping: which signatures verified, and whether each verified against a
 	// DNSSEC-anchored key (vs a WebPKI-served, trust-on-pin one).
 	rootVerified   bool
 	rootAnchored   bool
@@ -88,7 +88,7 @@ func (r transparencyResult) anchoredTrustless() bool {
 // signature, the address/count/root_hash binding, the per-address hash-chain, the C2SP
 // checkpoint (Ed25519), and RFC-6962 inclusion of any leaves.
 //
-// Trust model (#260): when dnsKeys carries the DNSSEC-anchored signing keys, they are THE
+// Trust model: when dnsKeys carries the DNSSEC-anchored signing keys, they are THE
 // verification keys -- a signature by a key outside the anchored set is a FAIL (fail-closed),
 // and the HTTPS-served JWKS / /checkpoint/key are demoted to a cross-check that FAILs on
 // disagreement. When the DNS anchor is unavailable the step falls back to the WebPKI-served
@@ -126,7 +126,7 @@ func verifyTransparency(ctx context.Context, f Fetcher, rdapBase, addr string, j
 		anchored := dnsKeys != nil && len(dnsKeys.JWKS) > 0
 		var keys JWKSet
 		if anchored {
-			// #260 fail-closed: the DNSSEC-anchored key set is THE key set. A root signed by a
+			// fail-closed: the DNSSEC-anchored key set is THE key set. A root signed by a
 			// kid outside it is a fraud signal, not a fallback case.
 			keys = dnsKeys.JWKS
 			if _, ok := keys[rootKid]; !ok {
@@ -231,7 +231,7 @@ func verifyHashChain(obj transparencyObject) error {
 }
 
 // verifyLedgerInclusion verifies the C2SP checkpoint signature (Ed25519) and each leaf's
-// RFC-6962 inclusion against the checkpoint root. #260: when dnsKeys carries DNSSEC-anchored
+// RFC-6962 inclusion against the checkpoint root. when dnsKeys carries DNSSEC-anchored
 // ledger keys, the checkpoint MUST be signed by one of them (selected by the key-id embedded
 // in its signature line -- fail-closed otherwise) and the HTTPS /checkpoint/key becomes a
 // cross-check that FAILs on disagreement; without the DNS anchor, the published HTTPS key is

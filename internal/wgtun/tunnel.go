@@ -2,7 +2,7 @@
 // Copyright (c) 2026 viaGraph B.V. (Whisper Security)
 
 // Package wgtun is the client-side Tier-1 WireGuard egress for the `whisper` CLI
-// (issue #188): a USERSPACE WireGuard tunnel (wireguard-go + gVisor netstack — no root,
+// : a USERSPACE WireGuard tunnel (wireguard-go + gVisor netstack — no root,
 // no kernel wg, no /dev/net/tun) bound to the agent's /128, fronted by the SAME local
 // SOCKS5/HTTP-CONNECT proxy the Tier-1.5 egress uses. The user's tools point ALL_PROXY /
 // http_proxy at socks5h://127.0.0.1:<port> and every connection egresses from the agent's
@@ -19,9 +19,9 @@
 // WHY userspace (mirrors wireproxy / the spawned-agent default): no privilege, no TUN
 // device, byte-identical across linux/darwin/windows (CGO-free, pure Go). The /128 routes
 // because the box registered our public key as a peer with that /128 as its sole AllowedIPs
-// (server-side #178); cryptokey routing confines us to exactly our own identity.
+// (server-side); cryptokey routing confines us to exactly our own identity.
 //
-// ROBUSTNESS (mirrors the server reaper philosophy — a stale tunnel is frustrating, #188):
+// ROBUSTNESS (mirrors the server reaper philosophy — a stale tunnel is frustrating):
 //   - PersistentKeepalive 25s keeps the NAT/UDP path warm (set in the device config).
 //   - a health monitor polls the device's last-handshake; a tunnel that has had NO handshake
 //     past a dead-threshold is reconnected (the peer endpoint is re-set, forcing a fresh
@@ -69,7 +69,7 @@ type Options struct {
 	// HealthInterval is how often the monitor polls the device's handshake. 0 ⇒ 5s.
 	HealthInterval time.Duration
 	// DeadAfter is how long with NO fresh handshake before the monitor forces a reconnect.
-	// 0 ⇒ 180s (~7× the 25s keepalive — the server reaper's own black-hole threshold, #178).
+	// 0 ⇒ 180s (~7× the 25s keepalive — the server reaper's own black-hole threshold).
 	DeadAfter time.Duration
 	// Logf, if set, receives one-line operational notes (reconnects). nil ⇒ silent. It must
 	// NEVER be handed a secret — callers pass a plain stderr writer; we only emit safe text.

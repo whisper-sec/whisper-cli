@@ -27,7 +27,7 @@ type Keypair struct {
 // per RFC 7748 (the standard WireGuard clamping) and used ONLY to drive the userspace device;
 // only the public half is shared. This is the best-practice path: the server registers our
 // public key as a peer and never sees the private key, so reverse-DNS identity is bound to a
-// key that only WE hold (#188). x/crypto/curve25519 is already a transitive dep (wireguard-go).
+// key that only WE hold. x/crypto/curve25519 is already a transitive dep (wireguard-go).
 func GenerateKeypair() (Keypair, error) {
 	var priv [32]byte
 	if _, err := rand.Read(priv[:]); err != nil {

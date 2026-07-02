@@ -26,7 +26,7 @@ import (
 //	  ├─ 1 agent  → quick-confirm "Use <name>? [Y/n]" (Enter = yes) → connect → verify
 //	  └─ N agents → pick-or-create menu → connect → verify
 //
-// Until WB3 lands the real wireproxy connect, the flow STUBS connect: it prints the
+// Until lands the real wireproxy connect, the flow STUBS connect: it prints the
 // chosen agent + one calm "connecting is coming in the next release" line. We never fake
 // a connection (conservative in what we emit).
 //
@@ -302,7 +302,7 @@ func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []ag
 	return connectAndReport(opts, gio, choices[idx-1])
 }
 
-// connectAndReport is the tail of every guided branch (#172 WB3 — the WB2 stub is now
+// connectAndReport is the tail of every guided branch (the stub is now
 // LIVE). Once the agent is chosen we persist it (so later commands bind to it with zero
 // config), bring the egress up via the SHARED connect (op:connect → local proxy → fold
 // verify), and print the ONE calm ✓-verified success line. --quiet prints ONLY
@@ -315,7 +315,7 @@ func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []ag
 //
 // connectVia is a package var so a test drives the flow with a stub control plane.
 func connectAndReport(opts guidedOptions, gio guidedIO, choice agentChoice) error {
-	// Persist the selection (#110): later `connect`/`status` bind to THIS identity.
+	// Persist the selection: later `connect`/`status` bind to THIS identity.
 	if choice.addr != "" {
 		_ = client.SaveAgent(opts.agentFile, choice.addr)
 	} else if choice.name != "" {

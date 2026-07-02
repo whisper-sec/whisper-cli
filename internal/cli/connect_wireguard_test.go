@@ -68,7 +68,7 @@ func stubWgBringUp(t *testing.T, gotKey **wgtun.Keypair) func() {
 	return func() { connectAndVerify = savedConnect; holdUntilSignal = savedHold }
 }
 
-// TestConnect_WireGuardTier_SendsPublicKeyNotPrivate is the headline command-layer #188 test:
+// TestConnect_WireGuardTier_SendsPublicKeyNotPrivate is the headline command-layer test:
 // `whisper connect --tier wireguard` must (1) mint a LOCAL keypair, (2) send ONLY its public
 // half + tier:wireguard in the op:connect args, and (3) NEVER put a private key on the wire or
 // in any output. The private key staying local is the load-bearing identity-security property.

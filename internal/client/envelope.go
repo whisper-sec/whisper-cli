@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ProblemError is the RFC-7807 problem object the control plane returns on failure
@@ -58,10 +59,14 @@ type Envelope struct {
 //
 //	{ "ok": true, "status": 200, "result": {"columns":[...],"rows":[...]}, "error": null }
 type rawEnvelope struct {
-	Ok     *bool         `json:"ok"`
-	Status int           `json:"status"`
-	Result *Result       `json:"result"`
-	Error  *ProblemError `json:"error"`
+	Ok     *bool   `json:"ok"`
+	Status int     `json:"status"`
+	Result *Result `json:"result"`
+	// Error is kept RAW (not *ProblemError) because a row-level failure may carry its
+	// detail as a bare string rather than an RFC-7807 object — decodeProblem accepts
+	// either (Postel: liberal in what we accept, so a real server explanation is never
+	// silently dropped in favour of a generic message).
+	Error json.RawMessage `json:"error"`
 	// Columns/Rows are the ALTERNATIVE Neo4j-procedure-row wrapper the live /api/query
 	// returns: a `whisper.agents({op:...})` CALL comes back as its own little table —
 	// outer columns `op, ok, status, result, error, retry_after`, one row per call:
@@ -81,6 +86,7 @@ type rawEnvelope struct {
 // column-keyed object or a positional array.
 type outerRow struct {
 	Ok     *bool
+	Status int
 	Result *Result
 	Error  *ProblemError
 }
@@ -112,19 +118,50 @@ func decodeOuterRow(raw json.RawMessage, columns []string) outerRow {
 			row.Ok = &b
 		}
 	}
+	if v, ok := fields["status"]; ok {
+		var n int
+		if json.Unmarshal(v, &n) == nil {
+			row.Status = n
+		}
+	}
 	if v, ok := fields["result"]; ok && string(v) != "null" {
 		var r Result
 		if json.Unmarshal(v, &r) == nil {
 			row.Result = &r
 		}
 	}
-	if v, ok := fields["error"]; ok && string(v) != "null" {
-		var e ProblemError
-		if json.Unmarshal(v, &e) == nil {
-			row.Error = &e
-		}
+	if v, ok := fields["error"]; ok {
+		row.Error = decodeProblem(v)
 	}
 	return row
+}
+
+// decodeProblem parses a control-plane error field LIBERALLY: an RFC-7807 object
+// ({"detail":...}/{"title":...}/{"type":...}), a bare string (many row-level failures
+// come back as a plain reason string, not a structured problem), or null/empty (nil).
+// Postel: never let an unexpected — but perfectly legible — error-field shape get
+// silently dropped in favour of a generic "control plane reported failure".
+func decodeProblem(raw json.RawMessage) *ProblemError {
+	s := strings.TrimSpace(string(raw))
+	if s == "" || s == "null" {
+		return nil
+	}
+	var p ProblemError
+	if json.Unmarshal(raw, &p) == nil && (p.Detail != "" || p.Title != "" || p.Type != "") {
+		return &p
+	}
+	var str string
+	if json.Unmarshal(raw, &str) == nil && strings.TrimSpace(str) != "" {
+		return &ProblemError{Detail: strings.TrimSpace(str)}
+	}
+	return nil
+}
+
+// hasContent reports whether a raw JSON field is present and non-null (helper for the
+// rawEnvelope.Error field, now decoded lazily via decodeProblem).
+func hasContent(raw json.RawMessage) bool {
+	s := strings.TrimSpace(string(raw))
+	return s != "" && s != "null"
 }
 
 // DecodeEnvelope parses a control-plane reply body into a normalised Envelope. It is
@@ -165,13 +202,16 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 	if re.Ok != nil {
 		env.Ok = *re.Ok
 		env.Result = re.Result
-		env.Err = re.Error
+		env.Err = decodeProblem(re.Error)
 		if env.Result == nil && len(re.Rows) > 0 {
 			// The top level carries ok/status but the actual payload lives in the outer
 			// whisper.agents YIELD row (the live tabular shape) — recover it by name
 			// rather than concluding there is no result.
 			row := decodeOuterRow(re.Rows[0], re.Columns)
 			env.Result = row.Result
+			if row.Status != 0 {
+				env.Status = row.Status
+			}
 			if env.Err == nil {
 				env.Err = row.Error
 			}
@@ -187,10 +227,10 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 	}
 
 	// Shape 3: a bare problem object (no ok, no rows, but a problem-ish field present).
-	if re.Error != nil || (re.Result == nil && len(re.Rows) == 0 && hasProblemFields(body)) {
+	if hasContent(re.Error) || (re.Result == nil && len(re.Rows) == 0 && hasProblemFields(body)) {
 		env.Ok = false
-		if re.Error != nil {
-			env.Err = re.Error
+		if pe := decodeProblem(re.Error); pe != nil {
+			env.Err = pe
 		} else {
 			env.Err = decodeBareProblem(body, env.Status)
 		}
@@ -212,6 +252,9 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 		row := decodeOuterRow(re.Rows[0], re.Columns)
 		if row.Ok != nil && !*row.Ok {
 			env.Ok = false
+			if row.Status != 0 {
+				env.Status = row.Status
+			}
 			env.Err = row.Error
 			if env.Err == nil {
 				env.Err = &ProblemError{Status: env.Status, Detail: "control plane reported failure"}

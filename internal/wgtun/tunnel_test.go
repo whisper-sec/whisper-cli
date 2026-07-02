@@ -23,7 +23,7 @@ import (
 // These tests stand up a REAL second wireguard-go device on loopback (the "box" side) and run
 // the client Tunnel against it — a genuine end-to-end userspace handshake + encrypted byte
 // flow over loopback UDP, with NO root, NO kernel wg, NO /dev/net/tun. This is the same shape
-// the live box uses (#178), just both ends in-process, so it proves the client path for real.
+// the live box uses, just both ends in-process, so it proves the client path for real.
 
 func mustAddr(t *testing.T, s string) netip.Addr {
 	t.Helper()
@@ -119,7 +119,7 @@ func freeUDPPort(t *testing.T) int {
 	return port
 }
 
-// TestTunnel_EndToEndEgress is the headline #188 test: a REAL userspace WireGuard handshake on
+// TestTunnel_EndToEndEgress is the headline test: a REAL userspace WireGuard handshake on
 // loopback, then bytes flow from a SOCKS5 client through the client Tunnel, over the encrypted
 // tunnel, to the echo backend inside the server netstack — and back. It also asserts Healthy()
 // flips true once the handshake completes (the live tunnel-health signal `whisper status` uses).
@@ -229,7 +229,7 @@ func TestTunnel_StopIsCleanAndIdempotent(t *testing.T) {
 	}
 }
 
-// TestTunnel_ReconnectOnDeadHandshake drives the robustness path (#188): with a tiny DeadAfter
+// TestTunnel_ReconnectOnDeadHandshake drives the robustness path: with a tiny DeadAfter
 // and a server that we take DOWN, the monitor must observe the tunnel go unhealthy and DRIVE at
 // least one reconnect (re-handshake) attempt — proving a stale tunnel self-heals rather than
 // silently black-holing. The local endpoint is unchanged throughout.

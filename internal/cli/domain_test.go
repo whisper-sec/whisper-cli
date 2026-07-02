@@ -10,7 +10,7 @@ import (
 )
 
 // TestAgentDomain covers the FQDN→zone derivation that distinguishes a hosted identity
-// (agents.whisper.online) from a BYOD-domain one (#168). Liberal in what it reads: trailing
+// (agents.whisper.online) from a BYOD-domain one. Liberal in what it reads: trailing
 // dot or not, blank in → blank out, a bare apex returns itself.
 func TestAgentDomain(t *testing.T) {
 	cases := []struct {

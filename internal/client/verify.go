@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-// VerifyVerdict is the decoded server-side answer from GET /verify-identity (#113/#119):
+// VerifyVerdict is the decoded server-side answer from GET /verify-identity:
 // the FULL Whisper-agent trust chain run server-side from the local authoritative zone
 // (reverse-DNS PTR + forward-confirm AAAA + the DANE-EE TLSA pin + the JWS identity doc),
 // folded into ONE verdict so a caller need not stitch four protocols together itself.

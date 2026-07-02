@@ -27,7 +27,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
-// lifetime_test.go is the #172 WB3 PROXY-LIFETIME regression suite for the CLI callers.
+// lifetime_test.go is the PROXY-LIFETIME regression suite for the CLI callers.
 //
 // THE bug it guards: StartLocalProxy used to bind its teardown to the caller's SHORT
 // control-plane ctx (`go func(){ <-ctx.Done(); p.Stop() }()`), and the callers cancel that
@@ -231,7 +231,7 @@ func stubLiveProxyTail(t *testing.T, egressAddr, verifiedAddr string) (sessions 
 
 // --- run.go lifetime: the child gets a LIVE proxy, not a dead one --------------------
 
-// TestRun_ProxyLiveForChild proves the #172 WB3 fix for `whisper run`: the local proxy in
+// TestRun_ProxyLiveForChild proves the fix for `whisper run`: the local proxy in
 // the child's injected ALL_PROXY must still ACCEPT + STREAM while the child runs — i.e.
 // AFTER the control ctx that op:connect/verify used has been cancelled. The child here
 // dials its own $ALL_PROXY through to the echo backend and reports OK only if the tunnel
@@ -267,7 +267,7 @@ func TestRun_ProxyLiveForChild(t *testing.T) {
 		t.Skip("python3 unavailable in the child env; core run.go lifetime covered by TestRun_ProxyLiveAfterControlCtxCancel")
 	}
 	if !strings.Contains(stdout, "LIVE") {
-		t.Fatalf("child could not stream through its injected ALL_PROXY — the proxy died with the control ctx (the WB3 bug); child stdout=%q", stdout)
+		t.Fatalf("child could not stream through its injected ALL_PROXY — the proxy died with the control ctx (the ctx-cancellation bug); child stdout=%q", stdout)
 	}
 
 	// The owner (runWithEgress) must have Stop()'d the proxy after the child exited.
@@ -335,7 +335,7 @@ func TestRun_ProxyLiveAfterControlCtxCancel(t *testing.T) {
 
 	// The injected ALL_PROXY (the child would inherit) must still stream.
 	if err := dialThroughProxy(t, sess.endpoint, "example.com:80", "after-cancel-run"); err != nil {
-		t.Fatalf("the proxy a child would inherit is DEAD after the control ctx was cancelled (the WB3 bug): %v", err)
+		t.Fatalf("the proxy a child would inherit is DEAD after the control ctx was cancelled (the ctx-cancellation bug): %v", err)
 	}
 	// And Stop() (the owner's job, after the child) ends it.
 	sess.Stop()
@@ -347,7 +347,7 @@ func TestRun_ProxyLiveAfterControlCtxCancel(t *testing.T) {
 
 // --- guided.go lifetime: the hold holds a LIVE proxy ---------------------------------
 
-// TestGuidedHold_ProxySurvivesPastConnectAndVerify proves the #172 WB3 fix for the guided
+// TestGuidedHold_ProxySurvivesPastConnectAndVerify proves the fix for the guided
 // front door: connectVia cancels the control ctx right after connectAndVerify, then parks
 // in holdUntilSignal. The proxy MUST survive that cancel so the "Connected ✓ verified"
 // terminal holds a LIVE tunnel — before the fix the proxy died with the control ctx and the
@@ -381,6 +381,6 @@ func TestGuidedHold_ProxySurvivesPastConnectAndVerify(t *testing.T) {
 		t.Fatalf("connectVia errored: %v", err)
 	}
 	if holdErr != nil {
-		t.Fatalf("the guided hold held a DEAD proxy — it did not survive past connectAndVerify (the WB3 bug): %v", holdErr)
+		t.Fatalf("the guided hold held a DEAD proxy — it did not survive past connectAndVerify (the ctx-cancellation bug): %v", holdErr)
 	}
 }

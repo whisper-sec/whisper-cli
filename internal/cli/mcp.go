@@ -18,10 +18,10 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/projcfg"
 )
 
-// mcp.go is `whisper mcp`: a Model Context Protocol server over stdio (#193, #264). An MCP
+// mcp.go is `whisper mcp`: a Model Context Protocol server over stdio. An MCP
 // client (Claude Desktop, Cursor, Windsurf, VS Code, Cline, Goose, …) spawns `whisper mcp` and
 // talks newline-delimited JSON-RPC 2.0 on stdin/stdout. The tool surface is TWO-TIER, per the
-// Robustness Principle (RULE 14):
+// Robustness Principle:
 //
 //   - KEYLESS (always): verify an agent identity (DANE/DNSSEC/JWS) and fetch RDAP for a /128 —
 //     "is this address a real Whisper agent, and whose?" in-chat, with NO API key and NO
@@ -287,7 +287,7 @@ func mcpInitializeResult(params json.RawMessage) map[string]any {
 // mcpHasKey reports whether the standard key ladder resolves a credential (WHISPER_API_KEY /
 // WHISPER_KEY env, --key, or the `whisper login` key file). It gates WHICH tools are listed:
 // the keyless verify/RDAP pair always; the control tools only when a key is present — the
-// two-tier surface RULE 14 mandates (keyless value for everyone, the full product for
+// two-tier surface mandates (keyless value for everyone, the full product for
 // key-holders, auth optional).
 func mcpHasKey() bool {
 	c, err := resolveClient(false, false)
@@ -301,7 +301,7 @@ const mcpNoKeyErr = "this tool needs your Whisper API key — set WHISPER_API_KE
 	"then restart the client. The keyless whisper_verify / whisper_rdap tools work without a key."
 
 // mcpTools is the tool catalogue: the keyless pair always, plus the key-gated control tools
-// when a credential resolves (two-tier, RULE 14).
+// when a credential resolves (two-tier).
 func mcpTools() []map[string]any {
 	tools := []map[string]any{
 		{
@@ -472,7 +472,7 @@ func mcpToolVerify(args json.RawMessage) mcpToolResult {
 		return mcpErr("verify failed: " + err.Error())
 	}
 	if status == 400 {
-		// #254: a 400 is malformed input, not a verdict — surface the server's own JSON
+		// a 400 is malformed input, not a verdict — surface the server's own JSON
 		// detail so the model can correct the target, never an opaque failure.
 		return mcpErr(problemDetail(raw, fmt.Sprintf("verify-identity rejected %q (HTTP 400)", a.Target)))
 	}
@@ -500,7 +500,7 @@ func mcpToolRDAP(args json.RawMessage) mcpToolResult {
 	return mcpText(string(raw))
 }
 
-// --- key-gated control tools (#264, RULE 14) -------------------------------------------------
+// --- key-gated control tools -------------------------------------------------
 //
 // Every control tool is a thin shell over the SAME internal/client op path its CLI twin uses
 // (whisper_register ↔ `whisper create [--register]`, whisper_list ↔ `whisper list`,

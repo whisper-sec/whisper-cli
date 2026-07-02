@@ -19,7 +19,7 @@ import (
 
 // daemon.go is the hidden `__connect-daemon` subcommand the `--ensure` re-exec lands in. It
 // brings the project's tunnel up on the PINNED deterministic port and HOLDS it for the whole
-// session (Background-rooted proxy + #188 auto-reconnect for the WG tier), exactly like a
+// session (Background-rooted proxy + auto-reconnect for the WG tier), exactly like a
 // persistent `whisper connect` — only headless, port-pinned, and detached from the launching
 // shell. It is hidden because users never invoke it directly; `init` and `connect --ensure`
 // spawn it.
@@ -82,7 +82,7 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config) error {
 		args["tier"] = tier
 	}
 	// --tier wireguard: mint a local WG keypair; only the public half goes to the server. No-op
-	// for socks5. (Same #188 best-practice flow as every other connect surface.)
+	// for socks5. (Same best-practice flow as every other connect surface.)
 	var wgKey *wgtun.Keypair
 	if isWireGuardTier(tier) {
 		wgKey, err = prepareWireGuard(tier, args)

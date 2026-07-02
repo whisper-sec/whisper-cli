@@ -24,7 +24,7 @@ func problemServer(t *testing.T, status int, body string) *httptest.Server {
 	}))
 }
 
-// mcp_control_test.go covers the KEY-GATED half of the MCP surface (#264, RULE 14): the
+// mcp_control_test.go covers the KEY-GATED half of the MCP surface: the
 // two-tier tools/list gate, the missing-key tool error, each control tool's op mapping
 // through the recordingServer stub, and the egress-config strings.
 

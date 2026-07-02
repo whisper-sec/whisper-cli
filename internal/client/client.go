@@ -28,7 +28,7 @@ const (
 	// for pre-prod — Postel: liberal in, sane zero-config default).
 	DefaultConsoleURL = "https://console.whisper.security"
 	// DefaultVerifyURL is the public, KEYLESS one-call identity-verification surface
-	// (#113/#119): GET /verify-identity?ip=<addr> runs the full agent-trust chain
+	//: GET /verify-identity?ip=<addr> runs the full agent-trust chain
 	// server-side (reverse-DNS + FCrDNS + DANE-TLSA pin + the JWS identity doc) and
 	// returns one signed-where-possible verdict. It is served on ANY gateway host; rdap
 	// is the natural public default. Overridable with --verify-url for pre-prod.

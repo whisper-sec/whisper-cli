@@ -62,7 +62,7 @@ func listJSON(agents []agentChoice) string {
 // guidedHarness wires the package globals at a stub server + a scripted stdin, returning
 // the stdout/stderr buffers and a restore func. It mirrors withGlobals (login_test.go).
 //
-// It also stubs connectVia (the WB3 shared connect+verify tail) so the BRANCH/selection
+// It also stubs connectVia (the shared connect+verify tail) so the BRANCH/selection
 // logic is tested with no network egress: the stub emits the legacy-style "selected
 // <name>" line (the existing assertions key on it) and, under --quiet, the chosen agent's
 // address on stdout — exactly the surface a verified connect yields, minus the live proxy.

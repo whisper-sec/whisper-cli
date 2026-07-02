@@ -19,7 +19,7 @@ import (
 )
 
 // LedgerCheckpoint is the decoded C2SP signed-note checkpoint served at GET /checkpoint
-// (epic #151, WB3): the log origin, the tree size, the 32-byte Merkle root, and — when
+// : the log origin, the tree size, the 32-byte Merkle root, and — when
 // signed — the embedded key-id + Ed25519 signature over the note body. It is the trust
 // anchor an inclusion/consistency proof is checked against.
 type LedgerCheckpoint struct {

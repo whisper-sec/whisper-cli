@@ -17,7 +17,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/projcfg"
 )
 
-// init.go is `whisper init claude` (#191): the ONE command that gives a Claude Code project
+// init.go is `whisper init claude`: the ONE command that gives a Claude Code project
 // its own Whisper agent identity + connectivity tier, so a bare `claude` in the dir — and
 // every subagent it spawns — egresses from THAT project's /128 with zero further config.
 //
@@ -855,6 +855,6 @@ func printInitEnvToolSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.P
 		fmt.Fprintf(w, "\nnote: %s\n", n)
 	}
 
-	// Verify-after (RULE 4): give the user a one-liner to confirm egress really works.
+	// Verify-after: give the user a one-liner to confirm egress really works.
 	fmt.Fprintf(w, "\nverify your egress:\n  whisper run curl -s https://api64.ipify.org\n  → should print %s\n", cfg.Agent)
 }

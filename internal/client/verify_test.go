@@ -136,7 +136,7 @@ func TestVerifyIdentity(t *testing.T) {
 			if string(raw) != c.body {
 				t.Fatalf("raw body = %q, want %q", string(raw), c.body)
 			}
-			// served_leaf_matches is decoded out of the verbatim evidence (the #113 cross-check signal).
+			// served_leaf_matches is decoded out of the verbatim evidence (the cross-check signal).
 			if c.wantMatches != nil {
 				got := decodeServedMatches(t, v.Evidence)
 				if got == nil || *got != *c.wantMatches {

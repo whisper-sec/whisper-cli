@@ -14,7 +14,7 @@ import (
 // parent on unix: Setsid:true puts the child in a NEW SESSION (its own process group, no
 // controlling terminal), so it keeps running after the parent (`whisper connect --ensure`)
 // returns and is not killed by the terminal's SIGHUP/Ctrl-C. This is the rootless,
-// no-extra-binary way to hold the #188 userspace tunnel alive for the whole Claude Code
+// no-extra-binary way to hold the userspace tunnel alive for the whole Claude Code
 // session. (The Background-rooted proxy lifetime + auto-reconnect already live inside the
 // process; this just frees the process itself from the launching shell.)
 func detachSysProcAttr() *syscall.SysProcAttr {

@@ -14,7 +14,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
-// newLedgerCmd is the PUBLIC, KEYLESS verifiable-ledger surface (#151, WB3): a third party
+// newLedgerCmd is the PUBLIC, KEYLESS verifiable-ledger surface: a third party
 // confirms an agent's identity commitment is recorded in Whisper's signed, append-only
 // transparency log — WITHOUT trusting Whisper's word. It needs no key (the proof surface is
 // public) and uses only stock crypto (Ed25519 + SHA-256 + RFC-6962 Merkle folding).

@@ -17,11 +17,11 @@ import (
 // replacement for any node+ipify launcher.
 var whisperPrefix = netip.MustParsePrefix("2a04:2a01::/32")
 
-// newIPCmd is `whisper ip [--json]` (#172 WB3): bring up (or reuse) the local egress
+// newIPCmd is `whisper ip [--json]`: bring up (or reuse) the local egress
 // proxy, HTTP GET the keyless Whisper echo THROUGH it, and assert the observed source
 // IP is within 2a04:2a01::/32 AND == the selected agent's /128. It prints ONE green
 // line `<addr>  ✓ egress verified` (or --json {ip,verified,agent}); EXIT CODE is the
-// answer (0 = verified, 1 = not) so scripts/agents and the WB0 harness gate on it.
+// answer (0 = verified, 1 = not) so scripts/agents and the harness gate on it.
 func newIPCmd() *cobra.Command {
 	var agent, agentFile string
 	cmd := &cobra.Command{

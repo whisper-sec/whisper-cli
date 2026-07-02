@@ -90,7 +90,7 @@ func newStatusCmd() *cobra.Command {
 				KeyPresent: !cred.IsZero(),
 				KeySource:  string(cred.Source),
 				Selected:   selected,
-				Connection: "not connected", // WB3 fills the real wireproxy/verify state
+				Connection: "not connected", // fills the real wireproxy/verify state
 			}
 
 			if g.jsonOut {

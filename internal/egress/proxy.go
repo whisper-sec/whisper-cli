@@ -5,7 +5,7 @@
 // Whisper egress (an upstream HTTPS-CONNECT proxy, source-bound to the agent's
 // /128) into a plain, bearer-free LOCAL endpoint a user/agent points its tools at.
 //
-// The design (issue #172 WB3 — the decisive, already-de-risked path):
+// The design (the decisive, already-de-risked path):
 //
 //	user's tool ──socks5/http──▶ 127.0.0.1:<freeport>  (this proxy, NO auth)
 //	                                     │
@@ -17,7 +17,7 @@
 //
 // Why this shape (and NOT wireproxy / WireGuard): the upstream egress ALREADY
 // mints a working et_ bearer bound to the /128 and speaks the HTTPS-CONNECT proxy
-// form on :443 (proven live). So WB3 needs no external binary and no WG peer
+// form on :443 (proven live). So needs no external binary and no WG peer
 // issuance — just this small goroutine-based listener. It is byte-identical across
 // Linux / macOS / Windows (pure net + crypto/tls, no cgo, no privilege, no TUN).
 //
@@ -54,7 +54,7 @@ import (
 // splice, lifetime) is parameterised over: the egress tier dials the HTTPS-CONNECT egress
 // (upstream below); the WireGuard tier (internal/wgtun) dials straight through the
 // userspace tunnel's netstack. Both reuse the SAME battle-tested front-end (half-close
-// #154, Stop-drain, Background-rooted lifetime #172) — DRY, so every fix lands once.
+// Stop-drain, Background-rooted lifetime) — DRY, so every fix lands once.
 //
 // target is always a NAME or IP literal as the local client gave it; a Dialer that egresses
 // remotely (the egress) forwards the NAME so the far side resolves it from the /128 (no
@@ -71,7 +71,7 @@ type Dialer interface {
 // with StartLocalProxy (egress tier) or StartWithDialer (any Dialer, e.g. the WG tunnel).
 // Stop() is idempotent and blocks until the listener is shut.
 //
-// LIFETIME (the load-bearing #172 WB3 fix): the proxy's serving loop is keyed off its
+// LIFETIME (the load-bearing fix): the proxy's serving loop is keyed off its
 // OWN context (life/cancel below), cancelled ONLY by Stop(). It is deliberately NOT tied
 // to the short-lived control-plane context the caller used for op:connect + verify — that
 // context is cancelled the instant the control call returns, so binding the proxy to it
@@ -164,7 +164,7 @@ type Options struct {
 // returns a running *Proxy. upstreamHostPort is the egress (e.g.
 // "egress.whisper.online:443"); bearer is the et_ token (held in memory only).
 //
-// LIFETIME CONTRACT (the #172 WB3 fix): the returned Proxy serves until Stop() — and
+// LIFETIME CONTRACT (the fix): the returned Proxy serves until Stop() — and
 // ONLY Stop(). The ctx passed here is NOT a lifetime signal: it is used solely as the
 // parent for input validation/setup. It is the caller's short-lived control-plane ctx
 // (cancelled the moment op:connect + verify return), so tying the proxy's accept loop or
@@ -223,7 +223,7 @@ func StartLocalProxy(ctx context.Context, upstreamHostPort, bearer string, opts 
 // tunnels have drained — the seam to tear down the WG device + its health goroutine cleanly.
 //
 // The returned proxy's lifetime is Stop() ONLY (never a caller ctx), exactly like the egress
-// path — so a persistent connect/run/guided hold gets a live endpoint, not a dead one (#172).
+// path — so a persistent connect/run/guided hold gets a live endpoint, not a dead one.
 func StartWithDialer(d Dialer, onStop func()) (*Proxy, error) {
 	return StartWithDialerPort(d, onStop, 0)
 }
@@ -385,7 +385,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 	defer up.Close()
 
 	// Success. Reply with a CONCRETE bind addr 0.0.0.0:0 (ATYP=IPv4) — NOT the DOMAIN
-	// type, which makes some clients hang (the WB0 gotcha #2). After this byte the
+	// type, which makes some clients hang (the gotcha #2). After this byte the
 	// stream is a raw splice; no SOCKS codec sits in the path.
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
@@ -555,7 +555,7 @@ func stripScheme(s string) string {
 // splice wires the local client (its bufio.Reader holds any already-read bytes) to the
 // upstream tunnel in both directions and blocks until the tunnel is fully done.
 //
-// HALF-CLOSE IS LOAD-BEARING (issue #154). A TCP tunnel is two independent half-streams:
+// HALF-CLOSE IS LOAD-BEARING. A TCP tunnel is two independent half-streams:
 // one direction reaching EOF means only THAT peer is done writing — the OTHER direction
 // may still have data to carry. So on a natural peer EOF we ONLY half-close (CloseWrite)
 // the corresponding far end, propagating the FIN, and let the other io.Copy run to its
@@ -586,7 +586,7 @@ func splice(ctx context.Context, client net.Conn, clientBuf *bufio.Reader, up ne
 	// Stop() to cancel p.life. ONLY Stop() force-closes both ends; a natural one-way EOF
 	// does not — the half-close above already signalled the peer and the other direction
 	// keeps streaming until it, too, ends. This is what lets a half-closed keep-alive
-	// tunnel deliver its remaining direction instead of being RST (the #154 fix).
+	// tunnel deliver its remaining direction instead of being RST (the fix).
 	n := 0
 	for n < 2 {
 		select {

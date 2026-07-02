@@ -140,6 +140,62 @@ func TestDecodeEnvelopeOuterRowFailureNotMaskedAsEmptyResult(t *testing.T) {
 	}
 }
 
+// TestDecodeEnvelopeOuterRowFailureBareStringDetail proves a row-level failure whose
+// "error" field is a BARE STRING (not an RFC-7807 object — a shape a thin control-plane
+// proxy can legitimately send, e.g. forwarding a plain "agent ... not found" reason) still
+// surfaces its real detail, rather than silently collapsing to the generic "control plane
+// reported failure" (a stale-persisted-agent symptom).
+func TestDecodeEnvelopeOuterRowFailureBareStringDetail(t *testing.T) {
+	body := []byte(`{"columns":["op","ok","status","result","error","retry_after"],
+ "rows":[{"op":"connect","ok":false,"status":404,"result":null,"error":"agent 2a04:2a01:9::dead not found","retry_after":null}]}`)
+	env, err := DecodeEnvelope(body, 200)
+	if err != nil {
+		t.Fatalf("decode errored: %v", err)
+	}
+	if env.Ok {
+		t.Fatalf("a row-level ok:false must decode as ok:false, got: %+v", env)
+	}
+	if env.Err == nil || env.Err.Detail != "agent 2a04:2a01:9::dead not found" {
+		t.Fatalf("the specific bare-string reason must surface, not the generic fallback, got: %+v", env.Err)
+	}
+}
+
+// TestDecodeEnvelopeTopLevelOkFalseBareStringDetail covers the same liberal-string
+// decode for the top-level dev-guide shape ({ok,status,error}) — a bare-string "error"
+// there must surface too, never be swallowed by the JSON struct-decode mismatch.
+func TestDecodeEnvelopeTopLevelOkFalseBareStringDetail(t *testing.T) {
+	body := []byte(`{"ok":false,"status":404,"result":null,"error":"agent not found"}`)
+	env, err := DecodeEnvelope(body, 404)
+	if err != nil {
+		t.Fatalf("decode errored: %v", err)
+	}
+	if env.Ok {
+		t.Fatal("should be ok:false")
+	}
+	if env.Err == nil || env.Err.Detail != "agent not found" {
+		t.Fatalf("bare-string top-level error must surface, got: %+v", env.Err)
+	}
+}
+
+// TestDecodeEnvelopeOuterRowFailurePropagatesRowStatus proves the row's OWN status (404
+// for a not-found agent, distinct from the outer HTTP 200 the whole envelope arrived
+// with) is carried onto the surfaced ProblemError — so friendly() / mapProblem() can
+// give the right actionable hint instead of treating every row failure as a generic 500.
+func TestDecodeEnvelopeOuterRowFailurePropagatesRowStatus(t *testing.T) {
+	body := []byte(`{"columns":["op","ok","status","result","error","retry_after"],
+ "rows":[{"op":"connect","ok":false,"status":404,"result":null,"error":"agent not found","retry_after":null}]}`)
+	env, err := DecodeEnvelope(body, 200) // outer HTTP transport status is 200
+	if err != nil {
+		t.Fatalf("decode errored: %v", err)
+	}
+	if env.Ok {
+		t.Fatal("should be ok:false")
+	}
+	if env.Err == nil || env.Err.Status != 404 {
+		t.Fatalf("expected the ROW's own 404 status to surface, got: %+v", env.Err)
+	}
+}
+
 // TestDecodeEnvelopeTopLevelOkNoResultFallsBackToRow covers a top-level {ok,status} with
 // NO top-level "result" — the payload lives only in the outer YIELD row. The client must
 // recover it from there rather than concluding Result is absent.

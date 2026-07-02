@@ -26,7 +26,7 @@ import (
 //     DETACHED_PROCESS), write `.whisper/connect.pid`, and WAIT (bounded) until the port is
 //     live so --ensure is synchronous-enough for the user/hook.
 //   - runConnectDaemon    — the hidden in-process daemon body the re-exec lands in: bring the
-//     tunnel up on the PINNED port and hold it (Background-rooted proxy + #188 auto-reconnect).
+// tunnel up on the PINNED port and hold it (Background-rooted proxy + auto-reconnect).
 //
 // The daemon is the same op:connect → local proxy/tunnel the interactive `connect` uses, only
 // pinned to the project's deterministic port and held headless. NO secret is ever written: the

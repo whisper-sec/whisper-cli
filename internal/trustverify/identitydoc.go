@@ -31,14 +31,14 @@ type identityDocResult struct {
 	detail   string
 	kid      string
 	tenant   string
-	anchored bool // #260: the JWS verified against a DNSSEC-anchored key (not a WebPKI-served one)
+	anchored bool // the JWS verified against a DNSSEC-anchored key (not a WebPKI-served one)
 }
 
 // verifyIdentityDoc fetches the identity document over the DANE-EE-pinned connection to the
 // agent's /128, verifies its ES256 JWS, and -- crucially -- cross-checks its address/fqdn/tlsa
 // claims against the DNSSEC-validated facts.
 //
-// Trust model (#260): when dnsKeys carries the DNSSEC-anchored ES256 key set, the JWS MUST be
+// Trust model: when dnsKeys carries the DNSSEC-anchored ES256 key set, the JWS MUST be
 // signed by a key in it (fail-closed on a foreign kid; the HTTPS JWKS is demoted to a
 // disagreement cross-check) and the whole step is anchored in the DNSSEC root. Without the
 // DNS anchor, the signing key is trust-on-pin (WebPKI JWKS) as before -- but the doc's BINDING
@@ -63,7 +63,7 @@ func verifyIdentityDoc(ctx context.Context, f Fetcher, hostport, fqdn, addr, tls
 	anchored := dnsKeys != nil && len(dnsKeys.JWKS) > 0
 	var keys JWKSet
 	if anchored {
-		// #260 fail-closed: only the DNSSEC-anchored keys may sign the identity document.
+		// fail-closed: only the DNSSEC-anchored keys may sign the identity document.
 		keys = dnsKeys.JWKS
 		if _, ok := keys[kid]; !ok {
 			return identityDocResult{status: StatusFail, detail: fmt.Sprintf(

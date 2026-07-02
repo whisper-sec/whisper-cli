@@ -294,7 +294,7 @@ func (a *App) SelectedAgent() (model.Agent, bool) {
 }
 
 // mergeFleet replaces the fleet from op:list, preserving any stream-discovered agents
-// (#112: op:list may miss connect-created agents) and any already-fetched detail.
+// op:list may miss connect-created agents) and any already-fetched detail.
 func (a *App) mergeFleet(fresh []model.Agent) {
 	byKey := make(map[string]model.Agent, len(a.agents))
 	for _, ex := range a.agents {
@@ -353,7 +353,7 @@ func (a *App) refreshSelectedDetail() tea.Cmd {
 }
 
 // upsertStreamAgent records an agent first seen on the live stream / logs so the fleet
-// reflects ALL activity, not just the op:list roster (the #112 union).
+// reflects ALL activity, not just the op:list roster (the union).
 func (a *App) upsertStreamAgent(addr128, agentID string) {
 	if addr128 == "" && agentID == "" {
 		return

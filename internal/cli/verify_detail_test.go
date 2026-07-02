@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// verify_detail_test.go covers the #254 CLI half: a /verify-identity 400 carries a JSON error
+// verify_detail_test.go covers the CLI half: a /verify-identity 400 carries a JSON error
 // detail, and the CLI surfaces THAT detail — never an opaque "not a verified agent" misread.
 
 // TestProblemDetail_Shapes: problemDetail is liberal in what it accepts — RFC-7807, message,
@@ -59,7 +59,7 @@ func TestVerify_400SurfacesServerDetail(t *testing.T) {
 	}
 }
 
-// TestMCPVerify_400SurfacesServerDetail: the same #254 surfacing through the MCP tool — a 400
+// TestMCPVerify_400SurfacesServerDetail: the same surfacing through the MCP tool — a 400
 // becomes a tool error carrying the server's detail (so the model can correct the target).
 func TestMCPVerify_400SurfacesServerDetail(t *testing.T) {
 	srv := problemServer(t, 400, `{"status":400,"detail":"ip is not a valid IPv6 address: zz"}`)

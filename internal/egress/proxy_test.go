@@ -55,7 +55,7 @@ func socks5Dial(proxyAddr, target string) (net.Conn, error) {
 		c.Close()
 		return nil, err
 	}
-	// Reply: VER REP RSV ATYP BND.ADDR BND.PORT — we expect REP=0 and ATYP=IPv4 (the WB0
+	// Reply: VER REP RSV ATYP BND.ADDR BND.PORT — we expect REP=0 and ATYP=IPv4 (the
 	// gotcha #2: a concrete 0.0.0.0:0 bind, NOT a DOMAIN echo, so a client never hangs).
 	head := make([]byte, 4)
 	if _, err := io.ReadFull(c, head); err != nil {
@@ -160,7 +160,7 @@ func (f *fakeEgress) handle(c net.Conn) {
 	_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
 	// Splice WITH half-close semantics (a correct CONNECT proxy propagates each side's FIN
 	// independently and only fully closes once BOTH halves are done) — so this fake faithfully
-	// carries the half-closed keep-alive shape the #154 regression test depends on.
+	// carries the half-closed keep-alive shape the regression test depends on.
 	halfCloser := func(w net.Conn) {
 		if cw, ok := w.(interface{ CloseWrite() error }); ok {
 			_ = cw.CloseWrite()
@@ -239,7 +239,7 @@ func TestProxy_StopDrainsWithIdleTunnel(t *testing.T) {
 	}
 }
 
-// halfWriteBackend models the #154 ERR_SOCKET_CLOSED shape: on the accepted tunnel it
+// halfWriteBackend models the ERR_SOCKET_CLOSED shape: on the accepted tunnel it
 // reads the first request, writes ONE response, then CloseWrite()s its OWN write half
 // (sends a FIN — an HTTP/1.1 origin that answered and ended that response) while KEEPING
 // its READ half open, exactly as a keep-alive origin awaiting the client's next request.
@@ -373,7 +373,7 @@ func TestProxy_HTTPConnectTunnels(t *testing.T) {
 	}
 }
 
-// TestProxy_HalfClosedTunnelSurvives is THE #154 regression guard: ERR_SOCKET_CLOSED.
+// TestProxy_HalfClosedTunnelSurvives is THE regression guard: ERR_SOCKET_CLOSED.
 //
 // Claude Code's startup connectivity preflight runs through HTTPS_PROXY → our local proxy
 // as an HTTP CONNECT (Node/undici). The target answers ONE response and FINs its write
@@ -431,7 +431,7 @@ func TestProxy_HalfClosedTunnelSurvives(t *testing.T) {
 	const followup = "SECOND-REQUEST"
 	_ = raw.SetWriteDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.WriteString(raw, followup); err != nil {
-		t.Fatalf("the tunnel was force-closed after the target's FIN (the #154 ERR_SOCKET_CLOSED bug): write failed: %v", err)
+		t.Fatalf("the tunnel was force-closed after the target's FIN (the ERR_SOCKET_CLOSED bug): write failed: %v", err)
 	}
 	select {
 	case msg := <-got:
@@ -439,7 +439,7 @@ func TestProxy_HalfClosedTunnelSurvives(t *testing.T) {
 			t.Fatalf("target received %q after the FIN, want %q", msg, followup)
 		}
 	case <-time.After(5 * time.Second):
-		t.Fatal("the client→target half did not survive the target FIN (the #154 ERR_SOCKET_CLOSED bug): the follow-up never reached the target")
+		t.Fatal("the client→target half did not survive the target FIN (the ERR_SOCKET_CLOSED bug): the follow-up never reached the target")
 	}
 }
 
@@ -459,7 +459,7 @@ func TestProxy_RejectedBearerSurfacesCleanFailure(t *testing.T) {
 
 // TestProxy_EndpointShapeAndStop: the endpoint is a loopback socks5h URL, and Stop() is
 // clean + idempotent (the listener is closed; a second Stop is a no-op).
-// TestProxy_PinnedPort verifies the #191 deterministic-port path: Options.Port pins the local
+// TestProxy_PinnedPort verifies the deterministic-port path: Options.Port pins the local
 // proxy to an exact loopback port, and a port already in use surfaces a clean, actionable
 // "already in use" error (never an opaque stack trace). The interactive default (Port:0) keeps
 // picking a free port.
@@ -518,7 +518,7 @@ func TestProxy_EndpointShapeAndStop(t *testing.T) {
 	}
 }
 
-// TestProxy_SurvivesControlCtxCancel is THE #172 WB3 lifetime regression guard: the local
+// TestProxy_SurvivesControlCtxCancel is THE lifetime regression guard: the local
 // proxy MUST NOT die when the short-lived control-plane ctx (the one used for op:connect +
 // verify) is cancelled. We start the proxy on a control ctx, CANCEL that ctx, and then —
 // AFTER the cancel — assert the proxy still ACCEPTS a new local client AND streams bytes
@@ -544,7 +544,7 @@ func TestProxy_SurvivesControlCtxCancel(t *testing.T) {
 	// The proxy must STILL accept a new client and stream bytes through to the backend.
 	conn, err := socks5Dial(p.Addr(), "example.com:80")
 	if err != nil {
-		t.Fatalf("after the control ctx was cancelled the proxy refused a NEW connection (it died with the ctx — the WB3 bug): %v", err)
+		t.Fatalf("after the control ctx was cancelled the proxy refused a NEW connection (it died with the ctx — the ctx-cancellation bug): %v", err)
 	}
 	defer conn.Close()
 	msg := "alive-after-cancel"
@@ -601,7 +601,7 @@ func TestProxy_InFlightTunnelSurvivesControlCtxCancel(t *testing.T) {
 	buf := make([]byte, len(msg))
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		t.Fatalf("the in-flight tunnel was severed by the control-ctx cancel (the WB3 bug): %v", err)
+		t.Fatalf("the in-flight tunnel was severed by the control-ctx cancel (the ctx-cancellation bug): %v", err)
 	}
 	if string(buf) != msg {
 		t.Fatalf("in-flight echo = %q, want %q", buf, msg)

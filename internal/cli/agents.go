@@ -235,7 +235,7 @@ func newCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// #256 — under --json, emit the VERBATIM op:identity envelope (agent/address/
+			// — under --json, emit the VERBATIM op:identity envelope (agent/address/
 			// fqdn/ptr/state) to STDOUT so a programmatic caller (the whisper-id SDKs'
 			// register()) can JSON-parse it; the human one-liner stays on stderr. This
 			// mirrors the --register path, which already routes through renderEnvelope.
@@ -293,7 +293,7 @@ func createAgentWithContact(c *client.Client, name, email string) (agentChoice, 
 // createIdentity fires the op:identity wire call and returns the RAW envelope, exactly as
 // client.Agents does — only a transport error is returned here; a server-reported ok:false
 // lives in the envelope. Splitting the call out from the (name,address) projection lets
-// `create` emit the machine JSON envelope VERBATIM to STDOUT under --json (#256) while the
+// `create` emit the machine JSON envelope VERBATIM to STDOUT under --json while the
 // human one-liner stays on stderr. A blank name never reaches the server (§3.2).
 func createIdentity(c *client.Client, name, email string) (*client.Envelope, error) {
 	n := strings.TrimSpace(name)

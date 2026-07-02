@@ -27,7 +27,7 @@ type recordedCall struct {
 	body string
 }
 
-// stubEgressTail replaces the WB3 live-egress tail (local proxy bring-up + network echo
+// stubEgressTail replaces the live-egress tail (local proxy bring-up + network echo
 // verify) and the persistent hold with in-memory no-ops, so a connect command test runs
 // to completion with no real network and no signal park. It returns a restore func.
 func stubEgressTail(t *testing.T) func() {

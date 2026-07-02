@@ -19,7 +19,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
-// DNS-anchored signing keys (#260): Whisper publishes the transparency/ledger + identity-doc
+// DNS-anchored signing keys: Whisper publishes the transparency/ledger + identity-doc
 // SIGNING KEYS in its DNSSEC-signed zone, so a verifier can anchor them to the same IANA root
 // as the TLSA/AAAA/PTR facts -- promoting steps 3-4 of the chain from trust-on-pin to fully
 // trustless. The wire contract (DKIM-precedent: RFC 6376 publishes signing keys as p= TXT):
@@ -41,8 +41,8 @@ import (
 //   - HTTPS-served key material DISAGREES with the DNS-anchored key for the same kid →
 //     FAIL with an explicit disagreement error (the WebPKI surface is lying).
 //   - RRset unavailable (NXDOMAIN / unsigned / resolver error) → the step falls back to the
-//     pre-#260 behavior: cryptographically verified against the HTTPS-served keys, honestly
-//     labelled trust-on-pin. (A pre-#260 server keeps verifying; a stripped answer degrades
+// pre- behavior: cryptographically verified against the HTTPS-served keys, honestly
+// labelled trust-on-pin. (A pre- server keeps verifying; a stripped answer degrades
 //     the LABEL, never fakes a proof.)
 
 // DefaultKeyAnchorZone is the DNSSEC-signed zone under which Whisper publishes its signing

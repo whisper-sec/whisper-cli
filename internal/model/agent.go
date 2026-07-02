@@ -40,7 +40,7 @@ type Agent struct {
 	// Detailed reports whether op:agent has populated the counters (vs. a list-only row).
 	Detailed bool
 	// SeenInStream marks an agent discovered via the live stream / logs but possibly
-	// absent from op:list (the #112 caveat: op:list may miss connect-created agents).
+	// absent from op:list (the caveat: op:list may miss connect-created agents).
 	SeenInStream bool
 }
 

@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-// TestCreate_JSON_EmitsEnvelopeToStdout is the #256 regression test: under --json, the default
+// TestCreate_JSON_EmitsEnvelopeToStdout is the regression test: under --json, the default
 // (op:identity) `whisper create` MUST write the machine JSON envelope — carrying the routable
 // /128 address — to STDOUT so a programmatic caller (the whisper-id Node+Python SDKs'
 // register()) can JSON-parse it. Human chrome stays on stderr. Without the fix, create prints

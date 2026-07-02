@@ -19,7 +19,7 @@ func DefaultKeyFile() string {
 	return filepath.Join(home, ".config", "whisper-ns", "key")
 }
 
-// DefaultAgentFile is the on-disk location of the CHOSEN agent id (#110), mirroring
+// DefaultAgentFile is the on-disk location of the CHOSEN agent id, mirroring
 // DefaultKeyFile: $HOME/.config/whisper-ns/agent (mode 600). install.sh writes the agent
 // the user picked/created here so `connect` binds egress to THAT identity with zero extra
 // config; absent ⇒ the server's reuse-most-recent default applies (still zero-config).

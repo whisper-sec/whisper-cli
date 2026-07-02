@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
 	"os"
@@ -35,7 +36,7 @@ func newConnectCmd() *cobra.Command {
 			"                     (wireguard-go netstack — still no root, no kernel wg, no TUN).\n" +
 			"                     Your key is generated locally and never leaves this host; the\n" +
 			"                     same local SOCKS5 endpoint fronts it, so tools need no change.\n\n" +
-			"Which identity it binds (#110): --agent <id|/128> pins a specific one; else the\n" +
+			"Which identity it binds: --agent <id|/128> pins a specific one; else the\n" +
 			"agent persisted in ~/.config/whisper-ns/agent (written when you pick/create one);\n" +
 			"else, if you already have an agent, the server's reuse-most-recent default.\n\n" +
 			"If you have NO agent yet, connect creates one first — and every agent has a human\n" +
@@ -66,7 +67,7 @@ func newConnectCmd() *cobra.Command {
 			if email != "" {
 				args["contact_email"] = email
 			}
-			// #110 agent selection, in precedence order (highest first):
+			// agent selection, in precedence order (highest first):
 			//   1. --agent <id|/128>   explicit flag (overrides everything)
 			//   2. ~/.config/whisper-ns/agent   the agent persisted by a prior pick/create
 			//   3. (absent)            ⇒ no selector ⇒ server reuse-most-recent default
@@ -76,6 +77,21 @@ func newConnectCmd() *cobra.Command {
 			c, err := resolveClient(true, false)
 			if err != nil {
 				return err
+			}
+
+			// op:connect only understands an agent by /128 or id — a bare human display
+			// name (what `whisper list` shows, and what a caller naturally reaches for,
+			// e.g. --agent scout) needs resolving client-side first (Postel: liberal in
+			// what we accept). A /128 selector, an id, or "" (no selector) pass straight
+			// through with zero extra round-trips.
+			if sel != "" {
+				cxSel, cancelSel := ctx()
+				resolved, rerr := resolveConnectAgent(c, cxSel, sel)
+				cancelSel()
+				if rerr != nil {
+					return rerr
+				}
+				sel = resolved
 			}
 
 			// When connect has NO selector it would otherwise let the server auto-allocate
@@ -113,7 +129,7 @@ func newConnectCmd() *cobra.Command {
 				args["agent"] = sel
 			}
 
-			// --tier wireguard (#188): mint a local WG keypair and inject ONLY the public half
+			// --tier wireguard: mint a local WG keypair and inject ONLY the public half
 			// into the op:connect args (the server registers us as a peer; our private key never
 			// leaves this host). No-op for socks5/anyip; wgKey threads our private key into the
 			// userspace tunnel bring-up below.
@@ -221,6 +237,52 @@ func resolveAgentSelector(flagAgent, agentFile string) string {
 	return client.ReadAgentFile(agentFile)
 }
 
+// resolveConnectAgent turns a raw connect selector into what op:connect actually
+// understands — a /128 or an agent id — by resolving a bare human display name
+// client-side. A /128 (has a colon, per looksLikeV6) passes straight through with no
+// extra round-trip: the common persisted-default/--agent <addr> paths pay nothing.
+// Anything else (an id or a display name like "scout") is checked against the
+// account's agents (op:list): an EXACT id/label/address match passes through unchanged
+// (so an id keeps working exactly as before), and a CASE-INSENSITIVE label match
+// resolves to that agent's /128 — so `--agent scout` and `--agent Scout` both work, the
+// same way `whisper list` displays it. No match at all is a clear, actionable error
+// naming the real candidates, never the control plane's opaque "not found".
+func resolveConnectAgent(c *client.Client, cx context.Context, sel string) (string, error) {
+	sel = strings.TrimSpace(sel)
+	if sel == "" || looksLikeV6(sel) {
+		return sel, nil
+	}
+	choices, err := listAgents(c, cx)
+	if err != nil {
+		return "", err
+	}
+	var candidates []string
+	var ciMatch *agentChoice
+	for i := range choices {
+		ch := &choices[i]
+		if ch.name == sel || ch.addr == sel {
+			// Exact id/label/address match — unchanged behaviour, prefer the /128.
+			return firstNonBlank(ch.addr, ch.name), nil
+		}
+		if ch.name != "" {
+			if ciMatch == nil && strings.EqualFold(ch.name, sel) {
+				ciMatch = ch
+			}
+			candidates = append(candidates, ch.name)
+		}
+	}
+	if ciMatch != nil {
+		return firstNonBlank(ciMatch.addr, ciMatch.name), nil
+	}
+	if len(candidates) == 0 {
+		return "", &client.ProblemError{Status: 404,
+			Detail: fmt.Sprintf("no agent named %q; run 'whisper list' or pass --agent <id|/128>", sel)}
+	}
+	return "", &client.ProblemError{Status: 404,
+		Detail: fmt.Sprintf("no agent named %q — you have: %s (run 'whisper list' or pass --agent <id|/128>)",
+			sel, strings.Join(candidates, ", "))}
+}
+
 // renderConnect prints the lean, Scandinavian result of a verified connect (§3.3/§4.4):
 // by default ONE human line on stderr — `Connected as <name> — <addr>  ✓ verified` —
 // and NOTHING on stdout. --quiet prints ONLY the bearer-free local endpoint
@@ -272,7 +334,7 @@ func renderConnect(sess *egressSession, verbose bool) {
 	}
 }
 
-// connectTierLabel renders an honest, human label for the active tier (§5 framing, #188):
+// connectTierLabel renders an honest, human label for the active tier (§5 framing):
 // WireGuard is a routed Whisper /128 over a userspace tunnel; socks5/anyip is the source-bound
 // egress. Never overclaims — the label matches what the transport actually is.
 func connectTierLabel(tier string) string {

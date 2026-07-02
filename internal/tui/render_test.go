@@ -156,7 +156,7 @@ func TestStreamEventFold(t *testing.T) {
 	if got := a.join.qnameAt("2a04:2a01::7", 1_700_000_000_500_000); got != "example.com." {
 		t.Errorf("join cache miss: %q", got)
 	}
-	// The stream-discovered agent should be unioned into the fleet (#112).
+	// The stream-discovered agent should be unioned into the fleet.
 	found := false
 	for _, ag := range a.agents {
 		if ag.Address == "2a04:2a01::7" {

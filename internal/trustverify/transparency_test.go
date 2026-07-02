@@ -32,7 +32,7 @@ type txFixture struct {
 	esKid     string
 	address   string
 
-	// #260: the raw key material, retained so tests can present the SAME keys as a
+	// the raw key material, retained so tests can present the SAME keys as a
 	// DNSSEC-anchored set (or a DIFFERENT set, for the fail-closed negatives).
 	esJWK    JWK
 	esSpki   []byte // X.509 SPKI DER of the ES256 root key (for _whisper-identity TXT)
@@ -227,7 +227,7 @@ func TestTransparency_EmptySignedFeedPasses(t *testing.T) {
 	}
 }
 
-// --- #260: DNSSEC-anchored key semantics -------------------------------------------------
+// --- DNSSEC-anchored key semantics -------------------------------------------------
 
 func TestTransparency_AnchoredHappyPathIsDNSSECRoot(t *testing.T) {
 	// The fixture's own keys presented as the DNSSEC-anchored set: everything verifies and the

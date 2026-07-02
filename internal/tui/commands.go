@@ -27,7 +27,7 @@ func tick() tea.Cmd {
 	return tea.Tick(tickInterval, func(t time.Time) tea.Msg { return tickMsg(t) })
 }
 
-// loadFleet runs op:list and maps rows to Agents (newest first). Per the #112 caveat
+// loadFleet runs op:list and maps rows to Agents (newest first). Per the caveat
 // the list may miss connect-created agents; the app unions these with agents seen in
 // the live stream, so a fail-open empty list is fine here (never an error to the user).
 func loadFleet(c *client.Client) tea.Cmd {

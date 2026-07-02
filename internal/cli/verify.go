@@ -14,7 +14,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
-// newVerifyCmd is the one-command, KEYLESS trust check (#113): `whisper verify <addr-or-fqdn>`
+// newVerifyCmd is the one-command, KEYLESS trust check: `whisper verify <addr-or-fqdn>`
 // runs the FULL Whisper-agent trust chain — reverse-DNS + forward-confirm + the DANE-EE TLSA
 // pin (DNSSEC-anchored, THE trust anchor; not a public CA) + the JWS identity doc — and prints
 // one verdict. The work is done server-side by the public /verify-identity endpoint, so this
@@ -62,7 +62,7 @@ func newVerifyCmd() *cobra.Command {
 				return err
 			}
 			if status == 400 {
-				// #254: a 400 is NOT a verdict — it is the server rejecting the input, with a
+				// a 400 is NOT a verdict — it is the server rejecting the input, with a
 				// helpful JSON detail. Surface THAT detail (never the misleading "not a verified
 				// agent" misread of an empty verdict). --json still gets the verbatim body first.
 				if g.jsonOut {
@@ -100,7 +100,7 @@ func newVerifyCmd() *cobra.Command {
 	return cmd
 }
 
-// problemDetail extracts the most helpful message from a JSON error body (#254) — liberal in
+// problemDetail extracts the most helpful message from a JSON error body — liberal in
 // what it accepts: RFC-7807 {detail}/{title}, a {"message":…}, or the legacy {"error":"…"} /
 // {"error":{detail|message|title}} forms. Falls back to the caller's line when the body
 // carries nothing usable (never an empty error).
@@ -190,7 +190,7 @@ func evidenceDaneSha(raw json.RawMessage) string {
 }
 
 // evidenceServedMatches reports whether the server cross-checked the SERVED leaf against the
-// published pin (#113): "yes"/"no" when it did, "" when it could not (the field is omitted).
+// published pin: "yes"/"no" when it did, "" when it could not (the field is omitted).
 func evidenceServedMatches(raw json.RawMessage) string {
 	var ev struct {
 		Dane *struct {

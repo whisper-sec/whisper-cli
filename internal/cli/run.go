@@ -24,7 +24,7 @@ func isProjectNotFound(err error) bool {
 	return errors.As(err, &pe) && pe.Status == 404
 }
 
-// run.go is `whisper run <cmd…>` and the `whisper claude` convenience (#172 WB3).
+// run.go is `whisper run <cmd…>` and the `whisper claude` convenience.
 // It brings the local egress proxy up, then EXECS the child with the proxy env
 // injected AT SPAWN — never asked-for in a prompt (the agent-network-env-injection
 // lesson: spawned, security-trained agents refuse an opaque proxy string in their
@@ -41,8 +41,8 @@ func isProjectNotFound(err error) bool {
 //
 // Coverage note: env-injection catches curl, git, Node/undici, and every well-behaved
 // tool that honours *_PROXY. A tool that IGNORES *_PROXY (a raw socket dialer) is not
-// caught by env alone — a transparent TUN for those is WB4/WB5 (deliberately NOT built
-// here; we keep WB3 lean and rootless).
+// caught by env alone — a transparent TUN for those is (deliberately NOT built
+// here; we keep lean and rootless).
 
 func newRunCmd() *cobra.Command {
 	var agent, agentFile, tier string
@@ -106,7 +106,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 	}
 	sel := resolveAgentSelector(agent, agentFile)
 	selTier := strings.TrimSpace(tier)
-	// Project-aware (keystone of `whisper init python` #195): when the user gave NO explicit
+	// Project-aware (keystone of `whisper init python`): when the user gave NO explicit
 	// --agent / --agent-file, and we're inside a `whisper init`'d project, prefer THAT project's
 	// identity + tier — so `whisper run python` egresses from the same /128 `whisper init python`
 	// set up (otherwise run would fall through to the global default agent and the two would
@@ -140,7 +140,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 	if selTier != "" {
 		args["tier"] = selTier
 	}
-	// --tier wireguard (#188): mint a local WG keypair, inject ONLY the public half into the
+	// --tier wireguard: mint a local WG keypair, inject ONLY the public half into the
 	// op:connect args; our private key never leaves this host. No-op otherwise; wgKey threads
 	// the private key into the userspace tunnel bring-up.
 	wgKey, werr := prepareWireGuard(selTier, args)

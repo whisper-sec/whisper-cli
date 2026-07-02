@@ -12,14 +12,14 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/trustverify"
 )
 
-// runTrustless proves an agent's identity with ZERO trust in Whisper's API (#259): it
+// runTrustless proves an agent's identity with ZERO trust in Whisper's API: it
 // validates the DNSSEC chain from the IANA root IN-PROCESS, matches the served DANE-EE cert
 // against the DNSSEC pin, and verifies the transparency log + identity document — then prints
 // a structured verdict. Unlike the default `verify` (which trusts Whisper's /verify-identity
 // endpoint to run the chain), every leg here is checked locally against public trust anchors.
 //
 // Human output is two tables (the identity + the per-check trust ledger) on stdout; --json
-// prints the machine verdict to STDOUT (#256: machine output goes to stdout). Exit 0 iff the
+// prints the machine verdict to STDOUT (machine output goes to stdout). Exit 0 iff the
 // two DNSSEC-trustless legs (DNSSEC + DANE-EE) pass and no check flagged a cryptographic
 // mismatch; exit 1 otherwise, so a script can gate on it.
 func runTrustless(target, resolver string) error {

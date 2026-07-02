@@ -28,18 +28,18 @@ import (
 
 // Version is stamped at build time via -ldflags "-X .../cli.Version=...". The release path (Maven
 // `-P cli` → build-all.sh) stamps the real ${project.version} so a served binary's
-// `whisper --version` matches the release tag exactly (#172 WB1). It MUST stay a plain
+// `whisper --version` matches the release tag exactly. It MUST stay a plain
 // constant-string-initialised var so `-X` can override it.
 //
 // versionFallback is used only when no ldflag was applied. For a `go install <module>@vX` binary
-// (#213) we then recover the real version from the embedded build info (the init below), so a
+// we then recover the real version from the embedded build info (the init below), so a
 // go-installed CLI reports its module version, not this literal. A plain in-repo `go build` (build
 // info version "(devel)") keeps the fallback. One version for the whole product.
 const versionFallback = "0.115.0"
 
 var Version = versionFallback
 
-// init recovers the version for a go-install binary (#213): if no ldflag was applied (Version is
+// init recovers the version for a go-install binary: if no ldflag was applied (Version is
 // still the fallback) and the build carries a real module version, adopt it. Runs before any
 // command reads Version. No-op for the ldflag-stamped release/`-P cli` builds.
 func init() {

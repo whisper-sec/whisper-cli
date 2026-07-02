@@ -19,7 +19,7 @@ import (
 // Like every init target these files live ONLY under .whisper/ (clobber-safe, never the user's own
 // docker-compose.yml / manifests) — they are overlays the user composes in, not edits to their files.
 
-// ContainerImage is the official multi-arch image the sidecar runs (#198).
+// ContainerImage is the official multi-arch image the sidecar runs.
 const ContainerImage = "ghcr.io/whisper-sec/whisper:latest"
 
 // WriteComposeSidecar writes .whisper/compose.yml — a Docker Compose overlay with a `whisper`

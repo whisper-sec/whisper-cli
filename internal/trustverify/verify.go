@@ -72,7 +72,7 @@ type Options struct {
 	Now          time.Time  // default time.Now() (RRSIG/cert validity clock)
 	Port         int        // agent HTTPS port, default 443
 
-	// KeyAnchorZone (#260) is the DNSSEC-signed zone whose _whisper-identity/_whisper-ledger
+	// KeyAnchorZone is the DNSSEC-signed zone whose _whisper-identity/_whisper-ledger
 	// TXT records anchor the transparency/ledger + identity-doc signing keys to the IANA root.
 	// Default: whisper.online. When those RRsets validate, the HTTPS-served JWKS and
 	// /checkpoint/key are DEMOTED to cross-checks and steps 3-4 become fully trustless.
@@ -124,7 +124,7 @@ func Verify(ctx context.Context, target string, opts Options) (*Report, error) {
 	daneCheck := runDANE(ctx, opts, addr, fqdn, pin, rep)
 	rep.Checks = append(rep.Checks, daneCheck)
 
-	// --- #260: recover the DNSSEC-anchored signing keys (_whisper-identity/_whisper-ledger
+	// --- recover the DNSSEC-anchored signing keys (_whisper-identity/_whisper-ledger
 	// TXT) with the SAME in-process validator -- when they validate, steps 3-4 verify against
 	// keys anchored in the IANA root and the HTTPS key surfaces are demoted to cross-checks.
 	var dnsKeys *DNSAnchoredKeys
