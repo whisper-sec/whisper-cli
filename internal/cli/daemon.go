@@ -121,8 +121,13 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config) error {
 // holdDaemonUntilSignal parks the daemon until SIGINT/SIGTERM, then tears the tunnel down and
 // removes the pidfile so a later `--ensure` re-spawns cleanly. A package var so a test can
 // return immediately instead of parking on a real signal.
+//
+// the daemon registers its held session in the local session registry (and clears it on
+// teardown), so a one-shot never opens a competing op:connect for the /128 this daemon serves.
 var holdDaemonUntilSignal = func(p projcfg.Paths, sess *egressSession) {
+	writeSessionRecord(sess)
 	defer func() {
+		clearSessionRecord(sess)
 		sess.Stop()
 		_ = os.Remove(p.PIDFile)
 	}()

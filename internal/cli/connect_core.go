@@ -315,7 +315,12 @@ func cleanWgError(err error) string {
 // proxy and asserts the observed source IP is within 2a04:2a01::/32 AND == the selected
 // agent's /128. On success sets s.verified; on a real mismatch returns a plain, friendly
 // remediation (never a stack trace).
-func verifyEgress(ctx context.Context, c *client.Client, s *egressSession) error {
+//
+// A package var so a command test can stub the network echo when a one-shot verifies
+// a REUSED daemon session (the fresh-connect tail is already stubbable via connectAndVerify).
+var verifyEgress = verifyEgressLive
+
+func verifyEgressLive(ctx context.Context, c *client.Client, s *egressSession) error {
 	observed, err := c.ObservedEgressIP(ctx, s.endpoint)
 	if err != nil {
 		return err
