@@ -8,8 +8,8 @@ import "testing"
 // TestBasePort_DeterministicAndInRange: the same project path always hashes to the same base
 // port, different paths (usually) differ, and every base lands in [portBase, portBase+portSpan).
 func TestBasePort_DeterministicAndInRange(t *testing.T) {
-	a := "/home/kaveh/projects/alpha"
-	b := "/home/kaveh/projects/beta"
+	a := "/home/user/projects/alpha"
+	b := "/home/user/projects/beta"
 
 	if BasePort(a) != BasePort(a) {
 		t.Fatal("BasePort must be deterministic for the same path")

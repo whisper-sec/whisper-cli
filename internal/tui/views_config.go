@@ -43,9 +43,18 @@ func (v *configView) view(w, h int) string {
 		b.WriteString(fmt.Sprintf("%-14s %s\n", th.Dim.Render(label), th.Text.Render(val)))
 	}
 
+	// The brand mark tops the panel when colour + height allow ( approved art).
+	if art := renderLogo(logoIcon, th.NoColor); art != "" && h-2 >= 30 {
+		b.WriteString(art + "\n\n")
+	}
+
+	monitorURL := client.DefaultMonitorURL
+	if v.app.client != nil {
+		monitorURL = v.app.client.MonitorURL()
+	}
 	b.WriteString(th.Accent.Render("endpoints") + "\n")
 	row("control", client.DefaultControlURL)
-	row("monitor", client.DefaultMonitorURL)
+	row("monitor", monitorURL)
 	row("rdap", client.DefaultRDAPURL)
 	b.WriteString("\n")
 
@@ -72,7 +81,7 @@ func (v *configView) view(w, h int) string {
 	b.WriteString(th.Accent.Render("about") + "\n")
 	row("whisper-cli", v.app.opts.Version)
 	b.WriteString("  " + th.Dim.Render("identity-on-the-wire DNS — an agent IS a routable IPv6 /128.") + "\n")
-	b.WriteString("  " + th.Dim.Render("built by Kaveh Ranjbar and Claude · viaGraph B.V.") + "\n")
+	b.WriteString("  " + th.Dim.Render("built by the Whisper Security Team · viaGraph B.V.") + "\n")
 
 	panel := th.Panel.Width(w - 2).Height(h - 2).Render(clampLines(b.String(), h-2))
 	return v.app.titledPanel(panel, "CONFIG", w)

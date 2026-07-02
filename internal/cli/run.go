@@ -133,40 +133,57 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 			}
 		}
 	}
-	args := map[string]any{}
-	if sel != "" {
-		args["agent"] = sel
+	// detect-and-reuse: when a long-lived `whisper connect` daemon on this host already
+	// serves the target /128, route the child through ITS live proxy instead of opening a
+	// competing op:connect — the server binds ONE peer per /128, so a second session would
+	// replace (and on our exit, remove) the daemon's peer and kill its tunnel for good.
+	var sess *egressSession
+	cxr, cancelr := ctx()
+	reused, reuse := findLiveSession(cxr, c, sel)
+	cancelr()
+	if reuse {
+		// Reuse even when a different --tier was asked for (clobbering a live tunnel is
+		// strictly worse); one calm note makes the choice visible. A different --agent that
+		// resolves to a different /128 never lands here — it falls through to a fresh,
+		// non-clobbering op:connect for that other identity.
+		noteTierIfDifferent(reused, selTier)
+		sess = reused
+	} else {
+		args := map[string]any{}
+		if sel != "" {
+			args["agent"] = sel
+		}
+		if selTier != "" {
+			args["tier"] = selTier
+		}
+		// --tier wireguard: mint a local WG keypair, inject ONLY the public half into the
+		// op:connect args; our private key never leaves this host. No-op otherwise; wgKey threads
+		// the private key into the userspace tunnel bring-up.
+		wgKey, werr := prepareWireGuard(selTier, args)
+		if werr != nil {
+			return werr
+		}
+		// cx is the SHORT control-plane ctx: it bounds op:connect and the one-shot verify HTTP
+		// GET, and is cancelled the moment they return. It does NOT bound the local proxy — the
+		// proxy keeps its own Background-rooted lifetime (see egress.StartLocalProxy) and only
+		// Stop() ends it. So cancelling cx here leaves the proxy LIVE for the child below.
+		cx, cancel := ctx()
+		env, err := c.Agents(cx, "connect", args)
+		if err != nil {
+			cancel()
+			return err
+		}
+		if perr := envelopeError(env); perr != nil {
+			cancel()
+			return perr
+		}
+		sess, err = connectAndVerify(cx, c, env.Result, "", wgKey)
+		cancel() // ends ONLY the control ctx; the proxy stays up (its lifetime is Stop(), below)
+		if err != nil {
+			return err
+		}
 	}
-	if selTier != "" {
-		args["tier"] = selTier
-	}
-	// --tier wireguard: mint a local WG keypair, inject ONLY the public half into the
-	// op:connect args; our private key never leaves this host. No-op otherwise; wgKey threads
-	// the private key into the userspace tunnel bring-up.
-	wgKey, werr := prepareWireGuard(selTier, args)
-	if werr != nil {
-		return werr
-	}
-	// cx is the SHORT control-plane ctx: it bounds op:connect and the one-shot verify HTTP
-	// GET, and is cancelled the moment they return. It does NOT bound the local proxy — the
-	// proxy keeps its own Background-rooted lifetime (see egress.StartLocalProxy) and only
-	// Stop() ends it. So cancelling cx here leaves the proxy LIVE for the child below.
-	cx, cancel := ctx()
-	env, err := c.Agents(cx, "connect", args)
-	if err != nil {
-		cancel()
-		return err
-	}
-	if perr := envelopeError(env); perr != nil {
-		cancel()
-		return perr
-	}
-	sess, err := connectAndVerify(cx, c, env.Result, "", wgKey)
-	cancel() // ends ONLY the control ctx; the proxy stays up (its lifetime is Stop(), below)
-	if err != nil {
-		return err
-	}
-	defer sess.Stop() // the proxy lives exactly as long as the child — torn down when it exits
+	defer sess.Stop() // OUR proxy lives exactly as long as the child; a REUSED session no-ops
 
 	// One calm line to stderr so the human knows what's wired (never on --quiet stdout,
 	// which the child's own stdout owns). Skipped under --quiet for a fully clean child.

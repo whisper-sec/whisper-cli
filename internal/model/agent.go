@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strconv"
+	"strings"
 )
 
 // Agent is one fleet member: the op:list summary, optionally enriched with the
@@ -67,6 +68,18 @@ func (a Agent) Key() string {
 		return a.Address
 	}
 	return a.ID
+}
+
+// TenantFromFQDN extracts the opaque tenant handle from an agent fqdn of the form
+// <agent>.<t-handle>.agents.<zone> — the second label. The fleet a caller already
+// holds IS the tenant answer (derive, don't fetch). Returns "" when the shape does
+// not match (never a wrong guess).
+func TenantFromFQDN(fqdn string) string {
+	labels := strings.Split(strings.TrimSuffix(fqdn, "."), ".")
+	if len(labels) >= 4 && len(labels[1]) >= 9 && labels[1][0] == 't' {
+		return labels[1]
+	}
+	return ""
 }
 
 // AgentFromListItem builds an Agent from an op:list row's `item` map (or the row

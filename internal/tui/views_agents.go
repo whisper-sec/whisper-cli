@@ -73,22 +73,46 @@ func (v *agentsView) styleTable() {
 
 func (v *agentsView) retheme() { v.styleTable() }
 
-func (v *agentsView) columns(w int) []table.Column {
-	// Left fleet table is ~48% of the width; budget columns within it.
-	tw := w/2 - 4
-	if tw < 30 {
-		tw = 30
+// leftW/rightW split the view width into the fleet panel and the detail panel — the
+// ONE width budget every layer below derives from (panel → padding → table → columns),
+// so no inner layer can render wider than its box and push the detail panel off-screen
+// the old table width exceeded the panel content area by 3 columns).
+func (v *agentsView) leftW() int  { return v.w/2 - 1 }
+func (v *agentsView) rightW() int { return v.w - v.leftW() - 1 }
+
+// tableW is the fleet table's exact render width: the left panel minus its border (2)
+// and its horizontal padding (2).
+func (v *agentsView) tableW() int {
+	tw := v.leftW() - 4
+	if tw < 26 {
+		tw = 26
 	}
-	nameW := clamp(tw*30/100, 8, 22)
-	addrW := clamp(tw*40/100, 14, 30)
-	stateW := 8
-	sparkW := 6
-	if v.dense {
+	return tw
+}
+
+// autoDense reports whether the table is too narrow for the 4-column layout — the
+// column set drops to the dense 3-column one rather than overflow its box.
+func (v *agentsView) autoDense() bool { return v.dense || v.tableW() < 44 }
+
+func (v *agentsView) columns(tableW int) []table.Column {
+	// Budget the columns within the table, leaving each cell's Padding(0,1) room:
+	// bubbles renders every cell 2 wider than its column width.
+	if v.autoDense() {
+		tw := tableW - 3*2
+		nameW := clamp(tw*35/100, 8, 22)
 		return []table.Column{
 			{Title: "AGENT", Width: nameW},
-			{Title: "ADDRESS", Width: addrW},
+			{Title: "ADDRESS", Width: tw - nameW - 2},
 			{Title: "●", Width: 2},
 		}
+	}
+	tw := tableW - 4*2
+	stateW := 8
+	sparkW := 6
+	nameW := clamp(tw*30/100, 8, 22)
+	addrW := tw - nameW - stateW - sparkW
+	if addrW < 12 {
+		addrW = 12
 	}
 	return []table.Column{
 		{Title: "AGENT", Width: nameW},
@@ -100,14 +124,19 @@ func (v *agentsView) columns(w int) []table.Column {
 
 func (v *agentsView) resize(w, h int) {
 	v.w, v.h = w, h
-	v.tbl.SetColumns(v.columns(w))
+	// A resize can flip autoDense (3 vs 4 cells per row): clear the rows BEFORE
+	// swapping the column set (bubbles panics on rows wider than the columns), then
+	// rebuild them to the new shape.
+	v.tbl.SetRows(nil)
+	v.tbl.SetColumns(v.columns(v.tableW()))
 	// table height: minus header + borders.
 	th := h - 3
 	if th < 1 {
 		th = 1
 	}
 	v.tbl.SetHeight(th)
-	v.tbl.SetWidth(w/2 - 2)
+	v.tbl.SetWidth(v.tableW())
+	v.syncRows()
 }
 
 // syncRows rebuilds the table rows from the app fleet (after a load/merge/sort/filter).
@@ -129,7 +158,7 @@ func (v *agentsView) row(a model.Agent) table.Row {
 	if addr == "" {
 		addr = "(no /128)"
 	}
-	if v.dense {
+	if v.autoDense() {
 		return table.Row{name, addr, stateGlyph(a.State)}
 	}
 	spark := ""
@@ -224,7 +253,8 @@ func (v *agentsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return app, nil
 	case "z":
 		v.dense = !v.dense
-		v.tbl.SetColumns(v.columns(v.w))
+		v.tbl.SetRows(nil) // rows must never be wider than the column set
+		v.tbl.SetColumns(v.columns(v.tableW()))
 		v.syncRows()
 		return app, nil
 	case "enter":
@@ -327,11 +357,10 @@ func (v *agentsView) syncSelectionFromCursor() {
 
 // view renders the fleet table (left) + the selected-agent detail (right).
 func (v *agentsView) view(w, h int) string {
-	leftW := w/2 - 1
-	rightW := w - leftW - 1
-	left := v.app.titledPanel(
+	leftW, rightW := v.leftW(), v.rightW()
+	left := v.app.titledPanelStyled(
 		v.app.th.PanelHi.Width(leftW-2).Height(h-2).Render(v.tbl.View()),
-		v.fleetTitle(), leftW)
+		v.fleetTitle(), leftW, v.app.th.BorderHiFg)
 	right := v.app.titledPanel(
 		v.app.th.Panel.Width(rightW-2).Height(h-2).Render(v.detail(rightW-4, h-2)),
 		"DETAIL", rightW)
@@ -364,7 +393,13 @@ func (v *agentsView) detail(w, h int) string {
 	if addr == "" {
 		addr = "(no /128 yet)"
 	}
-	b.WriteString(th.Accent.Render(a.Name()) + "  " + th.Addr.Render(addr) + "  " + stateBadge(th, a.State) + "\n")
+	// Head line: name + /128 + state. Shorten the address rather than let the line
+	// wrap and shove the whole panel down a row.
+	head := th.Accent.Render(a.Name()) + "  " + th.Addr.Render(addr) + "  " + stateBadge(th, a.State)
+	if lipgloss.Width(head) > w {
+		head = th.Accent.Render(a.Name()) + "  " + th.Addr.Render(components.ShortAddr(addr, 16, 9)) + "  " + stateBadge(th, a.State)
+	}
+	b.WriteString(head + "\n")
 	b.WriteString(th.Dim.Render(strings.Repeat("─", min(w, 50))) + "\n")
 
 	if a.Detailed {
@@ -398,7 +433,13 @@ func (v *agentsView) detail(w, h int) string {
 	if a.Created != 0 {
 		b.WriteString(th.Dim.Render("allocated ") + th.Text.Render(components.Uptime(a.Created)+" ago") + "\n")
 	}
-	return clampLines(b.String(), h)
+	// Every line fits the panel width — a long fqdn/contact must truncate (ANSI-safe),
+	// never wrap and shove the panel taller than its box. ↵ drill has the full value.
+	lines := strings.Split(b.String(), "\n")
+	for i := range lines {
+		lines[i] = truncate(lines[i], w)
+	}
+	return clampLines(strings.Join(lines, "\n"), h)
 }
 
 // --- small helpers ---------------------------------------------------------------

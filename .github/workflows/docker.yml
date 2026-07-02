@@ -45,7 +45,7 @@ jobs:
           provenance: false
           build-args: |
             VERSION=${{ steps.ver.outputs.version }}
-          # OCI annotation so the MCP Registry can verify this image belongs to the server (#194).
+          # OCI annotation so the MCP Registry can verify this image belongs to the server.
           annotations: |
             io.modelcontextprotocol.server.name=io.github.whisper-sec/whisper
           tags: |

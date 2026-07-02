@@ -12,15 +12,17 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 )
 
-// Canonical endpoints. graph.whisper.security is the ONE control endpoint (control +
-// /monitor/stream); rdap.whisper.online is the public RDAP service. All overridable by
-// env for pre-prod (Postel: liberal in, but a sane zero-config default).
+// Canonical endpoints. graph.whisper.security is the ONE control endpoint; the live
+// monitor SSE is served directly by the active/active ns nodes (the gateway does not
+// proxy /monitor/stream —); rdap.whisper.online is the public RDAP service. All
+// overridable by env for pre-prod (Postel: liberal in, but a sane zero-config default).
 const (
 	DefaultControlURL = "https://graph.whisper.security/api/query"
-	DefaultMonitorURL = "https://graph.whisper.security/monitor/stream"
+	DefaultMonitorURL = "https://ns1.whisper.online/monitor/stream"
 	DefaultRDAPURL    = "https://rdap.whisper.online"
 	// DefaultConsoleURL is the user-facing console that hosts the device-authorization
 	// (RFC 8628) login flow: POST /api/device/authorize and POST /api/device/token. It
@@ -36,6 +38,14 @@ const (
 
 	userAgent = "whisper-cli/2"
 )
+
+// DefaultMonitorURLs are the monitor SSE endpoints tried in rotation when no explicit
+// --monitor-url override is given: both ns nodes are active/active and answer
+// identically, so a reconnect after a node failure lands on the healthy one.
+var DefaultMonitorURLs = []string{
+	"https://ns1.whisper.online/monitor/stream",
+	"https://ns2.whisper.online/monitor/stream",
+}
 
 // Config configures a Client. Zero values fall back to the canonical defaults.
 type Config struct {
@@ -55,12 +65,16 @@ type Config struct {
 // Client is the single control-plane + RDAP + SSE client backing both surfaces.
 type Client struct {
 	controlURL string
-	monitorURL string
-	rdapURL    string
-	verifyURL  string
-	echoURL    string
-	cred       Credential
-	http       *http.Client
+	// monitorURLs are tried in rotation across reconnects (active/active ns nodes). An
+	// explicit override pins the list to that one URL. monitorIdx advances on each
+	// failed attempt so the next reconnect lands on the other node.
+	monitorURLs []string
+	monitorIdx  atomic.Uint32
+	rdapURL     string
+	verifyURL   string
+	echoURL     string
+	cred        Credential
+	http        *http.Client
 	// sse is a separate client with NO overall timeout (the stream is long-lived); it
 	// shares the control client's transport (and thus the embedded-CA TLS).
 	sse *http.Client
@@ -70,7 +84,10 @@ type Client struct {
 // TLS into a fresh transport when no HTTPClient was supplied.
 func New(cfg Config) *Client {
 	control := orDefault(cfg.ControlURL, DefaultControlURL)
-	monitor := orDefault(cfg.MonitorURL, DefaultMonitorURL)
+	monitors := DefaultMonitorURLs
+	if cfg.MonitorURL != "" {
+		monitors = []string{cfg.MonitorURL}
+	}
 	rdap := orDefault(cfg.RDAPURL, DefaultRDAPURL)
 	verify := orDefault(cfg.VerifyURL, DefaultVerifyURL)
 	echo := orDefault(cfg.EchoURL, DefaultEchoURL)
@@ -102,15 +119,20 @@ func New(cfg Config) *Client {
 	}
 
 	return &Client{
-		controlURL: control,
-		monitorURL: monitor,
-		rdapURL:    rdap,
-		verifyURL:  verify,
-		echoURL:    echo,
-		cred:       cfg.Cred,
-		http:       httpClient,
-		sse:        &http.Client{Transport: transport}, // no Timeout: the SSE stream is long-lived
+		controlURL:  control,
+		monitorURLs: monitors,
+		rdapURL:     rdap,
+		verifyURL:   verify,
+		echoURL:     echo,
+		cred:        cfg.Cred,
+		http:        httpClient,
+		sse:         &http.Client{Transport: transport}, // no Timeout: the SSE stream is long-lived
 	}
+}
+
+// MonitorURL returns the monitor SSE endpoint the next stream attempt will use.
+func (c *Client) MonitorURL() string {
+	return c.monitorURLs[int(c.monitorIdx.Load())%len(c.monitorURLs)]
 }
 
 // Credential returns the resolved principal this client authenticates with.
@@ -163,7 +185,8 @@ func (c *Client) StreamMonitor(ctx context.Context, agentAddr string, emit func(
 	if c.cred.IsZero() {
 		return &ProblemError{Status: 401, Detail: "no API key for the monitor stream"}
 	}
-	u, err := url.Parse(c.monitorURL)
+	monitorURL := c.MonitorURL()
+	u, err := url.Parse(monitorURL)
 	if err != nil {
 		return err
 	}
@@ -183,10 +206,12 @@ func (c *Client) StreamMonitor(ctx context.Context, agentAddr string, emit func(
 
 	resp, err := c.sse.Do(req)
 	if err != nil {
-		return fmt.Errorf("monitor stream unreachable at %s: %w", c.monitorURL, err)
+		c.monitorIdx.Add(1) // fail over: next reconnect tries the other node
+		return fmt.Errorf("monitor stream unreachable at %s: %w", monitorURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		c.monitorIdx.Add(1) // fail over: next reconnect tries the other node
 		pe := &ProblemError{Status: resp.StatusCode, Detail: "monitor stream rejected the request"}
 		if resp.StatusCode == http.StatusServiceUnavailable {
 			pe.Detail = "monitor subscriber cap reached — back off and retry"

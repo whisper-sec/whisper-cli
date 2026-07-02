@@ -26,9 +26,9 @@ import (
 //	  ├─ 1 agent  → quick-confirm "Use <name>? [Y/n]" (Enter = yes) → connect → verify
 //	  └─ N agents → pick-or-create menu → connect → verify
 //
-// Until lands the real wireproxy connect, the flow STUBS connect: it prints the
-// chosen agent + one calm "connecting is coming in the next release" line. We never fake
-// a connection (conservative in what we emit).
+// The flow ends in the real shared connect+verify: it brings the chosen agent's egress
+// up (op:connect → local proxy), folds verify in, and prints one calm ✓-verified line.
+// We never fake a connection (conservative in what we emit).
 //
 // Everything here is Scandinavian: one line, generous silence, never busy, never a Go
 // stack trace. Every interactive branch has a headless equivalent driven by flags (§3.4)
@@ -69,7 +69,7 @@ type agentChoice struct {
 
 // runGuided is the entry point for bare `whisper`. It resolves the credential (guiding
 // the user to login when missing — the door never fails except on no-key-no-TTY), lists
-// the agents, branches 0/1/N, and hands off to the (currently stubbed) connect step.
+// the agents, branches 0/1/N, and hands off to the shared connect+verify step.
 func runGuided(opts guidedOptions, gio guidedIO) error {
 	c, err := guidedClient(opts, gio)
 	if err != nil {
@@ -302,8 +302,8 @@ func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []ag
 	return connectAndReport(opts, gio, choices[idx-1])
 }
 
-// connectAndReport is the tail of every guided branch (the stub is now
-// LIVE). Once the agent is chosen we persist it (so later commands bind to it with zero
+// connectAndReport is the tail of every guided branch: the connect step is live. Once
+// the agent is chosen we persist it (so later commands bind to it with zero
 // config), bring the egress up via the SHARED connect (op:connect → local proxy → fold
 // verify), and print the ONE calm ✓-verified success line. --quiet prints ONLY
 // socks5h://127.0.0.1:<port> (the load-bearing value). The bearer never appears anywhere.
@@ -332,8 +332,35 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 	if err != nil {
 		return err
 	}
+	// detect-and-reuse: a live `whisper connect` daemon already serving this agent's /128
+	// means the front door is ALREADY connected — report/hold through the running proxy instead
+	// of opening a competing op:connect that would clobber (and on exit, kill) the daemon's
+	// server-side peer. The reused session's Stop() is a no-op (local==nil), so neither the
+	// quiet/headless teardown below nor a TTY hold can touch the daemon's tunnel.
+	sel := firstNonBlank(choice.addr, choice.name)
+	cxr, cancelr := ctx()
+	reused, reuse := findLiveSession(cxr, c, sel)
+	cancelr()
+	if reuse {
+		if reused.name == "" {
+			reused.name = choice.name
+		}
+		if opts.quiet {
+			fmt.Fprintln(gio.out, reused.endpoint)
+			reused.Stop() // no-op by design — the daemon owns the proxy
+			return nil
+		}
+		writeSuccessLine(gio.out, gio.err, reused, false)
+		if opts.tty {
+			holdUntilSignal(reused) // parks; teardown no-ops (the daemon keeps serving)
+			return nil
+		}
+		reused.Stop()
+		return nil
+	}
+
 	args := map[string]any{}
-	if sel := firstNonBlank(choice.addr, choice.name); sel != "" {
+	if sel != "" {
 		args["agent"] = sel
 	}
 	// cx bounds ONLY the control call + the one-shot verify; it is NOT the proxy's lifetime

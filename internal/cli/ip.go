@@ -39,30 +39,46 @@ func newIPCmd() *cobra.Command {
 				return err
 			}
 			sel := resolveAgentSelector(agent, agentFile)
-			args := map[string]any{}
-			if sel != "" {
-				args["agent"] = sel
-			}
 			cx, cancel := ctx()
 			defer cancel()
-			env, err := c.Agents(cx, "connect", args)
-			if err != nil {
-				return err
-			}
-			if perr := envelopeError(env); perr != nil {
-				return perr
-			}
-			// Bring the egress up, fetch the echo THROUGH it, assert == /128. `whisper ip`
-			// uses the default tier (the verify is identical across tiers) — nil wgKey.
-			sess, err := connectAndVerify(cx, c, env.Result, "", nil)
-			if err != nil {
-				// A clean, non-leaky failure: render the remediation + a non-zero exit.
-				if g.jsonOut {
-					emitJSONValue(map[string]any{"ip": "", "verified": false, "agent": sel})
+			// detect-and-reuse: when a long-lived `whisper connect` daemon on this host
+			// already serves the target /128, verify THROUGH its live proxy instead of opening
+			// a competing op:connect (which would replace — and on our exit, remove — the
+			// daemon's server-side peer, killing its tunnel). The verify below is the SAME
+			// echo-through-the-egress assertion, so a wrong/mismatched egress is still caught.
+			var sess *egressSession
+			if reused, ok := findLiveSession(cx, c, sel); ok {
+				if err := verifyEgress(cx, c, reused); err != nil {
+					if g.jsonOut {
+						emitJSONValue(map[string]any{"ip": "", "verified": false, "agent": sel})
+					}
+					return err
 				}
-				return err
+				sess = reused
+			} else {
+				args := map[string]any{}
+				if sel != "" {
+					args["agent"] = sel
+				}
+				env, err := c.Agents(cx, "connect", args)
+				if err != nil {
+					return err
+				}
+				if perr := envelopeError(env); perr != nil {
+					return perr
+				}
+				// Bring the egress up, fetch the echo THROUGH it, assert == /128. `whisper ip`
+				// uses the default tier (the verify is identical across tiers) — nil wgKey.
+				sess, err = connectAndVerify(cx, c, env.Result, "", nil)
+				if err != nil {
+					// A clean, non-leaky failure: render the remediation + a non-zero exit.
+					if g.jsonOut {
+						emitJSONValue(map[string]any{"ip": "", "verified": false, "agent": sel})
+					}
+					return err
+				}
 			}
-			defer sess.Stop() // one-shot: tear the proxy down on return
+			defer sess.Stop() // one-shot: tear OUR proxy down on return (a REUSED session no-ops)
 			if g.jsonOut {
 				emitJSONValue(map[string]any{"ip": sess.addr, "verified": sess.verified, "agent": agentDisplay(sess, sel)})
 				return nil

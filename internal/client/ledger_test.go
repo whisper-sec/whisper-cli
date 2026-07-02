@@ -62,7 +62,7 @@ func inclusionPath(m int, leaves [][]byte) [][]byte {
 	return append(inclusionPath(m-k, leaves[k:]), mth(leaves[:k]))
 }
 
-// TestLedgerVerifierEndToEnd proves the WHOLE -P cli recipe with stock crypto: build a
+// TestLedgerVerifierEndToEnd proves the WHOLE release verifier with stock crypto: build a
 // signed checkpoint, recompute a leaf from a disclosed (salt, event), and verify inclusion
 // against the signed root — then prove a TAMPERED disclosure is rejected.
 func TestLedgerVerifierEndToEnd(t *testing.T) {

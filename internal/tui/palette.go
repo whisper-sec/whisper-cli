@@ -75,7 +75,10 @@ func (p *palette) filter() {
 		p.filtered = p.all
 		return
 	}
-	p.filtered = p.filtered[:0]
+	// A fresh slice every time: p.filtered aliases p.all whenever the query is empty,
+	// so `p.filtered[:0]` + append would overwrite p.all's backing array in place and
+	// permanently corrupt the command list.
+	p.filtered = make([]command, 0, len(p.all))
 	for _, c := range p.all {
 		if fuzzyMatch(strings.ToLower(c.title), q) || strings.Contains(strings.ToLower(c.preview), q) {
 			p.filtered = append(p.filtered, c)
@@ -135,7 +138,9 @@ func (p *palette) view() string {
 			bullet = th.Accent.Render("●")
 			title = th.Accent.Render(c.title)
 		}
-		line := bullet + " " + pad(title, 26) + th.Dim.Render(c.preview)
+		// Clamp to the box's inner width (54 minus Padding(1,2)) — a long preview
+		// truncates, never wraps the two-column row onto a second line.
+		line := truncate(bullet+" "+pad(title, 26)+th.Dim.Render(c.preview), 50)
 		b.WriteString(line + "\n")
 	}
 	box := th.ModalBox.Width(54).Render(

@@ -34,15 +34,21 @@ func (a *App) handleOverlayKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateCreate steps the create form; on completion it fires op:identity or op:register.
-func (a *App) updateCreate(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if k.String() == "esc" {
+// It accepts ANY tea.Msg — huh advances fields/groups via its own internal messages
+// (delivered as commands), so a KeyMsg-only diet leaves the form frozen.
+func (a *App) updateCreate(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
 		a.overlay = overlayNone
 		return a, nil
 	}
 	f := a.create
-	m, cmd := f.form.Update(k)
+	m, cmd := f.form.Update(msg)
 	if ff, ok := m.(*huh.Form); ok {
 		f.form = ff
+	}
+	if f.form.State == huh.StateAborted {
+		a.overlay = overlayNone // ctrl+c aborts the form — never a dead overlay
+		return a, nil
 	}
 	if f.form.State == huh.StateCompleted {
 		// Build the write through the ONE shared guard (§3.2): it re-applies the
@@ -61,16 +67,20 @@ func (a *App) updateCreate(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateKill steps the kill form; on completion it confirms the typed name and fires
-// op:revoke or op:identity{release}.
-func (a *App) updateKill(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if k.String() == "esc" {
+// op:revoke or op:identity{release}. Accepts ANY tea.Msg — see updateCreate.
+func (a *App) updateKill(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
 		a.overlay = overlayNone
 		return a, nil
 	}
 	f := a.kill
-	m, cmd := f.form.Update(k)
+	m, cmd := f.form.Update(msg)
 	if ff, ok := m.(*huh.Form); ok {
 		f.form = ff
+	}
+	if f.form.State == huh.StateAborted {
+		a.overlay = overlayNone // ctrl+c aborts the form — never a dead overlay
+		return a, nil
 	}
 	if f.form.State == huh.StateCompleted {
 		a.overlay = overlayNone
@@ -96,15 +106,20 @@ func (a *App) updateKill(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateConnect steps the connect form; on completion it fires op:connect.
-func (a *App) updateConnect(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if k.String() == "esc" {
+// Accepts ANY tea.Msg — see updateCreate.
+func (a *App) updateConnect(msg tea.Msg) (tea.Model, tea.Cmd) {
+	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
 		a.overlay = overlayNone
 		return a, nil
 	}
 	f := a.connect
-	m, cmd := f.form.Update(k)
+	m, cmd := f.form.Update(msg)
 	if ff, ok := m.(*huh.Form); ok {
 		f.form = ff
+	}
+	if f.form.State == huh.StateAborted {
+		a.overlay = overlayNone // ctrl+c aborts the form — never a dead overlay
+		return a, nil
 	}
 	if f.form.State == huh.StateCompleted {
 		a.overlay = overlayNone
@@ -137,13 +152,17 @@ func (a *App) renderOverlay(frame string) string {
 		return a.th.App.Render(frame)
 	}
 	overlaid := lipgloss.Place(a.width, a.height, lipgloss.Center, lipgloss.Center, box)
-	return a.th.App.Render(overlaid)
+	return a.th.App.MaxWidth(a.width).MaxHeight(a.height).Render(overlaid)
 }
 
 func (a *App) formCard(title, body string) string {
 	th := a.th
 	footer := th.Dim.Render("enter submit · esc cancel")
-	return th.ModalBox.Width(62).Render(
+	// Card content (66-4 padding = 62) must be WIDER than the huh forms (≤56): a card
+	// narrower than its form re-wraps huh's already-wrapped lines mid-token.
+	// Clamp to the terminal so a narrow window never overflows.
+	w := min(66, a.width-4)
+	return th.ModalBox.Width(w).Render(
 		th.ModalTitle.Render(title) + "\n\n" + body + "\n" + footer)
 }
 
@@ -170,17 +189,24 @@ func (a *App) helpCard() string {
 		sec("fleet (AGENTS)"),
 		"  " + key("j/k") + " move   " + key("g/G") + " top/bottom   " + key("⌃D/⌃U") + " half-page",
 		"  " + key("/") + " filter   " + key("n/N") + " next/prev   " + key("⇧K") + " sort   " + key("z") + " density",
-		"  " + key("↵") + " details   " + key("c") + " create   " + key("x") + " kill   " + key("e") + " connect   " + key("m") + " monitor   " + key("v") + " RDAP",
+		"  " + key("↵") + " details   " + key("c") + " create   " + key("x") + " kill   " + key("e") + " connect",
+		"  " + key("m") + " monitor   " + key("v") + " RDAP",
 		"",
 		sec("monitor"),
-		"  " + key("space") + " pause   " + key("f") + " kind filter   " + key("/") + " filter   " + key("s") + " select agent   " + key("↵") + " drill",
+		"  " + key("space") + " pause   " + key("f") + " kind filter   " + key("/") + " filter",
+		"  " + key("s") + " select agent   " + key("↵") + " drill",
 		"",
 		sec("logs / policy"),
 		"  LOGS: " + key("r") + " run   " + key("t") + " time   " + key("k") + " kind   " + key("↵") + " drill",
 		"  POLICY: " + key("a") + " allow   " + key("b") + " block   " + key("d") + " default   " + key("w") + " write",
 	}
-	return th.ModalBox.Width(64).Render(
-		th.ModalTitle.Render("whisper — keybindings") + "\n\n" +
+	head := th.ModalTitle.Render("whisper — keybindings")
+	// The brand mark tops the card when colour + height allow ( approved art).
+	if art := renderLogo(logoIcon, th.NoColor); art != "" && a.height >= 34 {
+		head = lipgloss.JoinVertical(lipgloss.Center, art, "", head)
+	}
+	return th.ModalBox.Width(min(64, a.width-4)).Render(
+		head + "\n\n" +
 			strings.Join(lines, "\n") + "\n\n" + th.Dim.Render("esc / q close"))
 }
 

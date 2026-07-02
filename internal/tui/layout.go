@@ -68,7 +68,7 @@ func (a *App) viewHeight() int {
 // --- header ----------------------------------------------------------------------
 
 func (a *App) renderHeader() string {
-	left := a.th.Header.Render(" whisper ")
+	left := " " + brandGradient("whisper", a.th.NoColor) + " "
 	tenant := a.opts.Tenant
 	if tenant == "" {
 		tenant = "—"
@@ -177,9 +177,10 @@ func (a *App) renderAgentsDashboard() string {
 	return lipgloss.JoinVertical(lipgloss.Left, top, mon)
 }
 
-// renderHero is the first-run welcome: a centred whisper mark + "press c to create".
+// renderHero is the first-run welcome: the four-ring brand mark (when colour and
+// height allow — the -approved art) over the wordmark + "press c to create".
 func (a *App) renderHero(w, h int) string {
-	mark := a.th.Hero.Render("whisper")
+	mark := brandGradient("whisper", a.th.NoColor)
 	sub := a.th.Dim.Render("identity-on-the-wire DNS — an agent IS a routable /128")
 	cta := a.th.Accent.Render("press  c  to create your first agent") + "\n" +
 		a.th.Dim.Render("or  :  for the command palette  ·  ?  for help")
@@ -187,7 +188,11 @@ func (a *App) renderHero(w, h int) string {
 	if a.loading {
 		loading = "\n\n" + a.th.Dim.Render("loading your fleet…")
 	}
-	block := lipgloss.JoinVertical(lipgloss.Center, mark, "", sub, "", cta) + loading
+	parts := []string{mark, "", sub, "", cta}
+	if art := renderLogo(logoSplash, a.th.NoColor); art != "" && h >= logoRows(logoSplash)+8 {
+		parts = append([]string{art, ""}, parts...)
+	}
+	block := lipgloss.JoinVertical(lipgloss.Center, parts...) + loading
 	return lipgloss.Place(w, h, lipgloss.Center, lipgloss.Center, block)
 }
 

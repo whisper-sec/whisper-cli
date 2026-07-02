@@ -6,6 +6,7 @@ package tui
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -14,9 +15,10 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/tui/components"
 )
 
-// kbpsWindow is how many per-second buckets the per-agent rings keep — 2 minutes, enough
-// to fill the braille hero graph at one sample/second while staying tiny + bounded.
-const kbpsWindow = 120
+// kbpsWindow is how many per-second buckets the per-agent rings keep — 4 minutes, enough
+// to fill the braille hero graph (2 dot-columns per cell) on a wide terminal at one
+// sample/second while staying tiny + bounded (~8 KiB/agent).
+const kbpsWindow = 240
 
 // agentRing holds rolling per-second buckets for one agent: total bytes (the kbps spark +
 // the hero graph), conn-opens (the conn/min gauge), and dns total/blocked (the block-rate
@@ -89,14 +91,29 @@ func (v *monitorView) observe(e model.Event) {
 		r = &agentRing{}
 		v.rings[key] = r
 	}
+	// Bucket by the EVENT's own timestamp, not the current head: a -15m backfill or a
+	// 2-minute poll batch folded into head collapses history into one giant "now" spike
+	// with a dead graph behind it. Older-than-window events don't chart (they
+	// still count in the feed); clock skew clamps to now.
+	idx := r.head
+	if e.TsMicros > 0 {
+		delta := time.Now().Unix() - e.TsMicros/1_000_000
+		if delta < 0 {
+			delta = 0
+		}
+		if delta >= kbpsWindow {
+			return
+		}
+		idx = (r.head - int(delta) + kbpsWindow*2) % kbpsWindow
+	}
 	switch e.Kind {
 	case "conn":
-		r.bytes[r.head] += float64(e.BytesUp + e.BytesDown)
-		r.conns[r.head]++
+		r.bytes[idx] += float64(e.BytesUp + e.BytesDown)
+		r.conns[idx]++
 	case "dns":
-		r.dnsTotal[r.head]++
+		r.dnsTotal[idx]++
 		if isBlock(e.Decision) {
-			r.dnsBlocked[r.head]++
+			r.dnsBlocked[idx]++
 		}
 	}
 }
@@ -312,6 +329,11 @@ func (v *monitorView) renderHero(w, h int) string {
 	if graphW < 10 {
 		graphW = w - 4
 	}
+	// Never plot more dot-columns than the ring holds samples (2 dots per cell): an
+	// over-wide plot left-pads with permanent zeros — a structurally dead left half.
+	if graphW > kbpsWindow/2 {
+		graphW = kbpsWindow / 2
+	}
 
 	key, label := v.heroTarget()
 	series := v.heroSeries(key, graphW*2) // 2 samples per cell wide (braille resolution)
@@ -516,7 +538,7 @@ func (v *monitorView) renderChainPanel(w, h int) string {
 // --- titles ----------------------------------------------------------------------
 
 func (v *monitorView) heroTitle(label string) string {
-	return fmt.Sprintf("◈ THROUGHPUT · %s · kbps/2min", label)
+	return fmt.Sprintf("◈ THROUGHPUT · %s · kbps/%dmin", label, kbpsWindow/60)
 }
 
 func (v *monitorView) stripsTitle() string {

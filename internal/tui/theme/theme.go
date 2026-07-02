@@ -126,6 +126,8 @@ type Theme struct {
 	App        lipgloss.Style
 	Panel      lipgloss.Style // unfocused bordered panel
 	PanelHi    lipgloss.Style // focused bordered panel
+	BorderFg   lipgloss.Style // border glyphs rendered as text (unfocused colour)
+	BorderHiFg lipgloss.Style // border glyphs rendered as text (focused colour)
 	Title      lipgloss.Style // panel title text
 	Header     lipgloss.Style // the top header bar
 	TabActive  lipgloss.Style
@@ -218,6 +220,8 @@ func (t *Theme) build() {
 	border := lipgloss.RoundedBorder()
 	t.Panel = lipgloss.NewStyle().Border(border).BorderForeground(t.color(p.Border)).Padding(0, 1)
 	t.PanelHi = lipgloss.NewStyle().Border(border).BorderForeground(t.color(p.BorderHi)).Padding(0, 1)
+	t.BorderFg = fg(p.Border)
+	t.BorderHiFg = fg(p.BorderHi)
 
 	t.Title = fg(p.Accent).Bold(true)
 	t.Header = lipgloss.NewStyle().Bold(true).Foreground(t.color(p.Text))

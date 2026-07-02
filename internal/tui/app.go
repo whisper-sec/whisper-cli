@@ -104,6 +104,7 @@ type App struct {
 	lastEventUS   int64 // newest folded event ts (µs) — dedup for the poll fallback
 	bufferedPause int   // events dropped while paused (the "⏸ N buffered" counter)
 	hbPulse       int   // heartbeat animation phase (●→◉→●), advanced on the tick
+	pollArmed     bool  // ONE poll chain at a time — N failed reconnects must not stack N pollers
 
 	// toast (transient status)
 	toast      string
@@ -219,11 +220,14 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.err != nil {
 			a.setToast(friendlyErr(m.err), true)
 		}
-		// Hybrid §6.4: when the live tail drops to poll (503/EOF), kick the op:logs poll
-		// fallback so the picture keeps updating until the SSE reconnects. Only fire on the
-		// transition (not every state message) to avoid a poll storm.
+		// Hybrid §6.4: when the live tail drops to poll (503/EOF/404), kick the op:logs
+		// poll fallback so the picture keeps updating until the SSE reconnects. pollArmed
+		// keeps it to ONE chain — the reconnect loop oscillates retry→poll, and firing on
+		// every oscillation would stack N concurrent pollers.
+		_ = prev
 		var extra tea.Cmd
-		if m.state == streamPoll && prev != streamPoll {
+		if m.state == streamPoll && !a.pollArmed {
+			a.pollArmed = true
 			a.source = srcPoll
 			extra = loadMonitorPoll(a.client, a.streamAddr, "-2m")
 		}
@@ -239,6 +243,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case pollFireMsg:
 		// Re-arm tick: issue a fresh op:logs poll only while the stream is still down.
 		if a.stream == streamConn {
+			a.pollArmed = false
 			return a, nil
 		}
 		return a, loadMonitorPoll(a.client, m.addr, "-2m")
@@ -250,6 +255,23 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toastMsg:
 		a.setToast(m.text, m.isErr)
 		return a, nil
+	}
+	// Anything else while a form overlay is open belongs to the form: huh drives its
+	// field focus, validation, and group advance through its OWN messages (returned as
+	// commands from form.Update/Init) — swallowing them here freezes the form with a
+	// dead Enter/Tab. Forward them, and the form comes alive.
+	switch a.overlay {
+	case overlayCreate:
+		return a.updateCreate(msg)
+	case overlayKill:
+		return a.updateKill(msg)
+	case overlayConnect:
+		return a.updateConnect(msg)
+	case overlayPalette:
+		// The palette's textinput needs its cursor-blink messages too.
+		var cmd tea.Cmd
+		a.palette.input, cmd = a.palette.input.Update(msg)
+		return a, cmd
 	}
 	return a, nil
 }
@@ -280,7 +302,10 @@ func (a *App) View() string {
 	if a.overlay != overlayNone {
 		return a.renderOverlay(frame)
 	}
-	return a.th.App.Render(frame)
+	// Belt-and-braces: clamp the frame to the terminal so a width-math slip in any one
+	// view degrades to a clipped edge, never a scrolled/wrapped full-screen collapse
+	//. Conservative in what we emit.
+	return a.th.App.MaxWidth(a.width).MaxHeight(a.height).Render(frame)
 }
 
 // --- selection + fleet -----------------------------------------------------------
@@ -328,7 +353,23 @@ func (a *App) mergeFleet(fresh []model.Agent) {
 	if a.selected < 0 {
 		a.selected = 0
 	}
+	a.deriveTenant()
 	a.agentsView.syncRows()
+}
+
+// deriveTenant backfills the header's tenant handle from an agent fqdn
+// (<agent>.<t-handle>.agents.<zone>) when the launch-time best-effort lookup came
+// back empty — the fleet we already hold IS the answer (derive, don't fetch).
+func (a *App) deriveTenant() {
+	if a.opts.Tenant != "" {
+		return
+	}
+	for _, ag := range a.agents {
+		if t := model.TenantFromFQDN(ag.FQDN); t != "" {
+			a.opts.Tenant = t
+			return
+		}
+	}
 }
 
 // applyDetail folds an op:agent reply into the matching fleet entry.
@@ -363,7 +404,12 @@ func (a *App) upsertStreamAgent(addr128, agentID string) {
 		key = agentID
 	}
 	for i := range a.agents {
-		if a.agents[i].Key() == key || (addr128 != "" && a.agents[i].Address == addr128) {
+		// Match on EITHER handle: an event that carries only the agent id must still
+		// collapse onto a roster entry keyed by its /128 (else every id-only event
+		// minted a phantom "(no /128)" duplicate row —).
+		if a.agents[i].Key() == key ||
+			(addr128 != "" && a.agents[i].Address == addr128) ||
+			(agentID != "" && a.agents[i].ID == agentID) {
 			return // already known
 		}
 	}

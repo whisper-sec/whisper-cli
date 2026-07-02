@@ -373,8 +373,17 @@ func displayName(res *client.Result) string {
 //
 // It is a package var so a command test can replace it with an immediate, non-blocking
 // teardown (a test must not park on a real signal).
+//
+// a held-open session is registered in the local session registry for its whole hold, so
+// a one-shot (`whisper ip`/`run`/`claude`) detects it and REUSES the running proxy instead of
+// opening a competing op:connect that would clobber (and on exit, kill) this session's
+// server-side peer. Owner-guarded: a REUSED session (local==nil) is neither written nor cleared.
 var holdUntilSignal = func(sess *egressSession) {
-	defer sess.Stop()
+	writeSessionRecord(sess)
+	defer func() {
+		clearSessionRecord(sess)
+		sess.Stop()
+	}()
 	sigs := make(chan os.Signal, 1)
 	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
 	<-sigs

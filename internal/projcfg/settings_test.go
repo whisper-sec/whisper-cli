@@ -68,13 +68,13 @@ func TestMerge_PreservesExistingKeys(t *testing.T) {
 		t.Fatal(err)
 	}
 	pre := map[string]any{
-		"model": "claude-opus-4-8",
+		"model": "example-model",
 		"permissions": map[string]any{
 			"allow": []any{"Bash(ls:*)"},
 		},
 		"env": map[string]any{
-			"FOO":             "bar",
-			"ANTHROPIC_MODEL": "x",
+			"FOO":           "bar",
+			"EXAMPLE_MODEL": "x",
 		},
 		"hooks": map[string]any{
 			"SessionStart": []any{
@@ -97,7 +97,7 @@ func TestMerge_PreservesExistingKeys(t *testing.T) {
 
 	m := readSettings(t, p)
 	// Top-level non-Whisper keys preserved.
-	if m["model"] != "claude-opus-4-8" {
+	if m["model"] != "example-model" {
 		t.Fatalf("model clobbered: %v", m["model"])
 	}
 	if _, ok := m["permissions"]; !ok {
@@ -105,7 +105,7 @@ func TestMerge_PreservesExistingKeys(t *testing.T) {
 	}
 	// Other env vars preserved + ours added.
 	env := m["env"].(map[string]any)
-	if env["FOO"] != "bar" || env["ANTHROPIC_MODEL"] != "x" {
+	if env["FOO"] != "bar" || env["EXAMPLE_MODEL"] != "x" {
 		t.Fatalf("existing env vars dropped: %v", env)
 	}
 	if env["HTTP_PROXY"] != "http://127.0.0.1:30000" {

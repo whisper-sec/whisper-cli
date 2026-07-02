@@ -22,14 +22,14 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/model"
 	"github.com/whisper-sec/whisper-cli/internal/tui"
 	"github.com/whisper-sec/whisper-cli/internal/tui/theme"
 )
 
-// Version is stamped at build time via -ldflags "-X .../cli.Version=...". The release path (Maven
-// `-P cli` → build-all.sh) stamps the real ${project.version} so a served binary's
-// `whisper --version` matches the release tag exactly. It MUST stay a plain
-// constant-string-initialised var so `-X` can override it.
+// Version is stamped at build time via -ldflags "-X .../cli.Version=...". The release build
+// stamps the real release version so a served binary's `whisper --version` matches the release
+// tag exactly. It MUST stay a plain constant-string-initialised var so `-X` can override it.
 //
 // versionFallback is used only when no ldflag was applied. For a `go install <module>@vX` binary
 // we then recover the real version from the embedded build info (the init below), so a
@@ -39,12 +39,12 @@ const versionFallback = "0.115.0"
 
 var Version = versionFallback
 
-// init recovers the version for a go-install binary: if no ldflag was applied (Version is
-// still the fallback) and the build carries a real module version, adopt it. Runs before any
-// command reads Version. No-op for the ldflag-stamped release/`-P cli` builds.
+// init recovers the version for a `go install <module>@vX` binary: if no ldflag was applied
+// (Version is still the fallback) and the build carries a real module version, adopt it. Runs
+// before any command reads Version. No-op for the ldflag-stamped release builds.
 func init() {
 	if Version != versionFallback {
-		return // ldflag-stamped (release / -P cli) — honour it verbatim
+		return // ldflag-stamped (release build) — honour it verbatim
 	}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		if mv := strings.TrimPrefix(bi.Main.Version, "v"); mv != "" && mv != "(devel)" {
@@ -299,6 +299,11 @@ func bestEffortTenant(c *client.Client) string {
 			item = m
 		}
 		if v := field(item, "tenant", "holder"); v != "" {
+			return v
+		}
+		// No explicit tenant field: the agent fqdn carries the handle as its second
+		// label (<agent>.<t-handle>.agents.<zone>) — derive it.
+		if v := model.TenantFromFQDN(field(item, "fqdn")); v != "" {
 			return v
 		}
 	}

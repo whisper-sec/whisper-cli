@@ -45,7 +45,14 @@ func (a *App) liveTitle() string {
 	case streamConn:
 		state, badge = "connected", a.th.OK
 	case streamPoll:
-		state, badge = "poll fallback", a.th.Warn
+		// Distinguish "the stream dropped, polling while it reconnects" from "the
+		// stream has NEVER answered" (a deterministic 404/401 —): a permanently
+		// dead endpoint must not read as a transient blip.
+		if a.hbSeen {
+			state, badge = "poll fallback", a.th.Warn
+		} else {
+			state, badge = "stream offline · polling", a.th.Warn
+		}
 	case streamRetry:
 		state, badge = "reconnecting", a.th.Warn
 	}
@@ -169,6 +176,7 @@ func (a *App) onMonitorBackfill(m monitorBackfillMsg) {
 // resumes). Fail-open throughout: a poll error just leaves the feed and re-arms.
 func (a *App) onMonitorPoll(m monitorPollMsg) tea.Cmd {
 	if a.stream == streamConn {
+		a.pollArmed = false
 		return nil // the live tail is back — stop polling
 	}
 	if m.err == nil {
@@ -190,27 +198,38 @@ func (a *App) onMonitorPoll(m monitorPollMsg) tea.Cmd {
 // --- titled panel helper ---------------------------------------------------------
 
 // titledPanel overlays a title onto the top border line of an already-bordered panel,
-// the k9s/btop look. It finds the top border row and splices the title in after the
-// corner.
+// the k9s/btop look. The original top line is STYLED text — slicing it by runes cuts
+// ANSI escape sequences mid-way (the "LEET"/"38;5m" corruption class) — so we
+// never splice into it: we rebuild the whole top border line from scratch at exactly
+// the panel's real width: ╭─ TITLE ───────╮.
 func (a *App) titledPanel(panel, title string, w int) string {
+	return a.titledPanelStyled(panel, title, w, a.th.BorderFg)
+}
+
+// titledPanelStyled is titledPanel with an explicit border-glyph style (so a focused
+// panel's rebuilt top line matches its Hi border colour).
+func (a *App) titledPanelStyled(panel, title string, w int, borderFg lipgloss.Style) string {
 	lines := strings.Split(panel, "\n")
 	if len(lines) == 0 {
 		return panel
 	}
-	top := lines[0]
-	// Splice: keep the leading corner+dash, then the title, then the rest of the border.
-	prefix := "" // up to and including the first 2 border runes
-	runes := []rune(top)
-	if len(runes) > 3 {
-		prefix = string(runes[:2])
-		titleStr := " " + title + " "
-		tw := lipgloss.Width(titleStr)
-		rest := ""
-		if len(runes) > 2+tw {
-			rest = string(runes[2+tw:])
+	// The body lines below the top border carry the panel's true rendered width; trust
+	// them over the caller's hint so the rebuilt line can never be the one ragged row.
+	if len(lines) > 1 {
+		if bw := lipgloss.Width(lines[1]); bw > 0 {
+			w = bw
 		}
-		lines[0] = prefix + titleStr + rest
 	}
+	if w < 4 {
+		return panel // too narrow for a title — keep the plain border
+	}
+	titleStr := " " + title + " "
+	if tw := lipgloss.Width(titleStr); tw > w-3 {
+		titleStr = truncate(titleStr, w-3)
+	}
+	fill := w - 3 - lipgloss.Width(titleStr) // "╭─" + title + fill + "╮" = w
+	lines[0] = borderFg.Render("╭─") + a.th.Title.Render(titleStr) +
+		borderFg.Render(strings.Repeat("─", fill)+"╮")
 	return strings.Join(lines, "\n")
 }
 

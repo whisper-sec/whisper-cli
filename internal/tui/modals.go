@@ -86,7 +86,7 @@ func (a *App) openCreate() (tea.Model, tea.Cmd) {
 				Description("yes = op:register (mints an api_key, shown once) · no = op:identity (your own /128)").
 				Value(&f.register),
 		),
-	).WithTheme(a.huhTheme()).WithShowHelp(false).WithWidth(56)
+	).WithTheme(a.huhTheme()).WithShowHelp(false).WithWidth(min(56, a.width-10))
 	a.create = f
 	a.overlay = overlayCreate
 	return a, f.form.Init()
@@ -111,7 +111,7 @@ func (a *App) openKill() (tea.Model, tea.Cmd) {
 				Description("withdraws the /128, reverse PTR, TLSA/SSHFP, and egress tokens · expected: "+confirmWord).
 				Value(&f.confirm),
 		),
-	).WithTheme(a.huhTheme()).WithShowHelp(false).WithWidth(60)
+	).WithTheme(a.huhTheme()).WithShowHelp(false).WithWidth(min(56, a.width-10))
 	a.kill = f
 	a.overlay = overlayKill
 	return a, f.form.Init()
@@ -127,7 +127,7 @@ func (a *App) openConnect() (tea.Model, tea.Cmd) {
 				Options(huh.NewOption("socks5 (default)", "socks5"), huh.NewOption("anyip", "anyip")).
 				Value(&f.tier),
 		),
-	).WithTheme(a.huhTheme()).WithShowHelp(false).WithWidth(50)
+	).WithTheme(a.huhTheme()).WithShowHelp(false).WithWidth(min(50, a.width-10))
 	a.connect = f
 	a.overlay = overlayConnect
 	return a, f.form.Init()

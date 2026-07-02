@@ -246,7 +246,7 @@ func LeafHashFromDisclosure(salt, canonicalEvent []byte) []byte {
 
 // VerifyInclusion folds leafHash with the RFC 6962 audit path and returns nil iff it
 // reconstructs the checkpoint root for (index, treeSize). The exact reference index-walk a
-// stock CT verifier uses — interoperable with the server's MerkleProofs.verifyInclusion.
+// stock CT verifier uses — interoperable with the server's RFC 6962 inclusion proofs.
 func VerifyInclusion(leafHash []byte, index, treeSize uint64, path [][]byte, root []byte) error {
 	if len(leafHash) != sha256.Size || len(root) != sha256.Size {
 		return fmt.Errorf("leaf hash / root must be 32 bytes")

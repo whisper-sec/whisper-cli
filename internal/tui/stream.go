@@ -55,6 +55,7 @@ func (a *App) startStream() tea.Cmd {
 		// on ctx.Done, so no send races the close.
 		defer func() { close(ch); <-a.streamMu }()
 		backoff := time.Second
+		lastStatus := 0 // last surfaced non-503 problem status (toast once, not per retry)
 		for {
 			if ctx.Err() != nil {
 				return
@@ -66,11 +67,15 @@ func (a *App) startStream() tea.Cmd {
 			if ctx.Err() != nil {
 				return
 			}
-			// The stream ended (EOF or a 503 subscriber-cap). Back off and reconnect —
-			// fail OPEN, never a hard stop (the service is drop-on-full by design).
-			if pe, ok := client.AsProblem(err); ok && pe.Status == 503 {
-				send(ch, ctx, streamStateMsg{state: streamPoll, err: nil})
+			// The stream ended (EOF, a 503 subscriber-cap, a 404/401, a transport
+			// error). ALWAYS drop to the op:logs poll fallback so the picture keeps
+			// updating — fail OPEN, never a hard stop — and surface a non-503 error
+			// once (not every retry) so a deterministic failure is never silent.
+			st := streamStateMsg{state: streamPoll}
+			if pe, ok := client.AsProblem(err); ok && pe.Status != 503 && pe.Status != lastStatus {
+				st.err, lastStatus = pe, pe.Status
 			}
+			send(ch, ctx, st)
 			select {
 			case <-ctx.Done():
 				return
