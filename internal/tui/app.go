@@ -294,7 +294,7 @@ func (a *App) SelectedAgent() (model.Agent, bool) {
 }
 
 // mergeFleet replaces the fleet from op:list, preserving any stream-discovered agents
-// (op:list may miss connect-created agents) and any already-fetched detail.
+// op:list may miss connect-created agents) and any already-fetched detail.
 func (a *App) mergeFleet(fresh []model.Agent) {
 	byKey := make(map[string]model.Agent, len(a.agents))
 	for _, ex := range a.agents {

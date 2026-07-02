@@ -10,7 +10,7 @@ import (
 )
 
 // monitor is the tunnel health loop (robustness - a stale WG is frustrating, the
-// same philosophy as the server-side reaper ). Every healthEvery it reads the device's
+// same philosophy as the server-side reaper). Every healthEvery it reads the device's
 // last-handshake; if the tunnel has had NO successful handshake for deadAfter (default 180s,
 // ~7× the 25s keepalive - the same black-hole threshold the box reaper uses), it forces a
 // reconnect: re-assert the peer endpoint via the UAPI, which nudges wireguard-go to send a

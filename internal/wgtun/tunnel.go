@@ -19,7 +19,7 @@
 // WHY userspace (mirrors wireproxy / the spawned-agent default): no privilege, no TUN
 // device, byte-identical across linux/darwin/windows (CGO-free, pure Go). The /128 routes
 // because the box registered our public key as a peer with that /128 as its sole AllowedIPs
-// (server-side ); cryptokey routing confines us to exactly our own identity.
+// (server-side); cryptokey routing confines us to exactly our own identity.
 //
 // ROBUSTNESS (mirrors the server reaper philosophy - a stale tunnel is frustrating):
 //   - PersistentKeepalive 25s keeps the NAT/UDP path warm (set in the device config).

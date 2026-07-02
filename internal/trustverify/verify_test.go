@@ -181,9 +181,9 @@ func TestVerify_FullHappyPath(t *testing.T) {
 }
 
 func TestVerify_FallsBackToTrustOnPinWithoutDNSAnchor(t *testing.T) {
-	// graceful degradation: a pre-server (no _whisper-identity/_whisper-ledger TXT)
+	// graceful degradation: a pre- server (no _whisper-identity/_whisper-ledger TXT)
 	// still verifies everything -- but steps 3-4 are honestly LABELLED trust-on-pin, exactly
-	// the pre-behavior. The verdict (DNSSEC + DANE) is unaffected.
+	// the pre- behavior. The verdict (DNSSEC + DANE) is unaffected.
 	fx := buildAgentFixture(t, "", "")
 	delete(fx.h.res.answers, rkey("_whisper-identity."+agentZone, dns.TypeTXT))
 	delete(fx.h.res.answers, rkey("_whisper-ledger."+agentZone, dns.TypeTXT))

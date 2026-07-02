@@ -28,7 +28,7 @@ import (
 
 // Version is stamped at build time via -ldflags "-X .../cli.Version=...". The release path (Maven
 // the release build → build-all.sh) stamps the real the release version so a served binary's
-// `whisper --version` matches the release tag exactly . It MUST stay a plain
+// `whisper --version` matches the release tag exactly. It MUST stay a plain
 // constant-string-initialised var so `-X` can override it.
 //
 // versionFallback is used only when no ldflag was applied. For a `go install <module>@vX` binary

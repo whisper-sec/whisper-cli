@@ -544,7 +544,7 @@ func TestProxy_SurvivesControlCtxCancel(t *testing.T) {
 	// The proxy must STILL accept a new client and stream bytes through to the backend.
 	conn, err := socks5Dial(p.Addr(), "example.com:80")
 	if err != nil {
-		t.Fatalf("after the control ctx was cancelled the proxy refused a NEW connection (it died with the ctx - the control-ctx bug): %v", err)
+		t.Fatalf("after the control ctx was cancelled the proxy refused a NEW connection (it died with the ctx - the ctx-cancellation bug): %v", err)
 	}
 	defer conn.Close()
 	msg := "alive-after-cancel"
@@ -601,7 +601,7 @@ func TestProxy_InFlightTunnelSurvivesControlCtxCancel(t *testing.T) {
 	buf := make([]byte, len(msg))
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if _, err := io.ReadFull(conn, buf); err != nil {
-		t.Fatalf("the in-flight tunnel was severed by the control-ctx cancel (the control-ctx bug): %v", err)
+		t.Fatalf("the in-flight tunnel was severed by the control-ctx cancel (the ctx-cancellation bug): %v", err)
 	}
 	if string(buf) != msg {
 		t.Fatalf("in-flight echo = %q, want %q", buf, msg)

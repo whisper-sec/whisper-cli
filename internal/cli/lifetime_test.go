@@ -267,7 +267,7 @@ func TestRun_ProxyLiveForChild(t *testing.T) {
 		t.Skip("python3 unavailable in the child env; core run.go lifetime covered by TestRun_ProxyLiveAfterControlCtxCancel")
 	}
 	if !strings.Contains(stdout, "LIVE") {
-		t.Fatalf("child could not stream through its injected ALL_PROXY - the proxy died with the control ctx (the control-ctx bug); child stdout=%q", stdout)
+		t.Fatalf("child could not stream through its injected ALL_PROXY - the proxy died with the control ctx (the ctx-cancellation bug); child stdout=%q", stdout)
 	}
 
 	// The owner (runWithEgress) must have Stop()'d the proxy after the child exited.
@@ -335,7 +335,7 @@ func TestRun_ProxyLiveAfterControlCtxCancel(t *testing.T) {
 
 	// The injected ALL_PROXY (the child would inherit) must still stream.
 	if err := dialThroughProxy(t, sess.endpoint, "example.com:80", "after-cancel-run"); err != nil {
-		t.Fatalf("the proxy a child would inherit is DEAD after the control ctx was cancelled (the control-ctx bug): %v", err)
+		t.Fatalf("the proxy a child would inherit is DEAD after the control ctx was cancelled (the ctx-cancellation bug): %v", err)
 	}
 	// And Stop() (the owner's job, after the child) ends it.
 	sess.Stop()
@@ -381,6 +381,6 @@ func TestGuidedHold_ProxySurvivesPastConnectAndVerify(t *testing.T) {
 		t.Fatalf("connectVia errored: %v", err)
 	}
 	if holdErr != nil {
-		t.Fatalf("the guided hold held a DEAD proxy - it did not survive past connectAndVerify (the control-ctx bug): %v", holdErr)
+		t.Fatalf("the guided hold held a DEAD proxy - it did not survive past connectAndVerify (the ctx-cancellation bug): %v", holdErr)
 	}
 }

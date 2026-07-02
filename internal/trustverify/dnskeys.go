@@ -41,8 +41,8 @@ import (
 //   - HTTPS-served key material DISAGREES with the DNS-anchored key for the same kid →
 //     FAIL with an explicit disagreement error (the WebPKI surface is lying).
 //   - RRset unavailable (NXDOMAIN / unsigned / resolver error) → the step falls back to the
-//     pre-behavior: cryptographically verified against the HTTPS-served keys, honestly
-//     labelled trust-on-pin. (A pre-server keeps verifying; a stripped answer degrades
+// pre- behavior: cryptographically verified against the HTTPS-served keys, honestly
+// labelled trust-on-pin. (A pre- server keeps verifying; a stripped answer degrades
 //     the LABEL, never fakes a proof.)
 
 // DefaultKeyAnchorZone is the DNSSEC-signed zone under which Whisper publishes its signing

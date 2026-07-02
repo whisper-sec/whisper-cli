@@ -287,7 +287,7 @@ func mcpInitializeResult(params json.RawMessage) map[string]any {
 // mcpHasKey reports whether the standard key ladder resolves a credential (WHISPER_API_KEY /
 // WHISPER_KEY env, --key, or the `whisper login` key file). It gates WHICH tools are listed:
 // the keyless verify/RDAP pair always; the control tools only when a key is present - the
-// two-tier surface we hold ourselves to (keyless value for everyone, the full product for
+// two-tier surface mandates (keyless value for everyone, the full product for
 // key-holders, auth optional).
 func mcpHasKey() bool {
 	c, err := resolveClient(false, false)

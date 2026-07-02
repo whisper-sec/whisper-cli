@@ -26,7 +26,7 @@ import (
 //	  ├─ 1 agent  → quick-confirm "Use <name>? [Y/n]" (Enter = yes) → connect → verify
 //	  └─ N agents → pick-or-create menu → connect → verify
 //
-// Until the real wireproxy connect lands, the flow STUBS connect: it prints the
+// Until lands the real wireproxy connect, the flow STUBS connect: it prints the
 // chosen agent + one calm "connecting is coming in the next release" line. We never fake
 // a connection (conservative in what we emit).
 //

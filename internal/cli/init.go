@@ -855,6 +855,6 @@ func printInitEnvToolSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.P
 		fmt.Fprintf(w, "\nnote: %s\n", n)
 	}
 
-	// Verify after: give the user a one-liner to confirm egress really works.
+	// Verify-after: give the user a one-liner to confirm egress really works.
 	fmt.Fprintf(w, "\nverify your egress:\n  whisper run curl -s https://api64.ipify.org\n  → should print %s\n", cfg.Agent)
 }

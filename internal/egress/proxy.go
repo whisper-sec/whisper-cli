@@ -17,7 +17,7 @@
 //
 // Why this shape (and NOT wireproxy / WireGuard): the upstream egress ALREADY
 // mints a working et_ bearer bound to the /128 and speaks the HTTPS-CONNECT proxy
-// form on :443 (proven live). So it needs no external binary and no WG peer
+// form on :443 (proven live). So needs no external binary and no WG peer
 // issuance - just this small goroutine-based listener. It is byte-identical across
 // Linux / macOS / Windows (pure net + crypto/tls, no cgo, no privilege, no TUN).
 //
@@ -54,7 +54,7 @@ import (
 // splice, lifetime) is parameterised over: the egress tier dials the HTTPS-CONNECT egress
 // (upstream below); the WireGuard tier (internal/wgtun) dials straight through the
 // userspace tunnel's netstack. Both reuse the SAME battle-tested front-end (half-close
-// Stop-drain, Background-rooted lifetime ) - DRY, so every fix lands once.
+// Stop-drain, Background-rooted lifetime) - DRY, so every fix lands once.
 //
 // target is always a NAME or IP literal as the local client gave it; a Dialer that egresses
 // remotely (the egress) forwards the NAME so the far side resolves it from the /128 (no
@@ -385,7 +385,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 	defer up.Close()
 
 	// Success. Reply with a CONCRETE bind addr 0.0.0.0:0 (ATYP=IPv4) - NOT the DOMAIN
-	// type, which makes some clients hang (gotcha #2). After this byte the
+	// type, which makes some clients hang (the gotcha #2). After this byte the
 	// stream is a raw splice; no SOCKS codec sits in the path.
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
