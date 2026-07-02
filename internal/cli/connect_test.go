@@ -5,6 +5,8 @@ package cli
 
 import (
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,9 +16,9 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
-// TestResolveAgentSelector covers the #110 op:connect agent-selection precedence:
+// TestResolveAgentSelector covers the op:connect agent-selection precedence:
 //
-//	--agent flag  >  ~/.config/whisper-ns/agent file  >  "" (server reuse-most-recent default)
+//	--agent flag > ~/.config/whisper-ns/agent file > "" (server reuse-most-recent default)
 //
 // Table-driven: each case sets up an (optional) agent file and a flag value, then asserts
 // the selector the CLI would send as the op:connect `agent` arg ("" ⇒ omit the arg entirely).
@@ -27,7 +29,7 @@ func TestResolveAgentSelector(t *testing.T) {
 		t.Fatal(err)
 	}
 	blankFile := filepath.Join(dir, "blank")
-	if err := os.WriteFile(blankFile, []byte("   \n"), 0o600); err != nil {
+	if err := os.WriteFile(blankFile, []byte(" \n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	absent := filepath.Join(dir, "absent")
@@ -39,10 +41,10 @@ func TestResolveAgentSelector(t *testing.T) {
 		want      string
 	}{
 		{"flag wins over file", "a-from-flag", withFile, "a-from-flag"},
-		{"flag is trimmed", "  a-from-flag  ", withFile, "a-from-flag"},
+		{"flag is trimmed", " a-from-flag ", withFile, "a-from-flag"},
 		{"flag wins when file absent", "a-from-flag", absent, "a-from-flag"},
 		{"file used when no flag", "", withFile, "a-from-file"},
-		{"blank flag falls through to file", "   ", withFile, "a-from-file"},
+		{"blank flag falls through to file", " ", withFile, "a-from-file"},
 		{"absent file + no flag => empty (most-recent default)", "", absent, ""},
 		{"blank file + no flag => empty", "", blankFile, ""},
 		{"address selector via flag passes through", "2a04:2a01:9::dead", absent, "2a04:2a01:9::dead"},
@@ -219,6 +221,131 @@ func TestParseConnectEnvelope_ExtractsUpstreamAndBearer(t *testing.T) {
 	}
 	if !ce.tlsToProxy {
 		t.Fatalf("the https:// proxy form must set tlsToProxy=true")
+	}
+}
+
+// connectNestedEnvelopeJSON is the EXACT op:connect wire shape verified against the live
+// control plane — see client.connectNestedEnvelopeJSON for the shared fixture text.
+// Duplicated here (package cli can't import a client _test.go const) with the same bytes.
+const connectNestedEnvelopeJSON = `{"columns":["op","ok","status","result","error","retry_after"],
+ "rows":[{"op":"connect","ok":true,"status":200,
+ "result":{"columns":["tier","http_proxy","connection_string","socks5_endpoint","address","fqdn","ptr","dns","tls","note","doh_url","dns_note"],
+ "rows":[["socks5","https://w:et_TEST@egress.whisper.online","socks5h://w:et_TEST@connect.whisper.online:443","connect.whisper.online:443","2a04:2a01:beef::1","scout.agents.whisper.online","1.0.0.0.f.e.e.b.ip6.arpa","2a04:2a01:0:53::1",true,"Prefer http_proxy where TLS-terminated egress is desired","https://doh.example/dns-query","note"]]},
+ "error":null,"retry_after":null}]}`
+
+// TestParseConnectEnvelope_NestedIssueEnvelope feeds the EXACT nested envelope
+// through the FULL decode path (client.DecodeEnvelope -> parseConnectEnvelope) and
+// asserts the CLI extracts a usable connection string + /128 — no "no egress".
+func TestParseConnectEnvelope_NestedIssueEnvelope(t *testing.T) {
+	env, err := client.DecodeEnvelope([]byte(connectNestedEnvelopeJSON), 200)
+	if err != nil {
+		t.Fatalf("DecodeEnvelope errored: %v", err)
+	}
+	if !env.Ok {
+		t.Fatalf("expected ok:true, got %+v", env)
+	}
+	ce, err := parseConnectEnvelope(env.Result)
+	if err != nil {
+		t.Fatalf("parseConnectEnvelope errored (this is the connect no-egress regression): %v", err)
+	}
+	if ce.address != "2a04:2a01:beef::1" {
+		t.Fatalf("address = %q, want the /128", ce.address)
+	}
+	if ce.bearer != "et_TEST" {
+		t.Fatalf("bearer = %q, want the fixture token", ce.bearer)
+	}
+	if ce.upstreamHostPort != "egress.whisper.online:443" {
+		t.Fatalf("upstreamHostPort = %q, want the http_proxy host with the :443 default applied", ce.upstreamHostPort)
+	}
+	if ce.tier != "socks5" {
+		t.Fatalf("tier = %q, want socks5", ce.tier)
+	}
+}
+
+// TestParseConnectEnvelope_EmptyResultRows_ClearMessage is the NEGATIVE case:
+// op:connect genuinely returns ok with NO egress row. The CLI must still fail with the
+// same clear, helpful message — never a decode crash.
+func TestParseConnectEnvelope_EmptyResultRows_ClearMessage(t *testing.T) {
+	body := []byte(`{"columns":["op","ok","status","result","error","retry_after"],
+ "rows":[{"op":"connect","ok":true,"status":200,"result":{"columns":["tier","address"],"rows":[]},"error":null,"retry_after":null}]}`)
+	env, err := client.DecodeEnvelope(body, 200)
+	if err != nil {
+		t.Fatalf("DecodeEnvelope errored: %v", err)
+	}
+	_, err = parseConnectEnvelope(env.Result)
+	if err == nil {
+		t.Fatal("expected a clear error for a genuinely empty egress result")
+	}
+	pe, ok := client.AsProblem(err)
+	if !ok || pe.Detail != "the control plane returned no egress" {
+		t.Fatalf("expected the clear 'no egress' problem, got: %v", err)
+	}
+}
+
+// TestParseConnectEnvelope_HttpProxyMissingPortDefaultsTo443 covers the live wire
+// shape where http_proxy carries a bare hostname (no port). This tier always multiplexes
+// TLS on :443 (the same port socks5_endpoint/connection_string carry), so the CLI must
+// default it rather than handing bringUpEgress an undialable host.
+func TestParseConnectEnvelope_HttpProxyMissingPortDefaultsTo443(t *testing.T) {
+	res := &client.Result{
+		Columns: []string{"tier", "address", "http_proxy", "socks5_endpoint", "connection_string"},
+		Rows: [][]any{{
+			"socks5", "2a04:2a01:4::7",
+			"https://w:et_abc@egress.whisper.online", // no port
+			"egress.whisper.online:443",
+			"socks5h://w:et_abc@egress.whisper.online:443",
+		}},
+	}
+	ce, err := parseConnectEnvelope(res)
+	if err != nil {
+		t.Fatalf("parseConnectEnvelope errored: %v", err)
+	}
+	if ce.upstreamHostPort != "egress.whisper.online:443" {
+		t.Fatalf("upstreamHostPort = %q, want the :443 default applied", ce.upstreamHostPort)
+	}
+	if ce.bearer != "et_abc" {
+		t.Fatalf("bearer = %q, want et_abc", ce.bearer)
+	}
+}
+
+// TestConnect_FullCommand_NestedEnvelope runs the WHOLE `whisper connect` command against
+// a control plane that replies with the EXACT nested envelope shape (object-keyed
+// outer YIELD row) and confirms it succeeds end-to-end — the historical symptom was
+// RunE returning "the control plane returned no egress" despite a valid egress row.
+func TestConnect_FullCommand_NestedEnvelope(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(200)
+		switch sniffOp(string(raw)) {
+		case "connect":
+			_, _ = w.Write([]byte(connectNestedEnvelopeJSON))
+		default: // op:list — an existing fleet so connect skips the create-first path
+			_, _ = w.Write([]byte(listJSON([]agentChoice{{name: "scout", addr: "2a04:2a01:beef::1"}})))
+		}
+	}))
+	defer srv.Close()
+	defer stubEgressTail(t)()
+
+	savedG := g
+	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
+	defer func() { g = savedG }()
+
+	af := filepath.Join(t.TempDir(), "agent")
+	cmd := newConnectCmd()
+	cmd.SilenceUsage, cmd.SilenceErrors = true, true
+	cmd.SetArgs([]string{"--agent-file", af})
+
+	stdout, stderr := captureStd(t, func() {
+		if err := cmd.Execute(); err != nil {
+			t.Fatalf("connect errored (the connect no-egress regression): %v", err)
+		}
+	})
+	if strings.Contains(stdout+stderr, "no egress") {
+		t.Fatalf("must NOT report 'no egress' when the control plane returned a valid one: stdout=%q stderr=%q", stdout, stderr)
+	}
+	if !strings.Contains(stderr, "2a04:2a01:beef::1") {
+		t.Fatalf("expected the verified /128 in the success line, stderr=%q", stderr)
 	}
 }
 

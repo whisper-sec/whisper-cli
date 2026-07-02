@@ -16,10 +16,10 @@ import (
 	"time"
 )
 
-// DefaultEchoURL is the Whisper-owned, KEYLESS source-IP echo (#172 WB3): a GET
+// DefaultEchoURL is the Whisper-owned, KEYLESS source-IP echo: a GET
 // returns the OBSERVED source IP of the request as {"ip":"<addr>"}. `whisper ip`
 // fetches it THROUGH the local egress proxy, so the IP it sees is the agent's /128.
-// This replaces any dependency on api*.ipify.org (CLAUDE.md: no chatty external dep
+// This replaces any dependency on api*.ipify.org (no chatty external dependency
 // on the hot path). Served on any gateway host; rdap is the natural public default.
 // Overridable with --echo-url for pre-prod.
 const DefaultEchoURL = "https://rdap.whisper.online/egress-ip"

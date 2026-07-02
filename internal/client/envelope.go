@@ -62,21 +62,83 @@ type rawEnvelope struct {
 	Status int           `json:"status"`
 	Result *Result       `json:"result"`
 	Error  *ProblemError `json:"error"`
-	// Rows is the ALTERNATIVE Neo4j-procedure-row wrapper the live /api/query returns:
-	//   { "rows": [ { "result": {"columns":[...],"rows":[...]} } ] }
-	// We accept BOTH so the client works against the live box AND the documented
-	// contract (Postel: liberal in what we accept).
-	Rows []struct {
-		Result *Result `json:"result"`
-	} `json:"rows"`
+	// Columns/Rows are the ALTERNATIVE Neo4j-procedure-row wrapper the live /api/query
+	// returns: a `whisper.agents({op:...})` CALL comes back as its own little table —
+	// outer columns `op, ok, status, result, error, retry_after`, one row per call:
+	//   { "columns":[...], "rows": [ {"op":"connect","ok":true,"result":{...},...} ] }
+	// That outer row can arrive EITHER as a column-keyed object (above) OR, just as
+	// validly for a tabular Cypher result, as a POSITIONAL array matched against
+	// Columns (`"rows":[["connect",true,200,{...},null,null]]`). We accept BOTH, and a
+	// column reorder in either form, so the client works against the live box AND the
+	// documented contract (Postel: liberal in what we accept — map by column NAME,
+	// never by a fixed index; see decodeOuterRow).
+	Columns []string          `json:"columns"`
+	Rows    []json.RawMessage `json:"rows"`
+}
+
+// outerRow is one decoded row of the outer whisper.agents YIELD table (op, ok, status,
+// result, error, retry_after), independent of whether it arrived on the wire as a
+// column-keyed object or a positional array.
+type outerRow struct {
+	Ok     *bool
+	Result *Result
+	Error  *ProblemError
+}
+
+// decodeOuterRow decodes one element of rawEnvelope.Rows into an outerRow. It tries the
+// column-keyed object form first (the common live shape); if the row is instead a
+// positional array, it zips the values against columns BY NAME — so a column reorder on
+// the wire never breaks extraction (Postel: liberal in what we accept). A malformed,
+// short, or empty row yields a zero outerRow rather than an error: the caller degrades to
+// a clear "no result" message, never an opaque decode failure.
+func decodeOuterRow(raw json.RawMessage, columns []string) outerRow {
+	fields := map[string]json.RawMessage{}
+	if json.Unmarshal(raw, &fields) != nil {
+		var arr []json.RawMessage
+		if json.Unmarshal(raw, &arr) == nil {
+			fields = make(map[string]json.RawMessage, len(columns))
+			for i, col := range columns {
+				if i < len(arr) {
+					fields[col] = arr[i]
+				}
+			}
+		}
+	}
+
+	var row outerRow
+	if v, ok := fields["ok"]; ok {
+		var b bool
+		if json.Unmarshal(v, &b) == nil {
+			row.Ok = &b
+		}
+	}
+	if v, ok := fields["result"]; ok && string(v) != "null" {
+		var r Result
+		if json.Unmarshal(v, &r) == nil {
+			row.Result = &r
+		}
+	}
+	if v, ok := fields["error"]; ok && string(v) != "null" {
+		var e ProblemError
+		if json.Unmarshal(v, &e) == nil {
+			row.Error = &e
+		}
+	}
+	return row
 }
 
 // DecodeEnvelope parses a control-plane reply body into a normalised Envelope. It is
 // LIBERAL in what it accepts:
 //
-//  1. The dev-guide shape: {ok,status,result,error}. ok:false -> Err is set.
-//  2. The live Neo4j wrapper: {rows:[{result:{columns,rows}}]} -> treated as ok:true
-//     with that inner result (the proxy only wraps it this way on success).
+//  1. The dev-guide shape: {ok,status,result,error}. ok:false -> Err is set. If the top
+//     level omits result (the payload lives in the outer YIELD row instead — see 2), it
+//     is recovered from there rather than treated as absent.
+//  2. The live outer whisper.agents YIELD-table wrapper: {columns:[op,ok,status,result,
+//     error,retry_after], rows:[...]} -> the first row is read for ok/result/error,
+//     whether that row arrived as a column-keyed object OR a positional array matched
+//     against columns BY NAME (never a fixed index, so a column reorder never breaks
+//     extraction — see decodeOuterRow). A row with ok:false is a real failure, surfaced
+//     as Err, never silently downgraded to an empty/absent result.
 //  3. A bare problem object {type,title,status,detail} with NO ok/result/rows -> Err.
 //
 // httpStatus is the transport status code; it seeds Status when the body omits it and
@@ -104,6 +166,16 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 		env.Ok = *re.Ok
 		env.Result = re.Result
 		env.Err = re.Error
+		if env.Result == nil && len(re.Rows) > 0 {
+			// The top level carries ok/status but the actual payload lives in the outer
+			// whisper.agents YIELD row (the live tabular shape) — recover it by name
+			// rather than concluding there is no result.
+			row := decodeOuterRow(re.Rows[0], re.Columns)
+			env.Result = row.Result
+			if env.Err == nil {
+				env.Err = row.Error
+			}
+		}
 		if !env.Ok && env.Err == nil {
 			// ok:false with no error object — synthesise a helpful one from the status.
 			env.Err = &ProblemError{Status: env.Status, Detail: "control plane reported failure"}
@@ -128,16 +200,39 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 		return env, nil
 	}
 
-	// Shape 2: the Neo4j row wrapper (or a top-level result with no ok flag) -> success.
-	env.Ok = true
+	// Shape 2: the Neo4j row wrapper (or a top-level result with no ok flag) -> success,
+	// UNLESS the row itself carries an explicit ok:false — a real op failure the caller
+	// must see, never masked as an empty/absent result ("no egress" for a call that
+	// actually failed for a legible reason).
 	switch {
 	case re.Result != nil:
+		env.Ok = true
 		env.Result = re.Result
-	case len(re.Rows) > 0 && re.Rows[0].Result != nil:
-		env.Result = re.Rows[0].Result
+	case len(re.Rows) > 0:
+		row := decodeOuterRow(re.Rows[0], re.Columns)
+		if row.Ok != nil && !*row.Ok {
+			env.Ok = false
+			env.Err = row.Error
+			if env.Err == nil {
+				env.Err = &ProblemError{Status: env.Status, Detail: "control plane reported failure"}
+			}
+			if env.Err.Status == 0 {
+				env.Err.Status = env.Status
+			}
+			return env, nil
+		}
+		env.Ok = true
+		if row.Result != nil {
+			env.Result = row.Result
+		} else {
+			// ok (or no explicit verdict) but genuinely no result row: a clear empty
+			// result, never a decode failure — the caller renders its own clear message.
+			env.Result = &Result{}
+		}
 	default:
 		// An empty, shapeless-but-valid JSON object: treat as a successful empty result
 		// (read ops fail OPEN to an empty set, per the contract) rather than erroring.
+		env.Ok = true
 		env.Result = &Result{}
 	}
 	return env, nil
