@@ -39,8 +39,8 @@ func isWireGuardTier(tier string) bool {
 // registers us as a peer without ever seeing the private key), and returns the keypair to
 // thread into connectAndVerify. For any other tier it is a no-op (nil keypair, args untouched).
 //
-// This is the best-practice WG flow: the private key never leaves the host (the project guidelines key
-// hygiene / ), and the agent's reverse-DNS identity is bound to a key only we hold. It is
+// This is the best-practice WG flow: the private key never leaves the host (a key-hygiene
+// requirement), and the agent's reverse-DNS identity is bound to a key only we hold. It is
 // a package var so a command test can stub it to a deterministic keypair without real crypto.
 var prepareWireGuard = func(tier string, args map[string]any) (*wgtun.Keypair, error) {
 	if !isWireGuardTier(tier) {
@@ -168,6 +168,14 @@ func parseConnectEnvelope(res *client.Result) (connectEnvelope, error) {
 	// port multiplexes TLS, the proven live transport).
 	httpProxy := field(rec, "http_proxy")
 	host, bearer, isTLS := extractUpstream(httpProxy)
+	if host != "" && !strings.Contains(host, ":") {
+		// http_proxy carried a bare hostname with no explicit port (seen on the live
+		// control plane). This tier always multiplexes TLS on :443 - the same port
+		// socks5_endpoint/connection_string already carry - so default it rather than
+		// handing bringUpEgress an undialable "host" with no port (Postel: liberal in
+		// what we accept, never a silent half-connect).
+		host += ":443"
+	}
 	if host == "" {
 		// http_proxy absent/odd: derive the host from socks5_endpoint (the bare host:port)
 		// and the bearer from connection_string (socks5h://w:<token>@<host>).
@@ -373,8 +381,8 @@ func connectAndVerifyOnPort(ctx context.Context, c *client.Client, res *client.R
 // writeSuccessLine emits the ONE calm, Scandinavian success line on err, and the
 // bearer-free endpoint on out only when quiet (so a script captures exactly one value).
 //
-//	default: stderr → "Connected as <name> - <addr>  ✓ verified"
-//	--quiet: stdout → "socks5h://127.0.0.1:<port>"  (nothing else, anywhere)
+//	default: stderr → "Connected as <name> - <addr> ✓ verified"
+//	--quiet: stdout → "socks5h://127.0.0.1:<port>" (nothing else, anywhere)
 func writeSuccessLine(out, errw io.Writer, s *egressSession, quiet bool) {
 	if quiet {
 		fmt.Fprintln(out, s.endpoint)
@@ -386,10 +394,10 @@ func writeSuccessLine(out, errw io.Writer, s *egressSession, quiet bool) {
 	}
 	switch {
 	case label != "" && s.addr != "":
-		fmt.Fprintf(errw, "Connected as %s - %s  ✓ verified\n", label, s.addr)
+		fmt.Fprintf(errw, "Connected as %s - %s ✓ verified\n", label, s.addr)
 	case s.addr != "":
-		fmt.Fprintf(errw, "Connected - %s  ✓ verified\n", s.addr)
+		fmt.Fprintf(errw, "Connected - %s ✓ verified\n", s.addr)
 	default:
-		fmt.Fprintln(errw, "Connected  ✓ verified")
+		fmt.Fprintln(errw, "Connected ✓ verified")
 	}
 }
