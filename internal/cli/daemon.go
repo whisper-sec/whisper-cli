@@ -13,6 +13,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/whisper-sec/whisper-cli/internal/idkey"
 	"github.com/whisper-sec/whisper-cli/internal/projcfg"
 	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
@@ -81,15 +82,22 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config) error {
 	if tier != "" {
 		args["tier"] = tier
 	}
-	// --tier wireguard: mint a local WG keypair; only the public half goes to the server. No-op
-	// for socks5. (Same best-practice flow as every other connect surface.)
+	// --tier wireguard: mint a local WG keypair (+ the identity keypair); only the public
+	// halves go to the server. No-op for socks5. (Same best-practice flow as every other
+	// connect surface.)
 	var wgKey *wgtun.Keypair
+	var idKey *idkey.Keypair
 	if isWireGuardTier(tier) {
 		wgKey, err = prepareWireGuard(tier, args)
 		if err != nil {
 			return err
 		}
+		idKey, err = prepareIdentityKey(tier, args, strings.TrimSpace(cfg.Agent))
+		if err != nil {
+			return err
+		}
 	}
+	keys := &connectKeys{wg: wgKey, identity: idKey}
 
 	cx, cancel := ctx()
 	env, err := c.Agents(cx, "connect", args)
@@ -103,7 +111,7 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config) error {
 	}
 	// Bring the tunnel up on the PINNED port (the deterministic per-project port from config),
 	// fold verify in. NOT via the connectAndVerify stub seam - the daemon binds a REAL port.
-	sess, cerr := connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), wgKey, cfg.Port)
+	sess, cerr := connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, cfg.Port)
 	cancel()
 	if cerr != nil {
 		return cerr

@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
-	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
 // ip_test.go covers `whisper ip`: a verified /128 → green line + exit 0; a mismatch /
@@ -25,7 +24,7 @@ import (
 func ipStub(t *testing.T, observedIP string) func() {
 	t.Helper()
 	saved := connectAndVerify
-	connectAndVerify = func(_ context.Context, _ *client.Client, res *client.Result, name string, _ *wgtun.Keypair) (*egressSession, error) {
+	connectAndVerify = func(_ context.Context, _ *client.Client, res *client.Result, name string, _ *connectKeys) (*egressSession, error) {
 		ce, err := parseConnectEnvelope(res)
 		if err != nil {
 			return nil, err

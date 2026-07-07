@@ -75,10 +75,14 @@ type TLSAPin struct {
 // Hex returns the lowercase-hex form of the pin.
 func (p TLSAPin) Hex() string { return hex.EncodeToString(p.SHA256) }
 
-// ExtractDANEEEPin picks the DANE-EE 3 1 1 association from a validated TLSA RRset. It is
-// conservative: only a full DANE-EE (usage 3), SPKI-selector (1), SHA-256 (1) pin is
-// accepted -- the strong, CA-independent profile Whisper publishes.
-func ExtractDANEEEPin(rrs []dns.RR) (TLSAPin, error) {
+// ExtractDANEEEPin picks EVERY DANE-EE 3 1 1 association from a validated TLSA RRset (a
+// make-before-break rotation publishes the OLD and NEW pins side by side, so a single-pin picker
+// makes verification a coin flip on RRset ordering). It is otherwise conservative: only a full
+// DANE-EE (usage 3), SPKI-selector (1), SHA-256 (1) pin is accepted -- the strong, CA-independent
+// profile Whisper publishes. Order is preserved from the RRset (callers must not assume any is
+// "the current" one -- CheckDANEEE accepts a match against ANY of them).
+func ExtractDANEEEPin(rrs []dns.RR) ([]TLSAPin, error) {
+	var pins []TLSAPin
 	for _, rr := range rrs {
 		t, ok := rr.(*dns.TLSA)
 		if !ok {
@@ -87,22 +91,34 @@ func ExtractDANEEEPin(rrs []dns.RR) (TLSAPin, error) {
 		if t.Usage == 3 && t.Selector == 1 && t.MatchingType == 1 {
 			b, err := hex.DecodeString(t.Certificate)
 			if err != nil || len(b) != sha256.Size {
-				return TLSAPin{}, fmt.Errorf("dane: TLSA 3 1 1 association is not a 32-byte SHA-256")
+				return nil, fmt.Errorf("dane: TLSA 3 1 1 association is not a 32-byte SHA-256")
 			}
-			return TLSAPin{SHA256: b}, nil
+			pins = append(pins, TLSAPin{SHA256: b})
 		}
 	}
-	return TLSAPin{}, fmt.Errorf("dane: no DANE-EE (3 1 1) TLSA record published")
+	if len(pins) == 0 {
+		return nil, fmt.Errorf("dane: no DANE-EE (3 1 1) TLSA record published")
+	}
+	return pins, nil
 }
 
-// CheckDANEEE asserts the served leaf satisfies the DNSSEC-validated pin AND that its SANs
-// bind the identity: SPKI-SHA256 == pin (RFC 6698), a DNS-SAN == fqdn, and an IP-SAN == the
-// /128 (RFC 7671 -- the cert is bound to the exact address it is served from).
-func CheckDANEEE(cert *x509.Certificate, pin TLSAPin, addr netip.Addr, fqdn string) error {
+// CheckDANEEE asserts the served leaf satisfies AT LEAST ONE of the DNSSEC-validated pins (
+// -- RFC 7671 §8 make-before-break: during a rotation overlap both the old and new pins are
+// published, and the served leaf legitimately matches only one of them) AND that its SANs bind the
+// identity: a DNS-SAN == fqdn, and an IP-SAN == the /128 (RFC 7671 -- the cert is bound to the exact
+// address it is served from). The SAN checks are independent of WHICH pin matched.
+func CheckDANEEE(cert *x509.Certificate, pins []TLSAPin, addr netip.Addr, fqdn string) error {
 	got := SPKISHA256(cert)
-	if len(pin.SHA256) != sha256.Size || !constEq(got[:], pin.SHA256) {
-		return fmt.Errorf("dane: served SPKI-SHA256 %s does NOT match the DNSSEC TLSA pin %s",
-			hex.EncodeToString(got[:]), pin.Hex())
+	matched := false
+	for _, pin := range pins {
+		if len(pin.SHA256) == sha256.Size && constEq(got[:], pin.SHA256) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return fmt.Errorf("dane: served SPKI-SHA256 %s does NOT match any DNSSEC TLSA pin (%s)",
+			hex.EncodeToString(got[:]), joinPinsHex(pins))
 	}
 	if !certHasDNSName(cert, fqdn) {
 		return fmt.Errorf("dane: served cert has no DNS-SAN for %s (SANs: %v)", trimDot(fqdn), cert.DNSNames)
@@ -111,6 +127,15 @@ func CheckDANEEE(cert *x509.Certificate, pin TLSAPin, addr netip.Addr, fqdn stri
 		return fmt.Errorf("dane: served cert has no IP-SAN for %s (IP-SANs: %v)", addr, cert.IPAddresses)
 	}
 	return nil
+}
+
+// joinPinsHex renders every pin's hex digest, comma-separated, for a diagnostic error message.
+func joinPinsHex(pins []TLSAPin) string {
+	hexes := make([]string, len(pins))
+	for i, p := range pins {
+		hexes[i] = p.Hex()
+	}
+	return strings.Join(hexes, ",")
 }
 
 func certHasDNSName(cert *x509.Certificate, fqdn string) bool {

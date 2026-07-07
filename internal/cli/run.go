@@ -163,6 +163,12 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 		if werr != nil {
 			return werr
 		}
+		// alongside it, the agent-held identity keypair (routed tier only).
+		idKey, ierr := prepareIdentityKey(selTier, args, sel)
+		if ierr != nil {
+			return ierr
+		}
+		keys := &connectKeys{wg: wgKey, identity: idKey}
 		// cx is the SHORT control-plane ctx: it bounds op:connect and the one-shot verify HTTP
 		// GET, and is cancelled the moment they return. It does NOT bound the local proxy - the
 		// proxy keeps its own Background-rooted lifetime (see egress.StartLocalProxy) and only
@@ -177,7 +183,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 			cancel()
 			return perr
 		}
-		sess, err = connectAndVerify(cx, c, env.Result, "", wgKey)
+		sess, err = connectAndVerify(cx, c, env.Result, "", keys)
 		cancel() // ends ONLY the control ctx; the proxy stays up (its lifetime is Stop(), below)
 		if err != nil {
 			return err
