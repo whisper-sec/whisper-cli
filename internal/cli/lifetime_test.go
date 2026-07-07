@@ -24,7 +24,6 @@ import (
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/egress"
-	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
 // lifetime_test.go is the PROXY-LIFETIME regression suite for the CLI callers.
@@ -213,7 +212,7 @@ func stubLiveProxyTail(t *testing.T, egressAddr, verifiedAddr string) (sessions 
 	var mu sync.Mutex
 	var got []*egressSession
 	saved := connectAndVerify
-	connectAndVerify = func(ctx context.Context, _ *client.Client, _ *client.Result, name string, _ *wgtun.Keypair) (*egressSession, error) {
+	connectAndVerify = func(ctx context.Context, _ *client.Client, _ *client.Result, name string, _ *connectKeys) (*egressSession, error) {
 		// Use the SAME control ctx the caller passes (this is what production does) so the
 		// test faithfully exercises the proxy's lifetime vs that ctx.
 		p, err := egress.StartLocalProxy(ctx, egressAddr, "et_lifetime_secret", egress.Options{Insecure: true, DialTimeout: 5 * time.Second})

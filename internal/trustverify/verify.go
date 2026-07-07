@@ -103,25 +103,26 @@ func Verify(ctx context.Context, target string, opts Options) (*Report, error) {
 	v := NewValidator(opts.Resolver, opts.RootAnchors, opts.Now)
 	rep := &Report{Target: target}
 
-	// --- Step 1: DNSSEC -- establish + cross-check (addr, fqdn) and the TLSA pin ---------
-	addr, fqdn, pin, dnssecCheck := resolveAndValidate(ctx, v, target)
+	// --- Step 1: DNSSEC -- establish + cross-check (addr, fqdn) and the TLSA pin(s) -------
+	// pins carries EVERY published 3 1 1 association (a rotation overlap publishes two).
+	addr, fqdn, pins, dnssecCheck := resolveAndValidate(ctx, v, target)
 	rep.Checks = append(rep.Checks, dnssecCheck)
 	if dnssecCheck.Status == StatusPass {
 		rep.Address = addr.String()
 		rep.FQDN = trimDot(fqdn)
-		rep.TLSAPin = pin.Hex()
+		rep.TLSAPin = joinPinsHex(pins)
 		rep.Agent, rep.Tenant = agentTenantFromFQDN(fqdn)
 	}
 
-	// Without the DNSSEC-proven (addr, fqdn, pin) there is nothing to anchor the rest to.
+	// Without the DNSSEC-proven (addr, fqdn, pins) there is nothing to anchor the rest to.
 	if dnssecCheck.Status != StatusPass {
 		rep.Verdict = false
 		rep.TrustAnchor = "unproven -- the DNSSEC chain did not validate; Whisper API NOT trusted"
 		return rep, nil
 	}
 
-	// --- Step 2: DANE-EE -- the served cert must satisfy the DNSSEC pin -------------------
-	daneCheck := runDANE(ctx, opts, addr, fqdn, pin, rep)
+	// --- Step 2: DANE-EE -- the served cert must satisfy ANY published DNSSEC pin ---------
+	daneCheck := runDANE(ctx, opts, addr, fqdn, pins, rep)
 	rep.Checks = append(rep.Checks, daneCheck)
 
 	// --- recover the DNSSEC-anchored signing keys (_whisper-identity/_whisper-ledger
@@ -157,7 +158,7 @@ func Verify(ctx context.Context, target string, opts Options) (*Report, error) {
 	// --- Step 4: identity_doc JWS (DNSSEC-bound claims) -----------------------------------
 	if !opts.SkipIdentityDoc {
 		hostport := netip.AddrPortFrom(addr, uint16(opts.Port)).String()
-		id := verifyIdentityDoc(ctx, opts.Fetcher, hostport, fqdn, addr.String(), pin.Hex(), pin,
+		id := verifyIdentityDoc(ctx, opts.Fetcher, hostport, fqdn, addr.String(), pins,
 			opts.JWKSURLs, opts.PinIdentityKID, dnsKeys)
 		if id.status == StatusPass && id.tenant != "" {
 			rep.Tenant = id.tenant
@@ -193,7 +194,7 @@ func Verify(ctx context.Context, target string, opts Options) (*Report, error) {
 // resolveAndValidate DNSSEC-validates AAAA(fqdn), PTR(addr) and TLSA(_443._tcp.fqdn),
 // cross-checks address<->name consistency, and returns the proven (addr, fqdn, pin) plus a
 // single combined DNSSEC Check. All three legs chain to the IANA root anchor.
-func resolveAndValidate(ctx context.Context, v *Validator, target string) (netip.Addr, string, TLSAPin, Check) {
+func resolveAndValidate(ctx context.Context, v *Validator, target string) (netip.Addr, string, []TLSAPin, Check) {
 	check := Check{Name: "dnssec", TrustLevel: TrustDNSSECRoot,
 		Anchor: "IANA DNSSEC root -> TLD -> whisper.online -> agents.whisper.online (+ ip6.arpa reverse)"}
 
@@ -205,23 +206,23 @@ func resolveAndValidate(ctx context.Context, v *Validator, target string) (netip
 		// Address given -> PTR to find the name (DNSSEC-validated).
 		rev, rerr := dns.ReverseAddr(addr.String())
 		if rerr != nil {
-			return addr, "", TLSAPin{}, fail(check, "cannot form reverse name for "+addr.String()+": "+rerr.Error())
+			return addr, "", nil, fail(check, "cannot form reverse name for "+addr.String()+": "+rerr.Error())
 		}
 		ptrRRs, err := v.ValidateRRSet(ctx, rev, dns.TypePTR)
 		if err != nil {
-			return addr, "", TLSAPin{}, fail(check, "PTR: "+err.Error())
+			return addr, "", nil, fail(check, "PTR: "+err.Error())
 		}
 		fqdn = ptrTarget(ptrRRs)
 		if fqdn == "" {
-			return addr, "", TLSAPin{}, fail(check, "PTR had no target name")
+			return addr, "", nil, fail(check, "PTR had no target name")
 		}
 		// Forward-confirm: AAAA(fqdn) must include addr.
 		aaaaRRs, err := v.ValidateRRSet(ctx, fqdn, dns.TypeAAAA)
 		if err != nil {
-			return addr, fqdn, TLSAPin{}, fail(check, "AAAA: "+err.Error())
+			return addr, fqdn, nil, fail(check, "AAAA: "+err.Error())
 		}
 		if !containsAddr(aaaaAddrs(aaaaRRs), addr) {
-			return addr, fqdn, TLSAPin{}, fail(check,
+			return addr, fqdn, nil, fail(check,
 				fmt.Sprintf("forward-confirm failed: AAAA(%s) does not contain %s", trimDot(fqdn), addr))
 		}
 	} else {
@@ -229,23 +230,23 @@ func resolveAndValidate(ctx context.Context, v *Validator, target string) (netip
 		fqdn = dns.Fqdn(target)
 		aaaaRRs, err := v.ValidateRRSet(ctx, fqdn, dns.TypeAAAA)
 		if err != nil {
-			return addr, fqdn, TLSAPin{}, fail(check, "AAAA: "+err.Error())
+			return addr, fqdn, nil, fail(check, "AAAA: "+err.Error())
 		}
 		addrs := aaaaAddrs(aaaaRRs)
 		if len(addrs) == 0 {
-			return addr, fqdn, TLSAPin{}, fail(check, "AAAA had no address")
+			return addr, fqdn, nil, fail(check, "AAAA had no address")
 		}
 		addr = addrs[0].Unmap()
 		rev, rerr := dns.ReverseAddr(addr.String())
 		if rerr != nil {
-			return addr, fqdn, TLSAPin{}, fail(check, "cannot form reverse name: "+rerr.Error())
+			return addr, fqdn, nil, fail(check, "cannot form reverse name: "+rerr.Error())
 		}
 		ptrRRs, err := v.ValidateRRSet(ctx, rev, dns.TypePTR)
 		if err != nil {
-			return addr, fqdn, TLSAPin{}, fail(check, "PTR: "+err.Error())
+			return addr, fqdn, nil, fail(check, "PTR: "+err.Error())
 		}
 		if !strings.EqualFold(trimDot(ptrTarget(ptrRRs)), trimDot(fqdn)) {
-			return addr, fqdn, TLSAPin{}, fail(check,
+			return addr, fqdn, nil, fail(check,
 				fmt.Sprintf("PTR(%s)=%q does not match %q", addr, trimDot(ptrTarget(ptrRRs)), trimDot(fqdn)))
 		}
 	}
@@ -254,21 +255,23 @@ func resolveAndValidate(ctx context.Context, v *Validator, target string) (netip
 	tlsaName := "_443._tcp." + dns.Fqdn(fqdn)
 	tlsaRRs, err := v.ValidateRRSet(ctx, tlsaName, dns.TypeTLSA)
 	if err != nil {
-		return addr, fqdn, TLSAPin{}, fail(check, "TLSA: "+err.Error())
+		return addr, fqdn, nil, fail(check, "TLSA: "+err.Error())
 	}
-	pin, err := ExtractDANEEEPin(tlsaRRs)
+	pins, err := ExtractDANEEEPin(tlsaRRs)
 	if err != nil {
-		return addr, fqdn, TLSAPin{}, fail(check, err.Error())
+		return addr, fqdn, nil, fail(check, err.Error())
 	}
 
 	check.Status = StatusPass
 	check.Detail = fmt.Sprintf("AAAA, PTR and TLSA(3 1 1) all DNSSEC-validated to the IANA root; %s <-> %s consistent",
 		addr, trimDot(fqdn))
-	return addr, fqdn, pin, check
+	return addr, fqdn, pins, check
 }
 
 // runDANE performs the DANE-EE handshake + pin/SAN check and records the served SPKI.
-func runDANE(ctx context.Context, opts Options, addr netip.Addr, fqdn string, pin TLSAPin, rep *Report) Check {
+// pins carries EVERY published 3 1 1 association (a make-before-break rotation publishes two); the
+// served leaf need only match ANY of them.
+func runDANE(ctx context.Context, opts Options, addr netip.Addr, fqdn string, pins []TLSAPin, rep *Report) Check {
 	check := Check{Name: "dane", TrustLevel: TrustDNSSECRoot,
 		Anchor: "DNSSEC-validated TLSA 3 1 1 pin (no public CA) -- RFC 6698/7671"}
 	hostport := netip.AddrPortFrom(addr, uint16(opts.Port)).String()
@@ -278,12 +281,12 @@ func runDANE(ctx context.Context, opts Options, addr netip.Addr, fqdn string, pi
 	}
 	spki := SPKISHA256(cert)
 	rep.ServedSPKI = TLSAPin{SHA256: spki[:]}.Hex()
-	if err := CheckDANEEE(cert, pin, addr, fqdn); err != nil {
+	if err := CheckDANEEE(cert, pins, addr, fqdn); err != nil {
 		return fail(check, err.Error())
 	}
 	check.Status = StatusPass
-	check.Detail = fmt.Sprintf("served leaf SPKI-SHA256 == TLSA pin; DNS-SAN=%s, IP-SAN=%s; issuer %q",
-		trimDot(fqdn), addr, cert.Issuer.CommonName)
+	check.Detail = fmt.Sprintf("served leaf SPKI-SHA256 == a published TLSA pin (%d published); DNS-SAN=%s, IP-SAN=%s; issuer %q",
+		len(pins), trimDot(fqdn), addr, cert.Issuer.CommonName)
 	return check
 }
 

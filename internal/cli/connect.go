@@ -137,6 +137,15 @@ func newConnectCmd() *cobra.Command {
 			if werr != nil {
 				return werr
 			}
+			// alongside the WG keypair, load-or-mint the agent-held IDENTITY keypair (routed
+			// tier only) and inject its public SPKI as identity_public_key — the server pins THIS
+			// key, verbatim, and never derives one for this /128. `sel` (already resolved above) is
+			// the persistence handle so a reconnect for the SAME agent reuses the SAME key.
+			idKey, ierr := prepareIdentityKey(tier, args, sel)
+			if ierr != nil {
+				return ierr
+			}
+			keys := &connectKeys{wg: wgKey, identity: idKey}
 
 			// cx is the SHORT control ctx — it bounds op:connect + the one-shot verify and
 			// is cancelled on return. It is NOT the proxy's lifetime: the proxy is
@@ -168,9 +177,9 @@ func newConnectCmd() *cobra.Command {
 			var sess *egressSession
 			var cerr error
 			if port > 0 {
-				sess, cerr = connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), wgKey, port)
+				sess, cerr = connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, port)
 			} else {
-				sess, cerr = connectAndVerify(cx, c, env.Result, displayName(env.Result), wgKey)
+				sess, cerr = connectAndVerify(cx, c, env.Result, displayName(env.Result), keys)
 			}
 			if cerr != nil {
 				return cerr

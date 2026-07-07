@@ -7,11 +7,13 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"net/netip"
 	"os"
 	"strings"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/egress"
+	"github.com/whisper-sec/whisper-cli/internal/idkey"
 	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
@@ -56,6 +58,41 @@ var prepareWireGuard = func(tier string, args map[string]any) (*wgtun.Keypair, e
 	// Normalise the tier the server sees to the canonical token (so "wg" still selects WG).
 	args["tier"] = "wireguard"
 	return &kp, nil
+}
+
+// prepareIdentityKey is the command-layer pre-step, run ALONGSIDE prepareWireGuard: for the
+// routed (WireGuard) tier ONLY, it loads-or-mints a LOCAL EC P-256 identity keypair and injects ONLY
+// its public SPKI into the op:connect args as identity_public_key — so the server pins the agent's
+// OWN key, verbatim; the server pins SHA-256 of exactly this SPKI and never derives or serves a
+// Whisper-minted key for a held /128. Default-ON for the
+// routed tier: this is the tier the trust-boundary claim ("we can never speak as your agent") is
+// about. For any other tier it is a no-op (nil keypair, args untouched) — a hosted identity's
+// credential stays Whisper-derived (the server rejects the arg there anyway).
+//
+// handle is the persistence key (an already-resolved agent id/address, or "" for a connect-first
+// flow — see idkey.PathFor) so a RECONNECT for the same agent reuses the SAME key rather than
+// rotating on every call (the server's idempotent re-pin then costs zero zone writes). It is a
+// package var so a command test can stub it to a deterministic keypair without real crypto.
+var prepareIdentityKey = func(tier string, args map[string]any, handle string) (*idkey.Keypair, error) {
+	if !isWireGuardTier(tier) {
+		return nil, nil
+	}
+	kp, err := idkey.LoadOrGenerate(handle)
+	if err != nil {
+		return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key — please try again"}
+	}
+	// The server hashes EXACTLY this base64 DER, verbatim — never a private key, never re-encoded.
+	args["identity_public_key"] = kp.MarshalSPKIBase64()
+	return kp, nil
+}
+
+// connectKeys bundles the (at most two) LOCAL keypairs a routed connect may carry: the WireGuard
+// tunnel key and, by default for that same tier, the agent-held identity key. Both private
+// halves live ONLY in this process; only their public halves are ever sent to op:connect. Either
+// field may be nil (a non-WireGuard tier carries neither).
+type connectKeys struct {
+	wg       *wgtun.Keypair
+	identity *idkey.Keypair
 }
 
 // localEndpoint is the shared surface BOTH egress tiers expose: the bearer/key-free local
@@ -229,15 +266,15 @@ func extractUpstream(proxyURL string) (host, bearer string, isTLS bool) {
 // bringUpEgress starts the local proxy/tunnel for the parsed envelope and returns a
 // live session (endpoint + local holder) — WITHOUT verifying yet. The caller folds verify
 // in via verifyEgress. For the egress tier the bearer is handed to StartLocalProxy and never
-// kept; for the WireGuard tier wgKey carries OUR private key (in-memory only) — handed to the
-// userspace device and never surfaced. wgKey is nil for the egress tiers.
+// kept; for the WireGuard tier keys carries OUR private keys (in-memory only) — handed to the
+// userspace device and never surfaced. keys is nil for the egress tiers.
 //
 // port pins the LOCAL loopback port (0 ⇒ a free one). Every interactive caller passes 0
 // (zero-config); `whisper init`/`connect --ensure` pass the project's DETERMINISTIC port so
 // the daemon always binds the same 127.0.0.1:<port> Claude Code's settings point at.
-func bringUpEgress(ctx context.Context, ce connectEnvelope, wgKey *wgtun.Keypair, port int) (*egressSession, error) {
+func bringUpEgress(ctx context.Context, ce connectEnvelope, keys *connectKeys, port int) (*egressSession, error) {
 	if ce.isWireGuard() {
-		return bringUpWireGuard(ce, wgKey, port)
+		return bringUpWireGuard(ce, keys, port)
 	}
 	proxy, err := egress.StartLocalProxy(ctx, ce.upstreamHostPort, ce.bearer, egress.Options{Port: port})
 	if err != nil {
@@ -263,12 +300,28 @@ func cleanProxyError(err error) string {
 	return "couldn't start the local connection — please try again"
 }
 
+// identityTLSPort is the standard HTTPS port the in-tunnel identity listener binds to on the
+// agent's OWN /128 — the same port `whisper verify --trustless` / `openssl s_client` dial.
+const identityTLSPort = 443
+
 // bringUpWireGuard brings up the userspace WireGuard tunnel (Tier-1) and returns a live
 // session whose local SOCKS5/HTTP endpoint egresses from the agent's /128 over the tunnel. The
-// private key is OURS (wgKey, generated locally) on the best-practice path; only if the server
+// private key is OURS (keys.wg, generated locally) on the best-practice path; only if the server
 // minted one (zero-key path) do we fall back to its returned base64 client_private_key. The
 // key is handed ONLY to the device and never surfaced/logged/persisted.
-func bringUpWireGuard(ce connectEnvelope, wgKey *wgtun.Keypair, port int) (*egressSession, error) {
+//
+// when keys.identity is set (the default for this tier), it ALSO builds the self-signed
+// agent-held leaf (SANs = the /128 that was just assigned + the canonical/friendly FQDN the server
+// just returned — the pin submitted BEFORE connect still matches, since SANs never touch the SPKI)
+// and starts a TLS listener INSIDE the tunnel's own netstack on :443, so a DANE-EE verifier dialing
+// the agent's /128 is served THIS leaf — proving the tunnel itself, not a shared/wildcard listener, answers.
+// Best-effort: a listener/leaf fault only logs (never a quiet-mode print) and never fails the connect
+// — the egress data path is unaffected either way.
+func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressSession, error) {
+	var wgKey *wgtun.Keypair
+	if keys != nil {
+		wgKey = keys.wg
+	}
 	privHex := ""
 	if wgKey != nil {
 		privHex = wgKey.PrivateKeyHex
@@ -294,6 +347,22 @@ func bringUpWireGuard(ce connectEnvelope, wgKey *wgtun.Keypair, port int) (*egre
 	tun, err := wgtun.Start(cfg, wgtun.Options{Logf: logf, Port: port})
 	if err != nil {
 		return nil, &client.ProblemError{Status: 502, Detail: cleanWgError(err)}
+	}
+	// serve the agent-held identity leaf on the tunnel's own /128:443, now that the server has
+	// returned the assigned address + canonical/friendly FQDN. Best-effort — never fails bring-up.
+	if keys != nil && keys.identity != nil {
+		if addr, aerr := netip.ParseAddr(strings.TrimSpace(ce.address)); aerr == nil {
+			// op:connect{tier:wireguard} returns only the canonical fqdn (no separate friendly-CNAME
+			// column) — the leaf carries just that one dNSName SAN + the /128 iPAddress SAN.
+			leaf, lerr := keys.identity.SelfSignedLeaf(ce.fqdn, "", addr)
+			if lerr == nil {
+				if serr := tun.ServeTLS(leaf, identityTLSPort); serr != nil && logf != nil {
+					logf("identity TLS listener not started (%v) — egress is unaffected", serr)
+				}
+			} else if logf != nil {
+				logf("identity leaf not minted (%v) — egress is unaffected", lerr)
+			}
+		}
 	}
 	return &egressSession{
 		endpoint: tun.Endpoint(),
@@ -347,18 +416,18 @@ func verifyEgressLive(ctx context.Context, c *client.Client, s *egressSession) e
 // result passed in) → local proxy/tunnel up → fold verify → a verified session. The caller
 // owns Stop() (a persistent connect keeps it; a one-shot `whisper ip` stops on return).
 //
-// wgKey carries OUR locally-generated WireGuard keypair when the caller requested
-// --tier wireguard (so bring-up has our private key; the server only ever saw the public
-// half). It is nil for the socks5/anyip tiers. The private key never leaves this process.
+// keys carries OUR locally-generated keypairs (WireGuard + identity) when the caller
+// requested --tier wireguard (so bring-up has our private keys; the server only ever saw the
+// public halves). It is nil for the socks5/anyip tiers. The private keys never leave this process.
 //
 // It is a package var (not a plain func) so command tests can stub the live-egress tail
 // — the proxy bring-up + the network echo — while still exercising the op routing and
 // the render/exit contract. Production assigns the real implementation below.
 var connectAndVerify = connectAndVerifyLive
 
-func connectAndVerifyLive(ctx context.Context, c *client.Client, res *client.Result, name string, wgKey *wgtun.Keypair) (*egressSession, error) {
+func connectAndVerifyLive(ctx context.Context, c *client.Client, res *client.Result, name string, keys *connectKeys) (*egressSession, error) {
 	// Interactive callers (connect/run/ip/guided) use a free port — pin nothing.
-	return connectAndVerifyOnPort(ctx, c, res, name, wgKey, 0)
+	return connectAndVerifyOnPort(ctx, c, res, name, keys, 0)
 }
 
 // connectAndVerifyOnPort is connectAndVerifyLive with an explicit pinned local port (0 ⇒ a
@@ -366,12 +435,12 @@ func connectAndVerifyLive(ctx context.Context, c *client.Client, res *client.Res
 // port so the held proxy always binds the same 127.0.0.1:<port>. It deliberately does NOT
 // route through the connectAndVerify package var — the var is the stub seam for command
 // tests, and the daemon binds a REAL port that those stubs must never shadow.
-func connectAndVerifyOnPort(ctx context.Context, c *client.Client, res *client.Result, name string, wgKey *wgtun.Keypair, port int) (*egressSession, error) {
+func connectAndVerifyOnPort(ctx context.Context, c *client.Client, res *client.Result, name string, keys *connectKeys, port int) (*egressSession, error) {
 	ce, err := parseConnectEnvelope(res)
 	if err != nil {
 		return nil, err
 	}
-	sess, err := bringUpEgress(ctx, ce, wgKey, port)
+	sess, err := bringUpEgress(ctx, ce, keys, port)
 	if err != nil {
 		return nil, err
 	}

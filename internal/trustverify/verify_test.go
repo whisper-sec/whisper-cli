@@ -292,3 +292,85 @@ func statusOf(rep *Report, name string) CheckStatus {
 	}
 	return StatusSkip
 }
+
+// republishTlsaWithTwoPins overwrites the fixture's TLSA RRset with TWO 3 1 1 pins (a
+// make-before-break rotation overlap, RFC 7671 §8), re-signed by the SAME child ZSK, in the given
+// order -- so a test can prove CheckDANEEE/the full Verify() chain is order-independent.
+func republishTlsaWithTwoPins(t *testing.T, fx agentFixture, first, second [32]byte) {
+	t.Helper()
+	leafOwner := "_443._tcp." + agentFQDN
+	tlsaA := &dns.TLSA{
+		Hdr:          dns.RR_Header{Name: dns.Fqdn(leafOwner), Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 60},
+		Usage:        3,
+		Selector:     1,
+		MatchingType: 1,
+		Certificate:  hex.EncodeToString(first[:]),
+	}
+	tlsaB := &dns.TLSA{
+		Hdr:          dns.RR_Header{Name: dns.Fqdn(leafOwner), Rrtype: dns.TypeTLSA, Class: dns.ClassINET, Ttl: 60},
+		Usage:        3,
+		Selector:     1,
+		MatchingType: 1,
+		Certificate:  hex.EncodeToString(second[:]),
+	}
+	sig := signRRSet(t, fx.h.childZSK, agentZone, []dns.RR{tlsaA, tlsaB}, fx.h.now)
+	fx.h.res.set(leafOwner, dns.TypeTLSA, []dns.RR{tlsaA, tlsaB, sig})
+}
+
+// TestVerify_MultiPinRotation_PassesRegardlessOfRRSetOrder is the end-to-end proof: during
+// a make-before-break rotation overlap the zone publishes BOTH the old and new pins, and the served
+// leaf legitimately matches only one of them -- the full Verify() chain must still return a green
+// verdict, REGARDLESS of which order the two TLSA records happen to come back in.
+func TestVerify_MultiPinRotation_PassesRegardlessOfRRSetOrder(t *testing.T) {
+	fx := buildAgentFixture(t, "", "")
+	served := SPKISHA256(fx.cert)
+	var oldPin [32]byte
+	oldPin[0] = 0xEE // an unrelated "previous epoch" pin, never matched by the served cert
+
+	t.Run("servedPinSecond", func(t *testing.T) {
+		republishTlsaWithTwoPins(t, fx, oldPin, served)
+		rep, err := Verify(context.Background(), testAddr, fx.opts)
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		if !rep.Verdict {
+			t.Fatalf("expected a GREEN verdict (served pin listed second); checks: %+v", rep.Checks)
+		}
+		if statusOf(rep, "dane") != StatusPass {
+			t.Fatalf("expected dane PASS; checks: %+v", rep.Checks)
+		}
+	})
+
+	t.Run("servedPinFirst", func(t *testing.T) {
+		republishTlsaWithTwoPins(t, fx, served, oldPin)
+		rep, err := Verify(context.Background(), testAddr, fx.opts)
+		if err != nil {
+			t.Fatalf("Verify: %v", err)
+		}
+		if !rep.Verdict {
+			t.Fatalf("expected a GREEN verdict (served pin listed first); checks: %+v", rep.Checks)
+		}
+		if statusOf(rep, "dane") != StatusPass {
+			t.Fatalf("expected dane PASS; checks: %+v", rep.Checks)
+		}
+	})
+}
+
+// TestVerify_MultiPinRotation_FailsWhenServedMatchesNeither proves the multi-pin acceptance is not
+// a blanket bypass: a served cert matching NEITHER published pin still fails DANE (and the verdict).
+func TestVerify_MultiPinRotation_FailsWhenServedMatchesNeither(t *testing.T) {
+	fx := buildAgentFixture(t, "", "")
+	var a, b [32]byte
+	a[0], b[0] = 0x01, 0x02
+	republishTlsaWithTwoPins(t, fx, a, b)
+	rep, err := Verify(context.Background(), testAddr, fx.opts)
+	if err != nil {
+		t.Fatalf("Verify: %v", err)
+	}
+	if rep.Verdict {
+		t.Fatal("expected a RED verdict when the served cert matches neither published pin")
+	}
+	if statusOf(rep, "dane") != StatusFail {
+		t.Fatalf("expected dane FAIL; checks: %+v", rep.Checks)
+	}
+}

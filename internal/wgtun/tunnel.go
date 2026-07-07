@@ -36,6 +36,10 @@
 package wgtun
 
 import (
+	"crypto/tls"
+	"fmt"
+	"io"
+	"net"
 	"net/netip"
 	"sync"
 	"time"
@@ -99,6 +103,10 @@ type Tunnel struct {
 	lastH      time.Time // last observed handshake (from the device), for Healthy()/monitor
 	reconnects int       // re-handshakes the monitor has driven (status/tests); only grows
 
+	// identityLn is the in-tunnel TLS listener (ServeTLS), or nil if never started. Closed by
+	// Stop() alongside the rest of the tunnel; guarded by mu (ServeTLS/Stop can race).
+	identityLn net.Listener
+
 	stop   chan struct{} // closed by Stop() to end the monitor
 	closed sync.Once
 }
@@ -118,11 +126,51 @@ func (t *Tunnel) Stop() {
 		return
 	}
 	t.closed.Do(func() { close(t.stop) })
+	t.mu.Lock()
+	ln := t.identityLn
+	t.mu.Unlock()
+	if ln != nil {
+		_ = ln.Close() // stop serving the identity leaf alongside the rest of the tunnel
+	}
 	// The proxy's onStop (wired in Start) closes the device AFTER the accept loop + tunnels
 	// drain, so no splice is mid-dial on the netstack when it goes away. Stop() blocks on that.
 	if t.proxy != nil {
 		t.proxy.Stop()
 	}
+}
+
+// ServeTLS starts a TLS listener bound to the tunnel's OWN /128 (t.cfg.Address) on port, serving cert
+// on every accepted connection — the agent-held identity leaf, so a DANE-EE verifier (`whisper
+// verify --trustless`) dialing [/128]:port sees the leaf THIS TUNNEL serves, proving the tunnel (not
+// a shared/wildcard listener) terminates the port. Runs for the tunnel's lifetime; Stop() closes
+// it alongside everything else. A bind failure is returned to the caller (best-effort: the tunnel
+// itself is unaffected either way — this is additive proof surface, not the egress data path).
+func (t *Tunnel) ServeTLS(cert tls.Certificate, port int) error {
+	ln, err := t.tnet.ListenTCP(&net.TCPAddr{IP: net.IP(t.cfg.Address.AsSlice()), Port: port})
+	if err != nil {
+		return fmt.Errorf("could not bind the identity TLS listener on the tunnel: %w", err)
+	}
+	tlsLn := tls.NewListener(ln, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	})
+	t.mu.Lock()
+	t.identityLn = tlsLn
+	t.mu.Unlock()
+	go func() {
+		for {
+			c, aerr := tlsLn.Accept()
+			if aerr != nil {
+				return // listener closed (Stop()) or a transient accept fault ⇒ end quietly
+			}
+			// A verifier only needs the handshake + the served cert; discard anything sent after.
+			go func(conn net.Conn) {
+				defer conn.Close()
+				_, _ = io.Copy(io.Discard, conn)
+			}(c)
+		}
+	}()
+	return nil
 }
 
 // Healthy reports whether the tunnel has completed a handshake recently (within DeadAfter).

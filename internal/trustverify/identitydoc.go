@@ -45,10 +45,20 @@ type identityDocResult struct {
 // is still trustless either way: every identity claim is asserted to equal a value already
 // proven by DNSSEC/DANE, so a valid signature over a mismatched claim is a FAIL. A key we
 // cannot fetch is a SKIP.
-func verifyIdentityDoc(ctx context.Context, f Fetcher, hostport, fqdn, addr, tlsaPinHex string,
-	pin TLSAPin, jwksURLs []string, pinKid string, dnsKeys *DNSAnchoredKeys) identityDocResult {
+//
+// pins carries EVERY published 3 1 1 association (a rotation overlap publishes two).
+// The fetch itself pins the TLS dial to pins[0] only (a soft SKIP on a transport mismatch, not a
+// FAIL -- see below); the identity_doc's OWN tlsa claim is checked for membership in the FULL set,
+// so a legitimate rotation never FAILs this step just because the doc echoes a different (but
+// still currently-published) pin than the one the dial happened to pin against.
+func verifyIdentityDoc(ctx context.Context, f Fetcher, hostport, fqdn, addr string,
+	pins []TLSAPin, jwksURLs []string, pinKid string, dnsKeys *DNSAnchoredKeys) identityDocResult {
 
-	body, status, err := f.GetPinned(ctx, hostport, fqdn, "/.well-known/whisper-identity", pin)
+	var dialPin TLSAPin
+	if len(pins) > 0 {
+		dialPin = pins[0]
+	}
+	body, status, err := f.GetPinned(ctx, hostport, fqdn, "/.well-known/whisper-identity", dialPin)
 	if err != nil {
 		return identityDocResult{status: StatusSkip, detail: "identity_doc unavailable over DANE: " + err.Error()}
 	}
@@ -101,9 +111,9 @@ func verifyIdentityDoc(ctx context.Context, f Fetcher, hostport, fqdn, addr, tls
 		return identityDocResult{status: StatusFail,
 			detail: fmt.Sprintf("identity_doc claims fqdn %q but DNSSEC proved %q", trimDot(claims.FQDN), trimDot(fqdn))}
 	}
-	if !strings.EqualFold(strings.TrimSpace(claims.TLSA.SHA256), strings.TrimSpace(tlsaPinHex)) {
+	if !claimedTlsaMatchesAny(claims.TLSA.SHA256, pins) {
 		return identityDocResult{status: StatusFail,
-			detail: "identity_doc TLSA sha256 does not match the DNSSEC-validated pin"}
+			detail: "identity_doc TLSA sha256 does not match any DNSSEC-validated pin"}
 	}
 	detail := "JWS verified; address/fqdn/tlsa claims match the DNSSEC-validated facts"
 	if anchored {
@@ -117,4 +127,16 @@ func verifyIdentityDoc(ctx context.Context, f Fetcher, hostport, fqdn, addr, tls
 		anchored: anchored,
 		detail:   detail,
 	}
+}
+
+// claimedTlsaMatchesAny reports whether the identity document's claimed TLSA sha256 hex string
+// equals ANY of the published pins -- case-insensitive, whitespace-trimmed.
+func claimedTlsaMatchesAny(claimedHex string, pins []TLSAPin) bool {
+	c := strings.TrimSpace(claimedHex)
+	for _, p := range pins {
+		if strings.EqualFold(c, strings.TrimSpace(p.Hex())) {
+			return true
+		}
+	}
+	return false
 }
