@@ -137,7 +137,7 @@ func (v *logsView) onLogs(m logsMsg) {
 func (v *logsView) syncRows() {
 	rows := make([]table.Row, 0, len(v.events))
 	for _, e := range v.events {
-		peer := "—"
+		peer := "-"
 		if e.PeerHost != "" {
 			if e.PeerPort > 0 {
 				peer = fmt.Sprintf("%s:%d", e.PeerHost, e.PeerPort)
@@ -149,7 +149,7 @@ func (v *logsView) syncRows() {
 		if dec == "" {
 			dec = e.Reason
 		}
-		bw := "—"
+		bw := "-"
 		if e.BytesUp > 0 || e.BytesDown > 0 {
 			bw = fmt.Sprintf("↑%s ↓%s", components.Bytes(e.BytesUp), components.Bytes(e.BytesDown))
 		}
@@ -185,7 +185,7 @@ func (v *logsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "j", "down":
 		v.tbl.MoveDown(1)
 	case "k":
-		// 'k' cycles kind (the footer hint), 'down'/'up' move — vim 'k'=up is overloaded
+		// 'k' cycles kind (the footer hint), 'down'/'up' move - vim 'k'=up is overloaded
 		// here with the kind cycle since LOGS is query-centric; use ↑ to move up.
 		v.cycleKind()
 		return app, v.runQuery()

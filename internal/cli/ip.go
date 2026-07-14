@@ -43,7 +43,7 @@ func newIPCmd() *cobra.Command {
 			defer cancel()
 			// detect-and-reuse: when a long-lived `whisper connect` daemon on this host
 			// already serves the target /128, verify THROUGH its live proxy instead of opening
-			// a competing op:connect (which would replace — and on our exit, remove — the
+			// a competing op:connect (which would replace - and on our exit, remove - the
 			// daemon's server-side peer, killing its tunnel). The verify below is the SAME
 			// echo-through-the-egress assertion, so a wrong/mismatched egress is still caught.
 			var sess *egressSession
@@ -68,7 +68,7 @@ func newIPCmd() *cobra.Command {
 					return perr
 				}
 				// Bring the egress up, fetch the echo THROUGH it, assert == /128. `whisper ip`
-				// uses the default tier (the verify is identical across tiers) — nil wgKey.
+				// uses the default tier (the verify is identical across tiers) - nil wgKey.
 				sess, err = connectAndVerify(cx, c, env.Result, "", nil)
 				if err != nil {
 					// A clean, non-leaky failure: render the remediation + a non-zero exit.
@@ -113,7 +113,7 @@ func green(s string) string {
 
 // inWhisperRange reports whether addr (a string IP literal) parses to an IPv6 address
 // inside 2a04:2a01::/32. A non-parseable or out-of-range address is false (the egress
-// is NOT a Whisper /128 — verification fails).
+// is NOT a Whisper /128 - verification fails).
 func inWhisperRange(addr string) bool {
 	a, err := netip.ParseAddr(addr)
 	if err != nil {

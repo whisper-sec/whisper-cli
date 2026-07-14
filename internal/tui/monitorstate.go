@@ -32,7 +32,7 @@ func (s monitorState) String() string {
 
 // feedSource is the data path currently filling the live picture (shown live in the
 // MONITOR title so the operator always knows whether they're seeing the live tail, the
-// op:logs backfill, or the poll fallback — the hybrid §6.4 made visible).
+// op:logs backfill, or the poll fallback - the hybrid §6.4 made visible).
 type feedSource int
 
 const (
@@ -51,7 +51,7 @@ func (s feedSource) String() string {
 	case srcPoll:
 		return "poll"
 	default:
-		return "—"
+		return "-"
 	}
 }
 
@@ -71,7 +71,7 @@ func (s feedSource) glyph() string {
 
 // feedRing is a bounded ring buffer of recent live events for the always-on feed and
 // the MONITOR chain. Drop-oldest on overflow so memory is bounded (never block, never
-// grow) — mirroring the server's own drop-on-full stream discipline.
+// grow) - mirroring the server's own drop-on-full stream discipline.
 type feedRing struct {
 	buf  []model.Event
 	cap  int
@@ -127,7 +127,7 @@ func (r *feedRing) clear() {
 // for the same /128 (the dev-guide §6.2 chain join). It is a tiny bounded map keyed by
 // addr128 → {qname, when}: FIFO eviction caps the entry count so a long run never grows
 // unbounded, and a per-entry TTL means a STALE lookup never stitches onto an unrelated
-// later connection (a real correctness hazard — a conn 10 minutes after a dns is not
+// later connection (a real correctness hazard - a conn 10 minutes after a dns is not
 // "for" that name). Conservative-emit: when in doubt, show no qname rather than a wrong
 // one. Time is the event's own µs timestamp (monotone on the stream), not wall-clock, so
 // a backfill replay joins by its own ordering too.
@@ -172,7 +172,7 @@ func (j *joinCache) observeDNS(addr128, qname string, atMicros int64) {
 }
 
 // qnameAt returns the qname seen for addr128 IF it is within the TTL of the query time
-// nowMicros (the conn event's own ts). A stale or missing entry returns "" — never a
+// nowMicros (the conn event's own ts). A stale or missing entry returns "" - never a
 // wrong stitch. Pass nowMicros==0 to ignore the TTL (e.g. a unit probe).
 func (j *joinCache) qnameAt(addr128 string, nowMicros int64) string {
 	e, ok := j.last[addr128]

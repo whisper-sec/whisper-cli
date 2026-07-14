@@ -43,7 +43,7 @@ func guidedTestServer(t *testing.T, agents []agentChoice, seen *[]string) *httpt
 
 // sniffOp pulls the op token out of the Cypher body whisper.agents({op:'...'}).
 func sniffOp(body string) string {
-	for _, op := range []string{"identity", "register", "connect", "list", "logs", "policy", "agent", "revoke"} {
+	for _, op := range []string{"identity", "register", "connect", "host", "domain", "list", "logs", "policy", "agent", "revoke"} {
 		if strings.Contains(body, "'"+op+"'") || strings.Contains(body, `"`+op+`"`) {
 			return op
 		}
@@ -65,7 +65,7 @@ func listJSON(agents []agentChoice) string {
 // It also stubs connectVia (the shared connect+verify tail) so the BRANCH/selection
 // logic is tested with no network egress: the stub emits the legacy-style "selected
 // <name>" line (the existing assertions key on it) and, under --quiet, the chosen agent's
-// address on stdout — exactly the surface a verified connect yields, minus the live proxy.
+// address on stdout - exactly the surface a verified connect yields, minus the live proxy.
 // The real connect+verify (local proxy, echo, bearer hygiene) is covered by the egress +
 // connect_core tests; here we isolate the front-door routing.
 func guidedHarness(t *testing.T, controlURL, agentFile, stdin string) (gio guidedIO, out, errb *bytes.Buffer, restore func()) {
@@ -91,7 +91,7 @@ func guidedHarness(t *testing.T, controlURL, agentFile, stdin string) (gio guide
 		if label == "" {
 			label = choice.addr
 		}
-		fmt.Fprintf(gio.err, "Connected as %s — %s  ✓ verified\n", label, choice.addr)
+		fmt.Fprintf(gio.err, "Connected as %s - %s  ✓ verified\n", label, choice.addr)
 		// Keep the legacy keyword the older assertions look for ("selected <name>").
 		fmt.Fprintf(gio.err, "whisper: selected %s\n", label)
 		return nil
@@ -320,7 +320,7 @@ func TestGuided_ManyAgents_NonInteractive_NeverPersistsFirst(t *testing.T) {
 	}
 }
 
-// --- Fix #2: parseMenuChoice re-prompts (returns -1) on EVERY invalid input — never the
+// --- Fix #2: parseMenuChoice re-prompts (returns -1) on EVERY invalid input - never the
 // silent #1. Only a clean number in [0, n] is accepted.
 func TestParseMenuChoice_RepromptsOnGarbage(t *testing.T) {
 	const n = 3
@@ -358,7 +358,7 @@ func TestGuided_ManyAgents_TTYMenuRepromptsThenPicks(t *testing.T) {
 		t.Fatalf("expected a re-prompt message after garbage, stderr=%q", errb.String())
 	}
 	if got := client.ReadAgentFile(af); got != "2a04:2a01::8" {
-		t.Fatalf("expected runner (the eventually-valid pick), got %q — NOT a silent #1", got)
+		t.Fatalf("expected runner (the eventually-valid pick), got %q - NOT a silent #1", got)
 	}
 }
 

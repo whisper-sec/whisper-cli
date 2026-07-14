@@ -1,6 +1,6 @@
 ---
 name: whisper-identity
-description: Give this agent a real, routable IPv6 identity and safe egress with one command. Use when an agent needs a stable source IP, reverse-DNS identity, or to route its traffic through a controlled network — for any framework (Python, Node), Claude Code, or a plain shell command.
+description: Give this agent a real, routable IPv6 identity and safe egress with one command. Use when an agent needs a stable source IP, reverse-DNS identity, or to route its traffic through a controlled network - for any framework (Python, Node), Claude Code, or a plain shell command.
 license: MIT
 homepage: https://whisper.online
 ---
@@ -29,7 +29,7 @@ whisper login                                # or rely on the env var
 
 ## 3. Give the current project an identity
 
-Pick the one that matches what you're running — each wires the working directory so
+Pick the one that matches what you're running - each wires the working directory so
 traffic egresses from the project's `/128`:
 
 ```sh
@@ -63,7 +63,7 @@ whisper run curl -s https://api64.ipify.org
 
 - The proxy serves both HTTP-CONNECT and SOCKS5 on a local loopback port; most clients
   pick it up from `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY` automatically.
-- `aiohttp` ignores proxy env by default — pass `ClientSession(trust_env=True)`.
+- `aiohttp` ignores proxy env by default - pass `ClientSession(trust_env=True)`.
 - Docs: https://whisper.online · CLI source (MIT): https://github.com/whisper-sec/whisper-cli
 
 _Signed: a detached PGP signature (`SKILL.md.asc`) is published alongside this file;

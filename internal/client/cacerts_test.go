@@ -10,7 +10,7 @@ import (
 
 func TestEmbeddedCABundlePresentAndParses(t *testing.T) {
 	if len(embeddedCABundle) == 0 {
-		t.Fatal("embedded CA bundle is empty — the //go:embed failed")
+		t.Fatal("embedded CA bundle is empty - the //go:embed failed")
 	}
 	if !bytes.Contains(embeddedCABundle, []byte("BEGIN CERTIFICATE")) {
 		t.Fatal("embedded CA bundle has no PEM certificates")
@@ -32,7 +32,7 @@ func TestEmbeddedCABundlePresentAndParses(t *testing.T) {
 func TestRootCAsUnionsSystemAndEmbedded(t *testing.T) {
 	pool := RootCAs()
 	if pool == nil {
-		t.Fatal("RootCAs returned nil — must always have the embedded bundle")
+		t.Fatal("RootCAs returned nil - must always have the embedded bundle")
 	}
 	//nolint:staticcheck
 	if len(pool.Subjects()) == 0 {

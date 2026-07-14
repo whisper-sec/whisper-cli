@@ -18,7 +18,7 @@ import (
 
 // emitJSON writes the verbatim control-plane envelope to stdout (scriptable). It
 // preserves the EXACT bytes the server sent (env.Raw) so a script sees no field loss,
-// no re-encoding, no reordering — the envelope verbatim, then a trailing newline.
+// no re-encoding, no reordering - the envelope verbatim, then a trailing newline.
 func emitJSON(env *client.Envelope) {
 	if env != nil && len(env.Raw) > 0 {
 		os.Stdout.Write(env.Raw)
@@ -213,7 +213,7 @@ func promptForKey() (string, error) {
 	return "", sc.Err()
 }
 
-// friendly renders an error as the single most helpful PLAIN-LANGUAGE line — never a Go
+// friendly renders an error as the single most helpful PLAIN-LANGUAGE line - never a Go
 // stack trace, never a server problem code the user can't act on (§3.3). Known server
 // problems are mapped to one calm sentence; everything else falls back to the problem's
 // own (already secret-free, helpful) detail, then the wrapped message.
@@ -240,17 +240,17 @@ func mapProblem(pe *client.ProblemError) string {
 		if pe.Title == "no key" {
 			break
 		}
-		return "your key was not accepted — run: whisper login"
+		return "your key was not accepted - run: whisper login"
 	case 404:
-		return "that agent isn't in your account — run `whisper list` to see your agents"
+		return "that agent isn't in your account - run `whisper list` to see your agents"
 	case 503:
 		if pe.Type == "EGRESS_DISABLED" || strings.Contains(strings.ToLower(pe.Error()), "egress") {
-			return "egress isn't enabled for this agent yet — try again shortly or contact support"
+			return "egress isn't enabled for this agent yet - try again shortly or contact support"
 		}
-		return "Whisper is busy right now — please try again in a moment"
+		return "Whisper is busy right now - please try again in a moment"
 	}
 	if pe.Type == "EGRESS_DISABLED" {
-		return "egress isn't enabled for this agent yet — try again shortly or contact support"
+		return "egress isn't enabled for this agent yet - try again shortly or contact support"
 	}
 	return ""
 }

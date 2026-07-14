@@ -97,7 +97,7 @@ func TestBrailleTooSmallDegrades(t *testing.T) {
 }
 
 // TestBrailleColorGradientApplied asserts the coloured path tints cells (ANSI present)
-// while NO_COLOR stays plain — colour is value-mapped but never load-bearing.
+// while NO_COLOR stays plain - colour is value-mapped but never load-bearing.
 func TestBrailleColorGradientApplied(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.TrueColor) // force colour for this assertion
 	defer lipgloss.SetColorProfile(termenv.Ascii)

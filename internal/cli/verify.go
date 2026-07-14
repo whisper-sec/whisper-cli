@@ -15,8 +15,8 @@ import (
 )
 
 // newVerifyCmd is the one-command, KEYLESS trust check: `whisper verify <addr-or-fqdn>`
-// runs the FULL Whisper-agent trust chain — reverse-DNS + forward-confirm + the DANE-EE TLSA
-// pin (DNSSEC-anchored, THE trust anchor; not a public CA) + the JWS identity doc — and prints
+// runs the FULL Whisper-agent trust chain - reverse-DNS + forward-confirm + the DANE-EE TLSA
+// pin (DNSSEC-anchored, THE trust anchor; not a public CA) + the JWS identity doc - and prints
 // one verdict. The work is done server-side by the public /verify-identity endpoint, so this
 // needs no key and no DANE-aware local resolver; the box already validated every leg.
 //
@@ -31,7 +31,7 @@ func newVerifyCmd() *cobra.Command {
 		Short: "Verify an address/FQDN is a real Whisper agent (DANE + DNSSEC + reverse-DNS + JWS)",
 		Long: "Run the full Whisper-agent trust chain for an agent /128 (or its FQDN) and print one\n" +
 			"verdict: is it a real Whisper agent, whose, and how strongly did it verify.\n\n" +
-			"Trust is anchored by DANE — the DNSSEC-signed _443._tcp.<fqdn> TLSA record pins the\n" +
+			"Trust is anchored by DANE - the DNSSEC-signed _443._tcp.<fqdn> TLSA record pins the\n" +
 			"agent's exact certificate, so NO public CA and NO pre-installed trust anchor is needed.\n" +
 			"dane_ok is true only when a strong DANE-EE (3 1 1) pin is published AND the cert the box\n" +
 			"serves satisfies it. This command is KEYLESS (the verify surface is public).\n\n" +
@@ -39,7 +39,7 @@ func newVerifyCmd() *cobra.Command {
 			"                DNSSEC chain from the IANA root IN-PROCESS (TLSA + AAAA + PTR), matches the\n" +
 			"                served DANE-EE cert against the DNSSEC pin, and verifies the transparency\n" +
 			"                log + identity document against signing keys published in DNSSEC-signed\n" +
-			"                DNS (_whisper-identity/_whisper-ledger TXT) — the HTTPS-served keys are\n" +
+			"                DNS (_whisper-identity/_whisper-ledger TXT) - the HTTPS-served keys are\n" +
 			"                only a cross-check. The default (no flag) uses Whisper's keyless\n" +
 			"                /verify-identity endpoint, which TRUSTS Whisper to run the chain for you.\n\n" +
 			"Exit 0 = a verified Whisper agent; exit 1 = not an agent, or a trust leg did not pass.",
@@ -62,7 +62,7 @@ func newVerifyCmd() *cobra.Command {
 				return err
 			}
 			if status == 400 {
-				// a 400 is NOT a verdict — it is the server rejecting the input, with a
+				// a 400 is NOT a verdict - it is the server rejecting the input, with a
 				// helpful JSON detail. Surface THAT detail (never the misleading "not a verified
 				// agent" misread of an empty verdict). --json still gets the verbatim body first.
 				if g.jsonOut {
@@ -75,7 +75,7 @@ func newVerifyCmd() *cobra.Command {
 					Detail: problemDetail(raw, fmt.Sprintf("verify-identity rejected %q (HTTP 400)", target))}
 			}
 			if g.jsonOut {
-				// The verdict IS the data — emit it verbatim (the server's exact bytes), like rdap.
+				// The verdict IS the data - emit it verbatim (the server's exact bytes), like rdap.
 				os.Stdout.Write(raw)
 				if len(raw) == 0 || raw[len(raw)-1] != '\n' {
 					fmt.Fprintln(os.Stdout)
@@ -100,7 +100,7 @@ func newVerifyCmd() *cobra.Command {
 	return cmd
 }
 
-// problemDetail extracts the most helpful message from a JSON error body — liberal in
+// problemDetail extracts the most helpful message from a JSON error body - liberal in
 // what it accepts: RFC-7807 {detail}/{title}, a {"message":…}, or the legacy {"error":"…"} /
 // {"error":{detail|message|title}} forms. Falls back to the caller's line when the body
 // carries nothing usable (never an empty error).

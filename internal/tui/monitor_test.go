@@ -151,6 +151,30 @@ func TestJoinCacheEviction(t *testing.T) {
 	}
 }
 
+// TestBlockedLookupNeverStitches asserts a BLOCKED dns fold stays out of the join
+// cache: a blocked resolution returned no usable address, so a later conn can never
+// be stitched onto that name (in the chain OR the live agent graph).
+func TestBlockedLookupNeverStitches(t *testing.T) {
+	a := newTestApp(t, 120, 40)
+	a.foldEvent(model.Event{Kind: "dns", TsMicros: 1_000_000, Addr128: "2a04:2a01::9",
+		QName: "ads.bad.", Decision: "block"}, true)
+	a.foldEvent(model.Event{Kind: "conn", TsMicros: 1_500_000, Addr128: "2a04:2a01::9",
+		PeerHost: "10.9.9.9", PeerPort: 443}, true)
+	if got := a.join.qnameAt("2a04:2a01::9", 1_500_000); got != "" {
+		t.Errorf("a blocked lookup must never stitch; got %q", got)
+	}
+	ag := a.lgraph.agents["2a04:2a01::9"]
+	if ag == nil {
+		t.Fatal("agent missing from the live graph")
+	}
+	if d := ag.dests["ads.bad"]; d == nil || !d.HostBlocked || d.IP != "" {
+		t.Errorf("the blocked lookup must plot alone (no ip attached): %+v", d)
+	}
+	if d := ag.dests["10.9.9.9"]; d == nil || d.Host != "" {
+		t.Errorf("the conn must plot as a separate direct-IP destination: %+v", d)
+	}
+}
+
 // TestJoinCacheRefreshNoGrowth asserts re-observing the same addr updates in place (no
 // double-count toward the cap).
 func TestJoinCacheRefreshNoGrowth(t *testing.T) {
@@ -180,7 +204,7 @@ func TestStreamPollTransitionFiresPoll(t *testing.T) {
 }
 
 // TestPollStopsWhenLive asserts a poll result is ignored once the live stream is back
-// (no re-arm) — the SSE tail pre-empts the fallback.
+// (no re-arm) - the SSE tail pre-empts the fallback.
 func TestPollStopsWhenLive(t *testing.T) {
 	a := newTestApp(t, 100, 30)
 	a.stream = streamConn
@@ -190,15 +214,15 @@ func TestPollStopsWhenLive(t *testing.T) {
 	}
 }
 
-// TestPollFoldsOnlyNewer asserts the poll dedups by ts — only rows newer than the
+// TestPollFoldsOnlyNewer asserts the poll dedups by ts - only rows newer than the
 // last-seen watermark are folded into the feed.
 func TestPollFoldsOnlyNewer(t *testing.T) {
 	a := newTestApp(t, 100, 30)
 	a.stream = streamRetry // down → poll active
 	a.lastEventUS = 1000
 	a.onMonitorPoll(monitorPollMsg{events: []model.Event{
-		{Kind: "dns", TsMicros: 500, QName: "old."},  // older — dropped
-		{Kind: "dns", TsMicros: 2000, QName: "new."}, // newer — folded
+		{Kind: "dns", TsMicros: 500, QName: "old."},  // older - dropped
+		{Kind: "dns", TsMicros: 2000, QName: "new."}, // newer - folded
 	}})
 	if a.feed.len() != 1 {
 		t.Fatalf("only the newer row should be folded; feed has %d", a.feed.len())
@@ -313,25 +337,31 @@ func TestStreamRestartClosesOldChannel(t *testing.T) {
 	}()
 	select {
 	case <-done:
-		// good — the old channel closed (no leak)
+		// good - the old channel closed (no leak)
 	case <-time.After(2 * time.Second):
 		t.Error("old stream channel was not closed after a restart (goroutine leak)")
 	}
 }
 
-// --- monitor render --------------------------------------------------------------
+// --- the merged dashboard (fleet + live monitor in one panel) ---------------------
 
-// TestMonitorRendersHeroStripsChain asserts the full MONITOR frame renders all three
-// bands (hero throughput, agent strips, live activity) with seeded data.
-func TestMonitorRendersHeroStripsChain(t *testing.T) {
-	a := newTestApp(t, 120, 42)
-	a.mode = modeMonitor
+// TestMergedDashboardRendersMonitorPanel asserts the merged AGENTS frame renders the
+// fleet table, the aggregate totals (incl. TOTAL CONNECTIONS), the watched agent's
+// stats, the throughput graph, and the live activity chain - one panel, one picture.
+func TestMergedDashboardRendersMonitorPanel(t *testing.T) {
+	a := newTestApp(t, 140, 42)
+	a.mode = modeAgents
 	a.stream = streamConn
 	a.source = srcSSE
-	a.agents = []model.Agent{{ID: "agent-1", Address: "2a04:2a01::a17", Label: "scraper", State: "active"}}
+	a.agents = []model.Agent{{
+		ID: "agent-1", Address: "2a04:2a01::a17", Label: "scraper", State: "active",
+		Detailed: true, DNSQueries: 1200, DNSBlocked: 34,
+		ConnectionsActive: 3, ConnectionsTotal: 4200, BytesUp: 8 << 20, BytesDown: 92 << 20,
+	}}
+	a.selected = 0
 	a.agentsView.syncRows()
 	a.monitorVw.focused = "2a04:2a01::a17"
-	// seed a ring + a feed event so each band has content
+	// seed a ring + a feed event so every section has content
 	r := &agentRing{}
 	for i := 0; i < kbpsWindow; i++ {
 		r.bytes[i] = float64(1000 * (i%10 + 1))
@@ -343,10 +373,100 @@ func TestMonitorRendersHeroStripsChain(t *testing.T) {
 	a.feed.push(model.Event{Kind: "dns", TsMicros: 1, QName: "x.", Decision: "allow"})
 	a.layout()
 	out := strip(a.View())
-	for _, want := range []string{"THROUGHPUT", "AGENTS ·", "LIVE ACTIVITY", "conn/min", "block-rate"} {
+	for _, want := range []string{
+		"FLEET",         // the fleet table panel
+		"LIVE",          // the monitor panel's heartbeat title
+		"dns 1.2k",      // fleet aggregate dns total
+		"conn 4.2k",     // TOTAL CONNECTIONS aggregate
+		"(3 active)",    // active connections
+		"watching",      // the scope divider
+		"scraper",       // the watched agent
+		"conn/min",      // live rates line
+		"LIVE ACTIVITY", // the chain section
+	} {
 		if !strings.Contains(out, want) {
-			t.Errorf("monitor frame missing %q; frame:\n%s", want, out)
+			t.Errorf("merged dashboard missing %q; frame:\n%s", want, out)
 		}
+	}
+}
+
+// TestEnterWatchesSelectedAgent asserts ENTER on the fleet pins the monitor to the
+// selected agent (the primary select-and-monitor action), and `d` opens the details
+// drill that ENTER used to open.
+func TestEnterWatchesSelectedAgent(t *testing.T) {
+	a := newTestApp(t, 120, 40)
+	a.agents = []model.Agent{
+		{ID: "agent-1", Address: "2a04:2a01::1", Label: "scraper", State: "active"},
+		{ID: "agent-2", Address: "2a04:2a01::2", Label: "crawler", State: "active"},
+	}
+	a.selected = 1
+	a.agentsView.syncRows()
+
+	_, cmd := a.handleKey(tea.KeyMsg{Type: tea.KeyEnter})
+	if a.monitorVw.focused != "2a04:2a01::2" {
+		t.Fatalf("enter should pin the monitor to the selected agent; focused=%q", a.monitorVw.focused)
+	}
+	if cmd == nil {
+		t.Error("enter should fire the narrow + backfill commands")
+	}
+	if a.overlay != overlayNone {
+		t.Error("enter must NOT open the details drill any more")
+	}
+
+	// `d` opens the details card ENTER used to open.
+	a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	if a.overlay != overlayDrill {
+		t.Errorf("d should open the details drill; overlay=%v", a.overlay)
+	}
+	if !strings.Contains(strip(a.View()), "2a04:2a01::2") {
+		t.Error("the details drill should show the selected agent")
+	}
+	a.overlay = overlayNone
+
+	// `a` returns to the whole tenant.
+	_, cmd = a.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	if a.monitorVw.focused != "" {
+		t.Errorf("a should unfocus back to tenant-wide; focused=%q", a.monitorVw.focused)
+	}
+	if cmd == nil {
+		t.Error("unfocus should restart the stream un-narrowed")
+	}
+}
+
+// TestClickWatchesAgentRow asserts a mouse click on a fleet row selects that agent AND
+// pins the monitor to it (the mouse is the same verb as ENTER). The table is windowed
+// by the view, so visible row r maps exactly to position top+r.
+func TestClickWatchesAgentRow(t *testing.T) {
+	a := newTestApp(t, 120, 40)
+	a.agents = []model.Agent{
+		{ID: "agent-1", Address: "2a04:2a01::1", Label: "scraper", State: "active", Created: 3},
+		{ID: "agent-2", Address: "2a04:2a01::2", Label: "crawler", State: "active", Created: 2},
+		{ID: "agent-3", Address: "2a04:2a01::3", Label: "prober", State: "active", Created: 1},
+	}
+	a.selected = 0
+	a.agentsView.syncRows()
+
+	// Row geometry: header(1) + tabs(1) + panel border(1) + table header(1) = rows
+	// start at y=4; the second row (created-desc order keeps input order) is y=5.
+	_, cmd := a.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: 2, Y: 5,
+	})
+	if a.selected != 1 {
+		t.Fatalf("click on row 1 should select agents[1]; selected=%d", a.selected)
+	}
+	if a.monitorVw.focused != "2a04:2a01::2" {
+		t.Errorf("click should pin the monitor to the clicked agent; focused=%q", a.monitorVw.focused)
+	}
+	if cmd == nil {
+		t.Error("click should fire the focus commands")
+	}
+	// A click on the monitor panel (right half) is not a row click.
+	before := a.selected
+	a.handleMouse(tea.MouseMsg{
+		Action: tea.MouseActionPress, Button: tea.MouseButtonLeft, X: a.width - 4, Y: 5,
+	})
+	if a.selected != before {
+		t.Error("a click outside the fleet panel must not change the selection")
 	}
 }
 

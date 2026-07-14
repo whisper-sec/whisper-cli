@@ -9,21 +9,20 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 
 	"github.com/whisper-sec/whisper-cli/internal/model"
 	"github.com/whisper-sec/whisper-cli/internal/tui/components"
 )
 
-// kbpsWindow is how many per-second buckets the per-agent rings keep — 4 minutes, enough
-// to fill the braille hero graph (2 dot-columns per cell) on a wide terminal at one
+// kbpsWindow is how many per-second buckets the per-agent rings keep - 4 minutes, enough
+// to fill the braille graph (2 dot-columns per cell) on a wide terminal at one
 // sample/second while staying tiny + bounded (~8 KiB/agent).
 const kbpsWindow = 240
 
 // agentRing holds rolling per-second buckets for one agent: total bytes (the kbps spark +
-// the hero graph), conn-opens (the conn/min gauge), and dns total/blocked (the block-rate
-// gauge). A fixed-size circular buffer ⇒ O(1) push, bounded memory, no allocation on the
-// hot fold path. The 4Hz render tick advances the head once a real second (every 4th).
+// the throughput graph), conn-opens (the conn/min number), and dns total/blocked (the
+// block-rate). A fixed-size circular buffer: O(1) push, bounded memory, no allocation on
+// the hot fold path. The 4Hz render tick advances the head once a real second (every 4th).
 type agentRing struct {
 	bytes      [kbpsWindow]float64 // per-second total bytes (up+down)
 	conns      [kbpsWindow]float64 // per-second conn-open counts
@@ -32,26 +31,23 @@ type agentRing struct {
 	head       int                 // index of the current second's bucket
 }
 
-// monitorView is the full-screen MONITOR tab AND the always-on right panel source. It
-// holds the per-agent rings (fed by every live/backfill/poll event) and renders the
-// btop-grade picture: a braille hero graph for the focused agent, collapsed strips for the
-// rest, value-mapped gauges, and the structured activity chain over the shared feed ring.
+// monitorView is the live half of the merged AGENTS dashboard: the per-agent rings (fed
+// by every live/backfill/poll event) plus the right-hand panel renderer - aggregate
+// counters (incl. TOTAL CONNECTIONS), the selected agent's stats, a braille throughput
+// graph, and the structured activity chain over the shared feed ring.
 type monitorView struct {
 	app        *App
 	rings      map[string]*agentRing // keyed by agent Key()
 	focused    string                // a focused agent Key() ("" = whole tenant)
-	scrollY    int
-	kindF      string // "", dns, conn, alloc cycle (f)
-	backfilled bool   // the op:logs backfill has run for the current focus (re-armed on focus change)
+	kindF      string                // "", dns, conn, alloc cycle (f)
+	backfilled bool                  // the op:logs backfill has run for the current focus (re-armed on focus change)
 }
 
 func newMonitorView(app *App) *monitorView {
 	return &monitorView{app: app, rings: map[string]*agentRing{}}
 }
 
-func (v *monitorView) resize(w, h int) {}
-
-// onEnter seeds the monitor with an op:logs backfill (the hybrid §6.4: paint history,
+// onEnter seeds the monitor with an op:logs backfill (the hybrid design: paint history,
 // then tail the live SSE on top). It backfills once per focus; the stream is already
 // running (the always-on panel). Fail-open: an empty/failed backfill is fine.
 func (v *monitorView) onEnter() tea.Cmd {
@@ -65,12 +61,12 @@ func (v *monitorView) onEnter() tea.Cmd {
 }
 
 // narrowAddr returns the /128 to narrow op:logs / the stream to when an agent is focused
-// (empty = tenant-wide). The SSE narrow takes the address, not the id (§6.1).
+// (empty = tenant-wide). The SSE narrow takes the address, not the id.
 func (v *monitorView) narrowAddr() string {
 	if v.focused == "" {
 		return ""
 	}
-	if strings.Contains(v.focused, ":") { // focused is a Key() — the /128 when known
+	if strings.Contains(v.focused, ":") { // focused is a Key() - the /128 when known
 		return v.focused
 	}
 	return ""
@@ -119,7 +115,7 @@ func (v *monitorView) observe(e model.Event) {
 }
 
 // kbpsSeries returns the last n per-second kbps samples for an agent (newest last), for
-// the hero graph + strips. Cheap, allocation-light, deterministic per ring state.
+// the throughput graph + sparklines. Cheap, allocation-light, deterministic per ring state.
 func (v *monitorView) kbpsSeries(key string, n int) []float64 {
 	r := v.rings[key]
 	if r == nil {
@@ -131,26 +127,58 @@ func (v *monitorView) kbpsSeries(key string, n int) []float64 {
 	out := make([]float64, n)
 	for i := 0; i < n; i++ {
 		idx := (r.head - n + 1 + i + kbpsWindow*2) % kbpsWindow
-		out[i] = r.bytes[idx] * 8 / 1000 // bytes/s → kbps
+		out[i] = r.bytes[idx] * 8 / 1000 // bytes/s -> kbps
 	}
 	return out
 }
 
-// connPerMin sums the conn-opens over the window (the conn/min gauge value).
+// aggregateSeries sums every agent's kbps series (the tenant-wide throughput graph).
+func (v *monitorView) aggregateSeries(n int) []float64 {
+	if n > kbpsWindow {
+		n = kbpsWindow
+	}
+	out := make([]float64, n)
+	for k := range v.rings {
+		s := v.kbpsSeries(k, n)
+		for i := range s {
+			out[i] += s[i]
+		}
+	}
+	return out
+}
+
+// connPerMin sums the conn-opens over the window (the conn/min number). An empty key
+// aggregates every ring (the tenant-wide rate).
 func (v *monitorView) connPerMin(key string) float64 {
+	var sum float64
+	if key == "" {
+		for _, r := range v.rings {
+			for _, c := range r.conns {
+				sum += c
+			}
+		}
+		return sum
+	}
 	r := v.rings[key]
 	if r == nil {
 		return 0
 	}
-	var sum float64
 	for _, c := range r.conns {
 		sum += c
 	}
 	return sum
 }
 
-// curKbps is the most-recent full second's kbps (the strip's "now" number).
+// curKbps is the most-recent full second's kbps (the "now" number). An empty key
+// aggregates every ring.
 func (v *monitorView) curKbps(key string) float64 {
+	if key == "" {
+		var sum float64
+		for k := range v.rings {
+			sum += v.curKbps(k)
+		}
+		return sum
+	}
 	r := v.rings[key]
 	if r == nil {
 		return 0
@@ -159,16 +187,22 @@ func (v *monitorView) curKbps(key string) float64 {
 	return r.bytes[prev] * 8 / 1000
 }
 
-// blockRate returns the dns block fraction over the window (0..1) for the block-rate gauge.
+// blockRate returns the dns block fraction over the window (0..1). An empty key
+// aggregates every ring.
 func (v *monitorView) blockRate(key string) float64 {
-	r := v.rings[key]
-	if r == nil {
-		return 0
-	}
 	var tot, blk float64
-	for i := 0; i < kbpsWindow; i++ {
-		tot += r.dnsTotal[i]
-		blk += r.dnsBlocked[i]
+	fold := func(r *agentRing) {
+		for i := 0; i < kbpsWindow; i++ {
+			tot += r.dnsTotal[i]
+			blk += r.dnsBlocked[i]
+		}
+	}
+	if key == "" {
+		for _, r := range v.rings {
+			fold(r)
+		}
+	} else if r := v.rings[key]; r != nil {
+		fold(r)
 	}
 	if tot <= 0 {
 		return 0
@@ -187,55 +221,10 @@ func (v *monitorView) advance() {
 	}
 }
 
-func (v *monitorView) scroll(delta int) {
-	v.scrollY += delta
-	if v.scrollY < 0 {
-		v.scrollY = 0
-	}
-}
-
-func (v *monitorView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
-	app := v.app
-	switch k.String() {
-	case " ", "space":
-		app.paused = !app.paused
-		if !app.paused {
-			app.bufferedPause = 0
-		}
-		app.setToast(map[bool]string{true: "feed paused", false: "feed resumed"}[app.paused], false)
-	case "f":
-		next := map[string]string{"": "dns", "dns": "conn", "conn": "alloc", "alloc": ""}
-		v.kindF = next[v.kindF]
-		app.setToast("kind filter: "+orPlaceholder(v.kindF, "all"), false)
-	case "c":
-		app.feed.clear()
-	case "s":
-		// narrow the monitor to the AGENTS-selected agent (restarts the SSE pinned to its
-		// /128 + re-backfills). Server-side narrow when it has an address.
-		if sel, ok := app.SelectedAgent(); ok {
-			cmd := v.focus(sel)
-			app.setToast("watching "+sel.Name(), false)
-			return app, cmd
-		}
-	case "a":
-		if cmd := v.unfocus(); cmd != nil {
-			app.setToast("watching the whole tenant", false)
-			return app, cmd
-		}
-	case "j", "down":
-		v.scroll(1)
-	case "k", "up":
-		v.scroll(-1)
-	case "enter":
-		return app.openDrillEvent(v.topEvent())
-	}
-	return app, nil
-}
-
 // focus narrows the monitor to one agent: it re-arms the backfill and (when the agent has
 // a /128) restarts the SSE stream narrowed to that address server-side, so the picture is
 // pinned to that one agent rather than tenant-wide-then-filtered. Focusing the same agent
-// is a no-op (no connection churn).
+// is a no-op (no connection churn). This is the ENTER action on the fleet.
 func (v *monitorView) focus(a model.Agent) tea.Cmd {
 	key := a.Key()
 	if key == v.focused {
@@ -243,7 +232,6 @@ func (v *monitorView) focus(a model.Agent) tea.Cmd {
 	}
 	v.focused = key
 	v.backfilled = false
-	v.scrollY = 0
 	v.app.feed.clear()
 	v.app.lastEventUS = 0
 	return tea.Batch(v.onEnter(), v.app.restartStreamNarrowed(v.narrowAddr()))
@@ -261,302 +249,195 @@ func (v *monitorView) unfocus() tea.Cmd {
 	return tea.Batch(v.onEnter(), v.app.restartStreamNarrowed(""))
 }
 
-// topEvent returns the most-recent feed event (for drill on Enter).
-func (v *monitorView) topEvent() (model.Event, bool) {
-	r := v.app.feed.recent(1)
-	if len(r) == 0 {
-		return model.Event{}, false
-	}
-	return r[0], true
+// cycleKind advances the activity-feed kind filter (f): all -> dns -> conn -> alloc.
+func (v *monitorView) cycleKind() string {
+	next := map[string]string{"": "dns", "dns": "conn", "conn": "alloc", "alloc": ""}
+	v.kindF = next[v.kindF]
+	return orPlaceholder(v.kindF, "all")
 }
 
-// --- render ----------------------------------------------------------------------
+// --- fleet aggregates --------------------------------------------------------------
 
-// view renders the full-screen MONITOR tab: a HERO band (the braille graph for the
-// focused agent + value-mapped gauges) over the STRIPS band (collapsed per-agent rows)
-// over the CHAIN band (the structured activity feed). Each band degrades gracefully on a
-// short terminal; the whole frame is sample-and-render (no per-event work here).
-func (v *monitorView) view(w, h int) string {
-	th := v.app.th
+// fleetTotals is the aggregate counter block: the sum of every agent's op:agent
+// counters (authoritative cumulative totals, incl. TOTAL CONNECTIONS) plus the
+// active/total membership counts.
+type fleetTotals struct {
+	DNS, Blocked       int64
+	Conns              int64 // TOTAL CONNECTIONS (cumulative egress conns across the fleet)
+	ConnsActive        int64
+	BytesUp, BytesDown int64
+	Agents, Active     int
+}
 
-	heroH := h * 40 / 100
-	if heroH < 7 {
-		heroH = 7
-	}
-	if heroH > 16 {
-		heroH = 16
-	}
-	stripsH := h * 22 / 100
-	if stripsH < 3 {
-		stripsH = 3
-	}
-	chainH := h - heroH - stripsH
-	if chainH < 3 {
-		// Reclaim from the hero band on a short terminal so the chain is never starved.
-		chainH = 3
-		heroH = h - stripsH - chainH
-		if heroH < 5 {
-			heroH = 5
-			stripsH = h - heroH - chainH
-			if stripsH < 1 {
-				stripsH = 1
-			}
+func (a *App) fleetTotals() fleetTotals {
+	var t fleetTotals
+	t.Agents = len(a.agents)
+	for _, ag := range a.agents {
+		if ag.State == "active" {
+			t.Active++
 		}
+		t.DNS += ag.DNSQueries
+		t.Blocked += ag.DNSBlocked
+		t.Conns += ag.ConnectionsTotal
+		t.ConnsActive += ag.ConnectionsActive
+		t.BytesUp += ag.BytesUp
+		t.BytesDown += ag.BytesDown
 	}
-
-	hero := v.renderHero(w, heroH)
-	strips := v.renderStrips(w, stripsH)
-	chain := v.renderChainPanel(w, chainH)
-	_ = th
-	return lipgloss.JoinVertical(lipgloss.Left, hero, strips, chain)
+	return t
 }
 
-// renderHero is the top band: the braille kbps-over-time graph for the FOCUSED agent (or
-// the tenant aggregate when unfocused), flanked by value-mapped gauges (conn/min,
-// bandwidth-now, block-rate). The graph is the showpiece — the btop glow over time.
-func (v *monitorView) renderHero(w, h int) string {
+// --- the merged-dashboard monitor panel ---------------------------------------------
+
+// panel renders the right half of the merged AGENTS dashboard: aggregate totals,
+// the watched agent's stats, the braille throughput graph, and the live activity
+// chain - all inside one titled panel whose header is the live heartbeat.
+func (v *monitorView) panel(w, h int) string {
 	th := v.app.th
 	inner := h - 2
-	if inner < 3 {
-		inner = 3
+	if inner < 1 {
+		inner = 1
 	}
-
-	gaugeW := 26
-	if w < 70 {
-		gaugeW = 0 // too narrow — graph only
+	iw := w - 4
+	if iw < 20 {
+		iw = 20
 	}
-	graphW := w - 4 - gaugeW
-	if graphW < 10 {
-		graphW = w - 4
-	}
-	// Never plot more dot-columns than the ring holds samples (2 dots per cell): an
-	// over-wide plot left-pads with permanent zeros — a structurally dead left half.
-	if graphW > kbpsWindow/2 {
-		graphW = kbpsWindow / 2
-	}
-
-	key, label := v.heroTarget()
-	series := v.heroSeries(key, graphW*2) // 2 samples per cell wide (braille resolution)
-
-	graph := components.Braille(series, components.BrailleOpts{
-		Width: graphW, Height: inner, NoColor: th.NoColor, Unit: "kbps",
-		Lo: th.FlowLo(), Mid: th.FlowMid(), Hi: th.FlowHi(),
-		Axis: th.Dim, Label: th.Dim,
-	})
-
-	body := graph
-	if gaugeW > 0 {
-		body = lipgloss.JoinHorizontal(lipgloss.Top, graph, "  ", v.renderGauges(key, gaugeW-2, inner))
-	}
-
-	panel := th.Panel.Width(w - 2).Height(inner).Render(body)
-	return v.app.titledPanel(panel, v.heroTitle(label), w)
+	body := strings.Join(v.panelLines(iw, inner), "\n")
+	p := th.Panel.Width(w - 2).Height(inner).Render(body)
+	return v.app.titledPanel(p, v.app.liveTitle(), w)
 }
 
-// heroTarget picks the agent the hero graph + gauges describe: the focused agent, else the
-// busiest agent, else the tenant aggregate.
-func (v *monitorView) heroTarget() (key, label string) {
-	if v.focused != "" {
-		return v.focused, components.ShortAddr(v.focused, 14, 8)
-	}
-	// busiest by conn/min
-	var bestKey string
-	var best float64 = -1
-	for _, a := range v.app.agents {
-		if c := v.connPerMin(a.Key()); c > best {
-			best, bestKey = c, a.Key()
-		}
-	}
-	if bestKey != "" && best > 0 {
-		return bestKey, "busiest · " + components.ShortAddr(bestKey, 12, 6)
-	}
-	return "", "tenant (all agents)"
-}
-
-// heroSeries returns the kbps series for the hero target. For the tenant aggregate (no
-// focus / no busiest) it sums every agent's series so the graph is never dead when there
-// is activity somewhere.
-func (v *monitorView) heroSeries(key string, n int) []float64 {
-	if key != "" {
-		return v.kbpsSeries(key, n)
-	}
-	// aggregate across all rings
-	if n > kbpsWindow {
-		n = kbpsWindow
-	}
-	out := make([]float64, n)
-	for k := range v.rings {
-		s := v.kbpsSeries(k, n)
-		for i := range s {
-			out[i] += s[i]
-		}
-	}
-	return out
-}
-
-// renderGauges renders the value-mapped gauge stack beside the hero graph: conn/min,
-// bandwidth-now, and block-rate — each green→amber→red by load, glyph-labelled so colour
-// is never the only signal. It emits EXACTLY h lines, each ≤ w columns, so the horizontal
-// join with the (taller) graph aligns row-by-row with no wrapping or stray-line artefacts.
-func (v *monitorView) renderGauges(key string, w, h int) string {
+// panelLines composes the panel body: exactly ih lines, each fitted to iw columns.
+func (v *monitorView) panelLines(iw, ih int) []string {
 	th := v.app.th
-	if w < 8 {
-		return ""
-	}
-	barW := w - 8 // leave room for the trailing value
-	if barW < 4 {
-		barW = 4
-	}
-	cm := v.connPerMin(key)
-	kbps := v.curKbps(key)
-	br := v.blockRate(key)
-
-	gauge := func(val, max float64) string {
-		return components.GaugeGrad(val, max, barW, th.NoColor,
-			th.LoadLo(), th.LoadMid(), th.LoadHi(), th.BorderColor())
-	}
-
 	var lines []string
-	add := func(label, valLine string) {
-		lines = append(lines, th.Dim.Render(label), valLine, "")
-	}
-	add("conn/min", gauge(cm, 60)+" "+th.Text.Render(components.Count(int64(cm))))
-	add("kbps now", gauge(kbps, gaugeKbpsMax(kbps))+" "+th.Text.Render(components.Count(int64(kbps))))
-	add("block-rate", gauge(br*100, 100)+" "+th.Text.Render(fmt.Sprintf("%.0f%%", br*100)))
 
-	// Pad/clamp to exactly h lines so JoinHorizontal lines up with the graph.
-	for len(lines) < h {
+	// 1. Fleet aggregates - the totals row leads with the numbers that matter, TOTAL
+	//    CONNECTIONS among them, plus the live-session deltas underneath.
+	t := v.app.fleetTotals()
+	lines = append(lines, truncate(fmt.Sprintf("%s %s %s  %s %s  %s %s %s  %s ↑%s ↓%s",
+		th.Accent.Render("Σ"),
+		th.DNS.Render("dns"), th.Text.Render(components.Count(t.DNS)),
+		th.Error.Render("blocked"), th.Text.Render(components.Count(t.Blocked)),
+		th.Conn.Render("conn"), th.Text.Render(components.Count(t.Conns)),
+		th.Dim.Render(fmt.Sprintf("(%s active)", components.Count(t.ConnsActive))),
+		th.Dim.Render("bw"), components.Bytes(t.BytesUp), components.Bytes(t.BytesDown)), iw))
+	lines = append(lines, truncate(th.Dim.Render(fmt.Sprintf(
+		"  %d/%d agents active · live session +%s dns · +%s conn · +%s blocked",
+		t.Active, t.Agents,
+		components.Count(v.app.liveDNS), components.Count(v.app.liveConn),
+		components.Count(v.app.liveBlocked))), iw))
+
+	// 2. The watched agent (or the honest tenant-wide state).
+	lines = append(lines, sectionDivider(v.scopeTitle(), iw, th))
+	lines = append(lines, v.watchedLines(iw)...)
+
+	// 3. Braille throughput graph, when there is room to keep a useful chain below.
+	used := len(lines)
+	graphH := 0
+	if ih-used >= 14 {
+		graphH = 6
+	}
+	if graphH > 0 {
+		key := v.focused
+		graphW := iw - 2
+		if graphW > kbpsWindow/2 {
+			graphW = kbpsWindow / 2 // never plot more dot-columns than the ring holds
+		}
+		var series []float64
+		if key != "" {
+			series = v.kbpsSeries(key, graphW*2)
+		} else {
+			series = v.aggregateSeries(graphW * 2)
+		}
+		graph := components.Braille(series, components.BrailleOpts{
+			Width: graphW, Height: graphH, NoColor: th.NoColor, Unit: "kbps",
+			Lo: th.FlowLo(), Mid: th.FlowMid(), Hi: th.FlowHi(),
+			Axis: th.Dim, Label: th.Dim,
+		})
+		lines = append(lines, strings.Split(graph, "\n")...)
+	}
+
+	// 4. The live activity chain fills the rest.
+	lines = append(lines, sectionDivider(v.chainTitle(), iw, th))
+	rest := ih - len(lines)
+	if rest < 1 {
+		rest = 1
+	}
+	lines = append(lines, v.app.renderFeedLines(v.filteredRecent(rest), iw, rest)...)
+
+	if len(lines) > ih {
+		lines = lines[:ih]
+	}
+	for len(lines) < ih {
 		lines = append(lines, "")
 	}
-	if len(lines) > h {
-		lines = lines[:h]
-	}
-	return strings.Join(lines, "\n")
+	return lines
 }
 
-// gaugeKbpsMax picks a sensible full-scale for the bandwidth gauge so a quiet agent's bar
-// isn't pinned and a busy one isn't clipped (a soft auto-range).
-func gaugeKbpsMax(cur float64) float64 {
-	switch {
-	case cur < 100:
-		return 100
-	case cur < 1000:
-		return 1000
-	case cur < 10000:
-		return 10000
-	default:
-		return cur * 1.2
+// scopeTitle names what the monitor is pinned to (the section divider label).
+func (v *monitorView) scopeTitle() string {
+	if v.focused == "" {
+		return "watching · whole tenant"
 	}
+	return "watching · " + components.ShortAddr(v.focused, 14, 8)
 }
 
-// renderStrips is the middle band: one collapsed row per agent (name · kbps spark · conn
-// gauge · block-rate), the focused agent marked. Sorted busiest-first so the active ones
-// are always on top.
-func (v *monitorView) renderStrips(w, h int) string {
+// watchedLines renders the watched agent's own stat block (2 lines), or the tenant
+// aggregate rates with the how-to hint when nothing is focused.
+func (v *monitorView) watchedLines(iw int) []string {
 	th := v.app.th
-	inner := h - 2
-	if inner < 1 {
-		inner = 1
-	}
-	rows := v.stripRows(w-4, inner)
-	body := strings.Join(rows, "\n")
-	panel := th.Panel.Width(w - 2).Height(inner).Render(body)
-	return v.app.titledPanel(panel, v.stripsTitle(), w)
-}
-
-// stripRows builds up to `max` per-agent strips, busiest-first, each: a focus marker, the
-// name, a value-mapped kbps sparkline, the current kbps, and a tiny conn-gauge.
-func (v *monitorView) stripRows(w, max int) []string {
-	th := v.app.th
-	type ent struct {
-		a    model.Agent
-		traf float64
-	}
-	var ents []ent
-	for _, a := range v.app.agents {
-		ents = append(ents, ent{a, v.connPerMin(a.Key()) + v.curKbps(a.Key())})
-	}
-	if len(ents) == 0 {
-		return []string{th.Dim.Render(truncate(
-			"no agents yet — every agent that resolves or connects appears here live", w))}
-	}
-	// busiest first
-	for i := 1; i < len(ents); i++ {
-		for j := i; j > 0 && ents[j].traf > ents[j-1].traf; j-- {
-			ents[j], ents[j-1] = ents[j-1], ents[j]
+	key := v.focused
+	if key == "" {
+		return []string{
+			truncate(fmt.Sprintf("%s  conn/min %s · now %s kbps · block %.0f%%",
+				th.Dim.Render("▸ all agents"),
+				th.Text.Render(components.Count(int64(v.connPerMin("")))),
+				th.Text.Render(components.Count(int64(v.curKbps("")))),
+				v.blockRate("")*100), iw),
+			truncate(th.Dim.Render("  ↵ on an agent (or click it) to pin the monitor to its traffic"), iw),
 		}
 	}
-	sparkW := clamp(w/4, 8, 28)
-	out := make([]string, 0, max)
-	for i, e := range ents {
-		if i >= max {
+	var ag model.Agent
+	found := false
+	for _, x := range v.app.agents {
+		if x.Key() == key {
+			ag, found = x, true
 			break
 		}
-		key := e.a.Key()
-		marker := " "
-		nameStyle := th.Text
-		if key == v.focused {
-			marker = th.Accent.Render("▸")
-			nameStyle = th.Accent
+	}
+	if !found {
+		return []string{
+			truncate(th.Accent.Render("▸ ")+th.Addr.Render(key), iw),
+			truncate(th.Dim.Render("  (not in the fleet roster yet - counters pending)"), iw),
 		}
-		name := nameStyle.Render(padTrunc(e.a.Name(), 16))
-		spark := components.SparklineGradient(v.kbpsSeries(key, sparkW), sparkW, th.NoColor,
-			th.FlowLo(), th.FlowMid(), th.FlowHi())
-		kbps := th.Text.Render(padTrunc(components.Count(int64(v.curKbps(key)))+" kbps", 9))
-		cm := v.connPerMin(key)
-		cg := components.GaugeGrad(cm, 60, 10, th.NoColor,
-			th.LoadLo(), th.LoadMid(), th.LoadHi(), th.BorderColor())
-		br := v.blockRate(key)
-		blk := th.Dim.Render("")
-		if br > 0 {
-			blk = th.Error.Render(fmt.Sprintf("✗%.0f%%", br*100))
-		}
-		line := fmt.Sprintf("%s %s %s %s %s %s %s",
-			marker, name, spark, kbps, th.Dim.Render("conn"), cg, blk)
-		out = append(out, truncate(line, w))
 	}
-	for len(out) < max {
-		out = append(out, "")
+	head := th.Accent.Render("▸ "+ag.Name()) + "  " + th.Addr.Render(orPlaceholder(ag.Address, "(no /128)")) + "  " + stateBadge(th, ag.State)
+	blk := fmt.Sprintf("%s (%.1f%%)", components.Count(ag.DNSBlocked), ag.BlockedPct())
+	stat := fmt.Sprintf("  %s %s · %s %s · %s %s act / %s total · ↑%s ↓%s",
+		th.DNS.Render("dns"), th.Text.Render(components.Count(ag.DNSQueries)),
+		th.Error.Render("blocked"), th.Text.Render(blk),
+		th.Conn.Render("conn"), th.Text.Render(components.Count(ag.ConnectionsActive)),
+		th.Text.Render(components.Count(ag.ConnectionsTotal)),
+		components.Bytes(ag.BytesUp), components.Bytes(ag.BytesDown))
+	rates := fmt.Sprintf("  conn/min %s · now %s kbps · block %.0f%%",
+		th.Text.Render(components.Count(int64(v.connPerMin(key)))),
+		th.Text.Render(components.Count(int64(v.curKbps(key)))),
+		v.blockRate(key)*100)
+	if !ag.Detailed {
+		stat = "  " + th.Dim.Render("loading counters...")
 	}
-	return out
+	return []string{truncate(head, iw), truncate(stat, iw), truncate(rates, iw)}
 }
 
-// renderChainPanel is the bottom band: the structured activity chain over the shared feed
-// ring (filtered by the kind filter), newest first, with the new-row flash-in (motion).
-func (v *monitorView) renderChainPanel(w, h int) string {
-	th := v.app.th
-	inner := h - 2
-	if inner < 1 {
-		inner = 1
-	}
-	events := v.filteredRecent(inner)
-	lines := v.app.renderFeedLines(events, w-4, inner)
-	panel := th.Panel.Width(w - 2).Height(inner).Render(strings.Join(lines, "\n"))
-	return v.app.titledPanel(panel, v.chainTitle(), w)
-}
-
-// --- titles ----------------------------------------------------------------------
-
-func (v *monitorView) heroTitle(label string) string {
-	return fmt.Sprintf("◈ THROUGHPUT · %s · kbps/%dmin", label, kbpsWindow/60)
-}
-
-func (v *monitorView) stripsTitle() string {
-	scope := "tenant-wide"
-	if v.focused != "" {
-		scope = "watching " + components.ShortAddr(v.focused, 10, 6)
-	}
-	return fmt.Sprintf("AGENTS · %d · %s", len(v.app.agents), scope)
-}
-
+// chainTitle labels the activity section: the data source, the kind filter, and pause.
 func (v *monitorView) chainTitle() string {
 	f := orPlaceholder(v.kindF, "all")
 	pause := ""
 	if v.app.paused {
-		pause = "  ⏸"
+		pause = " · ⏸ paused"
 	}
-	return fmt.Sprintf("● LIVE ACTIVITY  client_src ─▶ qname ─▶ peer · %s · filter:%s%s",
-		v.app.source.glyph()+v.app.source.String(), f, pause)
+	return fmt.Sprintf("LIVE ACTIVITY · %s%s · filter:%s%s",
+		v.app.source.glyph(), v.app.source.String(), f, pause)
 }
 
 // filteredRecent returns recent feed events filtered by the kind filter (over-fetch then

@@ -1,7 +1,7 @@
 # Contributing to whisper
 
 Thanks for your interest in improving the Whisper CLI. Contributions of all sizes are
-welcome — bug reports, fixes, docs, and features.
+welcome - bug reports, fixes, docs, and features.
 
 ## Getting started
 
@@ -38,10 +38,10 @@ gofmt -l .         # prints nothing → formatting is clean
 
 - **Be conservative in what you emit, liberal in what you accept.** Output should be
   strict and predictable; input should be handled gracefully, and errors should be one
-  clear, helpful sentence — never an opaque stack trace.
+  clear, helpful sentence - never an opaque stack trace.
 - Keep the binary **static and dependency-light**. CGO stays disabled; new third-party
   dependencies should earn their place.
-- Add tests for new behavior. Tests must be **self-contained** — no live network, no
+- Add tests for new behavior. Tests must be **self-contained** - no live network, no
   external services. Use in-process servers and fixtures.
 - Match the existing style. Every Go file carries the SPDX header:
   ```go
@@ -56,7 +56,7 @@ Open a [GitHub issue](https://github.com/whisper-sec/whisper-cli/issues) with st
 reproduce, what you expected, and what happened. Include your OS/arch and the output of
 `whisper --version`.
 
-For **security** issues, do not open a public issue — see [SECURITY.md](SECURITY.md).
+For **security** issues, do not open a public issue - see [SECURITY.md](SECURITY.md).
 
 ## License
 

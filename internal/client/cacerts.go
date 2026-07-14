@@ -10,7 +10,7 @@ import (
 )
 
 // embeddedCABundle is the Mozilla CA list baked into the binary so verification of the
-// *.whisper.online wildcard TLS never depends on the host's system trust store — the
+// *.whisper.online wildcard TLS never depends on the host's system trust store - the
 // `curl cli.whisper.online | sh` binary just works on a bare container or a stripped
 // host (zero config). Refreshed at build time from ca-certificates.
 //
@@ -23,7 +23,7 @@ var embeddedCABundle []byte
 //   - a host with NO trust store still verifies via the embedded bundle (zero config).
 //
 // Conservative-emit: we never disable verification; liberal-accept: either trust
-// source suffices. A nil return is impossible — the embedded bundle is always present.
+// source suffices. A nil return is impossible - the embedded bundle is always present.
 func RootCAs() *x509.CertPool {
 	pool, err := x509.SystemCertPool()
 	if err != nil || pool == nil {

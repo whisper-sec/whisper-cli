@@ -1,0 +1,1566 @@
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-07-14T12:17:30Z",
+  "graph": {
+    "endpoint": "https://graph.whisper.security/api/query",
+    "request": "POST application/json  {\"query\":\"<cypher>\",\"parameters\":{...}}",
+    "envelope": "{columns,rows,statistics}",
+    "rowsShape": "rows are OBJECTS keyed by column name",
+    "auth": "API key required for all queries (X-API-Key)",
+    "keyed": "unlimited",
+    "playground": "keyless is a rate-limited taste only (100/window); not for production. If it is Cypher it needs a key",
+    "docsBase": "https://www.whisper.security",
+    "flowRun": {
+      "endpoint": "https://console.whisper.security/api/gallery/run",
+      "method": "POST",
+      "auth": "X-API-Key",
+      "bodyShape": {
+        "slug": "<flow id>",
+        "inputs": "{}",
+        "params": "{}"
+      },
+      "transport": "SSE",
+      "note": "Runs a catalog flow by its id. Keyed only."
+    }
+  },
+  "entries": [
+    {
+      "id": "anycast-dns-root-sovereignty",
+      "title": "Anycast DNS-Root Sovereignty",
+      "purpose": "Assess how resilient a country's core DNS is if it were cut off from the world.",
+      "why": "Could a country still resolve names if it were isolated? Counts how many of the 13 root letters have in-country DNS_ROOT_INSTANCE anycast nodes, the Global-vs-Local split, the BGP origin ASNs hosting them, and a resilience grade.",
+      "category": "Infrastructure, supply-chain & compliance / DNS & email security / Research & OSINT",
+      "docPath": "/docs/recipes/compliance",
+      "tags": [
+        "workflow",
+        "audit",
+        "profile",
+        "DNS",
+        "physical",
+        "BGP"
+      ],
+      "inputs": [
+        {
+          "id": "country",
+          "kind": "any",
+          "paramName": "country",
+          "default": "BR",
+          "examples": [
+            "BR",
+            "US",
+            "DE",
+            "ZA",
+            "CY"
+          ]
+        }
+      ],
+      "params": [
+        {
+          "name": "instanceType",
+          "kind": "select",
+          "default": "ALL",
+          "options": [
+            "ALL",
+            "Global",
+            "Local"
+          ]
+        }
+      ],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (anycast-dns-root-sovereignty)",
+        "anchorStepId": "overview",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "distinctLetters",
+        "totalInstances",
+        "globalCount",
+        "localCount",
+        "hostingAsns"
+      ],
+      "prompt": "Assess country BR's DNS-root resolver sovereignty: which of the 13 root letters (A-M) have in-country DNS_ROOT_INSTANCE anycast nodes, the Global-vs-Local split, the BGP origin ASNs hosting them, and a resilience grade flagging absent or single-ASN-concentrated root presence. Run run_workflow (anycast-dns-root-sovereignty). Cite every claim with the step's bound Cypher and rowCount; treat a 0-instance result as a CRITICAL sovereignty finding, not 'no data'. Note bgpOriginAsn is sparsely populated - absence of a hosting ASN is unknown, not 'none'.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "attack-path",
+      "title": "Attack Path & Connection Finder",
+      "purpose": "Find the choke points an attacker would target - and how any two things connect.",
+      "why": "From a starting foothold, finds shared dependencies whose compromise reaches furthest; for any two indicators, traces how they are actually connected.",
+      "category": "SOC, DFIR & IR / Threat intelligence / Threat-actor & TTP",
+      "docPath": "/docs/recipes/attack-path",
+      "tags": [
+        "workflow",
+        "pivot",
+        "cluster",
+        "attribute",
+        "DNS",
+        "WHOIS",
+        "TLS",
+        "BGP",
+        "threat-intel"
+      ],
+      "inputs": [
+        {
+          "id": "asset",
+          "kind": "hostname",
+          "paramName": "value",
+          "default": "paypal.com",
+          "examples": [
+            "github.com",
+            "cloudflare.com",
+            "coinbase.com"
+          ]
+        },
+        {
+          "id": "other",
+          "kind": "hostname",
+          "paramName": "other",
+          "default": "paypa1.com"
+        }
+      ],
+      "params": [
+        {
+          "name": "level",
+          "kind": "select",
+          "default": "standard",
+          "options": [
+            "quick",
+            "standard",
+            "deep",
+            "comprehensive",
+            "exhaustive"
+          ]
+        }
+      ],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (attack-path)",
+        "anchorStepId": "verdict",
+        "minSchema": 5,
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "graph",
+      "columns": [
+        "indicator",
+        "type",
+        "available",
+        "cached",
+        "found",
+        "score",
+        "level",
+        "explanation",
+        "factors",
+        "sources",
+        "advisory"
+      ],
+      "prompt": "From the foothold paypal.com, map the structure an attacker leans on: the DNS and registrant choke points with the most dependents, the registrant/TLS pivots that survive IP churn, whether it is provably linked to paypa1.com, and how close it sits to known-bad. Run run_workflow (attack-path), and use explain_indicator to score the foothold and any neighbour. Cite every claim with the step's bound Cypher and rowCount; treat coverage gaps as no-data != benign.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "attack-surface",
+      "title": "Attack-Surface Mapper",
+      "purpose": "Map everything about a domain that's exposed to the outside world, scored for risk.",
+      "why": "Maps the full external footprint - subdomains, name/mail servers, registrant, third-party services, connected web - and scores the exposure.",
+      "category": "Attack surface & recon / DNS & email security / SOC, DFIR & IR / Infrastructure, supply-chain & compliance / Brand protection",
+      "docPath": "/docs/recipes/pentest-recon",
+      "tags": [
+        "workflow",
+        "profile",
+        "audit",
+        "detect",
+        "DNS",
+        "email",
+        "BGP",
+        "WHOIS",
+        "threat-intel",
+        "TLS",
+        "GeoIP",
+        "physical"
+      ],
+      "inputs": [
+        {
+          "id": "domain",
+          "kind": "domain",
+          "paramName": "domain",
+          "default": "github.com"
+        }
+      ],
+      "params": [
+        {
+          "name": "level",
+          "kind": "select",
+          "default": "standard",
+          "options": [
+            "quick",
+            "standard",
+            "deep",
+            "comprehensive",
+            "exhaustive"
+          ]
+        }
+      ],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (attack-surface)",
+        "anchorStepId": "verdict",
+        "minSchema": 5,
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "indicator",
+        "type",
+        "available",
+        "cached",
+        "found",
+        "score",
+        "level",
+        "explanation",
+        "factors",
+        "sources",
+        "advisory"
+      ],
+      "prompt": "Map and grade the external attack surface of github.com: run run_workflow (attack-surface) to enumerate subdomains (DNS + CT), nameservers, mail/SPF/DMARC, registrar, de-CDN origins and the serving IPs' ASN/TLS/threat posture, and use explain_indicator to score any exposed host or origin. Cite every claim with the step's bound Cypher and rowCount; treat coverage gaps as no-data != benign.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "bgp-hijack-exposure",
+      "title": "BGP Hijack & Routing-Hygiene Audit",
+      "purpose": "Grade a network's routing security and trace conflicts to the domains they'd expose.",
+      "why": "Grades a network on the conflicts/gaps that make route hijacking possible, then traces any conflict to the specific domains and organisations exposed on the affected blocks.",
+      "category": "Network & BGP / Threat intelligence / SOC, DFIR & IR",
+      "docPath": "/docs/recipes/bgp-routing",
+      "tags": [
+        "workflow",
+        "detect",
+        "pivot",
+        "BGP",
+        "RPKI",
+        "DNS"
+      ],
+      "inputs": [
+        {
+          "id": "asn",
+          "kind": "asn",
+          "paramName": "value",
+          "default": "AS13335"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (bgp-hijack-exposure)",
+        "anchorStepId": "prefixes",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "routing",
+      "columns": [
+        "prefix",
+        "is_moas",
+        "conflicting_asn"
+      ],
+      "prompt": "Trace BGP exposure for AS13335: run run_workflow (bgp-hijack-exposure). A prefix with a CONFLICTS_WITH origin AND no RPKI cover is the highest risk; the exposure step lists the hostnames that would be affected. MOAS data is sparse until the next route-collector refresh.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "blast-radius",
+      "title": "Dependency Blast Radius",
+      "purpose": "Pick one asset and see what would break if it failed - and what it depends on in turn.",
+      "why": "Maps dependencies in both directions: everything that breaks if the asset fails (SPOFs) and everything it relies on (its own DNS/mail/hosting/network supply chain).",
+      "category": "Network & BGP / Infrastructure, supply-chain & compliance",
+      "docPath": "/docs/recipes/soc",
+      "tags": [
+        "workflow",
+        "profile",
+        "audit",
+        "pivot",
+        "DNS",
+        "email",
+        "BGP",
+        "web"
+      ],
+      "inputs": [
+        {
+          "id": "asset",
+          "kind": "any",
+          "paramName": "indicator",
+          "default": "ns1.dreamhost.com",
+          "examples": [
+            "ns1.dreamhost.com",
+            "dns1.p01.nsone.net",
+            "cloudflare.com",
+            "104.16.132.229",
+            "AS13335",
+            "104.16.128.0/20"
+          ]
+        }
+      ],
+      "params": [
+        {
+          "name": "depth",
+          "kind": "number",
+          "default": 2
+        }
+      ],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (blast-radius)",
+        "anchorStepId": "classify",
+        "minSchema": 4,
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "labels",
+        "name"
+      ],
+      "prompt": "Map the dependency blast radius of ns1.dreamhost.com - what breaks if it goes away, hop by hop: run run_workflow (blast-radius) to fan out ONLY dependency edges, and at level 1 how many direct dependents are single-homed on it versus have a fallback. Read each observation against the step's bound Cypher and rowCount; this is an availability/dependency map, not a threat assessment.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "build-takedown-evidence-package",
+      "title": "Takedown Evidence Package",
+      "purpose": "Assemble a ready-to-submit dossier for taking down a scam or phishing domain.",
+      "why": "One-pass takedown package: reputation verdict, owner (WHOIS), abuse-list listings, and surrounding infrastructure, laid out ready to hand to a registrar/host.",
+      "category": "Brand protection / Research & OSINT / SOC, DFIR & IR",
+      "docPath": "/docs/recipes/threat-intel",
+      "tags": [
+        "workflow",
+        "enrich",
+        "cluster",
+        "threat-intel",
+        "DNS",
+        "WHOIS"
+      ],
+      "inputs": [
+        {
+          "id": "domain",
+          "kind": "domain",
+          "paramName": "domain",
+          "default": "ickaoex.com",
+          "examples": [
+            "ickaoex.com",
+            "bodis.com",
+            "paypal.com"
+          ]
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (build-takedown-evidence-package)",
+        "anchorStepId": "verdict",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "indicator",
+        "type",
+        "available",
+        "cached",
+        "found",
+        "score",
+        "level",
+        "explanation",
+        "factors",
+        "sources",
+        "advisory"
+      ],
+      "prompt": "Assemble a one-pass takedown dossier for ickaoex.com: run run_workflow (build-takedown-evidence-package) for the explain() verdict, threat-feed listings, WHOIS owner, registration age, hosting/network, co-hosted siblings and registered look-alikes, and use explain_indicator to re-confirm the verdict a registrar will act on. Cite every claim with the step's bound Cypher and rowCount; treat coverage gaps as no-data != benign.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "discover-ai-agent-infrastructure",
+      "title": "AI / Agent Infrastructure Discovery",
+      "purpose": "Map an organisation's externally visible AI and agent endpoints from the outside.",
+      "why": "Maps externally visible AI/agent hosts (API, model, agent) from the outside via heuristic hostname patterns (api./mcp./ai./vector./llm./agent./chat./copilot.). Best-effort leads.",
+      "category": "Attack surface & recon / AI agents & MCP",
+      "docPath": "/docs/recipes/pentest-recon",
+      "tags": [
+        "workflow",
+        "profile",
+        "detect",
+        "DNS"
+      ],
+      "inputs": [
+        {
+          "id": "domain",
+          "kind": "domain",
+          "paramName": "value",
+          "default": "github.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (discover-ai-agent-infrastructure)",
+        "anchorStepId": "ai_subdomains",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "hostname",
+        "ips"
+      ],
+      "prompt": "Find github.com's externally-visible AI/agent infra: run run_workflow (discover-ai-agent-infrastructure). Matches are heuristic (hostname patterns like api./mcp./ai./vector.) - treat as leads to verify, not a confirmed inventory.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "indicator",
+      "title": "Threat Investigation",
+      "purpose": "Investigate one suspicious domain, IP, or network in depth and get a clear picture of the threat and everything connected to it.",
+      "why": "Deep-dive: works outward across the whole footprint (related domains, real origins behind CDN, neighbouring infra), threat-checks each node, never inherits maliciousness from shared infra; labelled posture, no score.",
+      "category": "SOC, DFIR & IR / Threat intelligence",
+      "docPath": "/docs/recipes/soc",
+      "tags": [
+        "workflow",
+        "enrich",
+        "profile",
+        "pivot",
+        "threat-intel",
+        "DNS",
+        "BGP",
+        "WHOIS",
+        "historical"
+      ],
+      "inputs": [
+        {
+          "id": "indicator",
+          "kind": "any",
+          "paramName": "indicator",
+          "default": "theblackservicenetwork.com",
+          "examples": [
+            "theblackservicenetwork.com",
+            "185.220.101.33",
+            "customclothing.in",
+            "bitcoin-embassy.org",
+            "AS60729",
+            "185.220.101.0/24"
+          ]
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (indicator)",
+        "anchorStepId": "assess",
+        "minSchema": 4,
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "host",
+        "label",
+        "band",
+        "sub_labels",
+        "coverage",
+        "evidence"
+      ],
+      "prompt": "Investigate theblackservicenetwork.com (no single verdict - relationship evidence, not attribution): run run_workflow (indicator). Self-throttled fan-out (no depth knob): hostname->resolved IPs & whole subdomain family, IP->co-tenant hosts & prefix, ASN->prefixes, prefix->IPs, threat-checking every node. De-CDNs to real origin, names operator from origin ASN. NEVER inherits maliciousness from shared CDN/anycast/cloud. Posture labelled (no score); no-data != safe. Cite every observation with the step's bound Cypher and rowCount.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "indicator-enrichment",
+      "title": "Indicator Enrichment",
+      "purpose": "Turn one domain or IP into a full context card - owner, hosting, mail, location, reputation at a glance.",
+      "why": "Fills the picture for one indicator: registrant (WHOIS), hosting + country, mail/name servers, network behind it, reputation read.",
+      "category": "DNS & email security / SOC, DFIR & IR",
+      "docPath": "/docs/recipes/dns-email",
+      "tags": [
+        "workflow",
+        "enrich",
+        "profile",
+        "WHOIS",
+        "DNS",
+        "email",
+        "threat-intel"
+      ],
+      "inputs": [
+        {
+          "id": "domain",
+          "kind": "any",
+          "paramName": "value",
+          "default": "google.com",
+          "examples": [
+            "google.com",
+            "cloudflare.com",
+            "185.220.101.33",
+            "AS13335",
+            "104.247.80.0/22"
+          ]
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (indicator-enrichment)",
+        "anchorStepId": "identity",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "attribute",
+        "value"
+      ],
+      "prompt": "Build a full Iris-style record card for google.com: its registrar, registrant org/email/phone (WHOIS), authoritative nameservers, mail servers, the IPs it resolves to and their prefix/ASN, its threat verdict and the feeds it is listed in, SPF includes, and any certificate-transparency observations. Run run_workflow (indicator-enrichment); surface the verdict score as an evidence line but treat this as an enrichment card, not a block decision. Cite every claim with the step's bound Cypher and rowCount; treat empty optional arms as no-data, not absence of risk.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "infrastructure-mapping",
+      "title": "Digital Infrastructure Mapping",
+      "purpose": "Trace one indicator to its true owner and full estate, even behind privacy screens and CDNs.",
+      "why": "Works out the true operator (even behind privacy WHOIS), de-cloaks CDN-fronted sites to real servers, pivots to the rest of that owner’s estate across every layer.",
+      "category": "Infrastructure, supply-chain & compliance / Network & BGP / Research & OSINT",
+      "docPath": "/docs/recipes/compliance",
+      "tags": [
+        "workflow",
+        "profile",
+        "audit",
+        "attribute",
+        "DNS",
+        "BGP",
+        "RPKI",
+        "physical",
+        "GeoIP",
+        "WHOIS",
+        "email"
+      ],
+      "inputs": [
+        {
+          "id": "target",
+          "kind": "any",
+          "paramName": "value",
+          "default": "cloudflare.com",
+          "examples": [
+            "github.com",
+            "8.8.8.8",
+            "AS15169",
+            "104.16.0.0/13"
+          ]
+        }
+      ],
+      "params": [
+        {
+          "name": "level",
+          "kind": "select",
+          "default": "standard",
+          "options": [
+            "quick",
+            "standard",
+            "deep",
+            "comprehensive",
+            "exhaustive"
+          ]
+        }
+      ],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (infrastructure-mapping)",
+        "anchorStepId": "operator",
+        "minSchema": 4,
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "graph",
+      "columns": [
+        "canonical_name",
+        "vendor_id",
+        "category",
+        "roles",
+        "host_class"
+      ],
+      "prompt": "Map the full digital infrastructure of cloudflare.com: infer its true operator (even behind privacy WHOIS), pivot to the rest of that owner's estate, then trace every layer - namespace, DNS/mail, routing, RPKI/BGP, physical facilities, cloud/vendors - and grade concentration. Run run_workflow (infrastructure-mapping), and use explain_indicator to score any layer's anchor. Cite every claim with the step's bound Cypher and rowCount; treat coverage gaps as no-data != benign.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "map-supply-chain-concentration",
+      "title": "Infrastructure Concentration & Resilience",
+      "purpose": "Grade an organisation for over-reliance on single providers, regions, or facilities.",
+      "why": "Grades how concentrated infra is - too much riding on one provider/region/data-centre/cable landing - surfacing SPOFs for resilience and DORA/NIS2 fourth-party risk.",
+      "category": "Infrastructure, supply-chain & compliance / Research & OSINT",
+      "docPath": "/docs/recipes/compliance",
+      "tags": [
+        "workflow",
+        "audit",
+        "profile",
+        "DNS",
+        "BGP",
+        "physical"
+      ],
+      "inputs": [
+        {
+          "id": "domain",
+          "kind": "domain",
+          "paramName": "domain",
+          "default": "atlassian.com",
+          "examples": [
+            "atlassian.com",
+            "shopify.com",
+            "cloudflare.com"
+          ]
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (map-supply-chain-concentration)",
+        "anchorStepId": "concentration",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "provider",
+        "asn",
+        "region",
+        "country"
+      ],
+      "prompt": "Measure atlassian.com's infrastructure concentration risk - how few distinct networks its whole subdomain footprint rests on (the DORA concentration read): run run_workflow (map-supply-chain-concentration), and use query to drill any single ASN the dependency concentrates on. Cite every claim with the step's bound Cypher and rowCount; treat coverage gaps as no-data != benign.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "nameserver-hijack-dns-consistency",
+      "title": "Nameserver & DNS Delegation Audit",
+      "purpose": "Check a domain's name servers for the misconfigurations that enable DNS hijacking.",
+      "why": "Audits delegation, flags stale/mismatched/lame nameservers, sizes each provider’s share, surfaces registry facts - catches delegation weakness before exploit.",
+      "category": "DNS & email security / SOC, DFIR & IR",
+      "docPath": "/docs/recipes/dns-email",
+      "tags": [
+        "workflow",
+        "audit",
+        "detect",
+        "DNS"
+      ],
+      "inputs": [
+        {
+          "id": "domain",
+          "kind": "domain",
+          "paramName": "value",
+          "default": "google.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (nameserver-hijack-dns-consistency)",
+        "anchorStepId": "nameservers",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "nameserver",
+        "ips",
+        "status"
+      ],
+      "prompt": "Check DNS delegation health for google.com: run run_workflow (nameserver-hijack-dns-consistency). A lame (non-resolving) nameserver or an unusually small NS set is a hijack/mismanagement signal.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "route-health",
+      "title": "Network & Routing Report",
+      "purpose": "Profile a network or address block into a full routing and reachability health card.",
+      "why": "Health card for a network/block: what it announces, peers/transit, single-upstream lean, RPKI protection - the one-look reach & resilience report.",
+      "category": "Network & BGP / Infrastructure, supply-chain & compliance",
+      "docPath": "/docs/recipes/bgp-routing",
+      "tags": [
+        "workflow",
+        "audit",
+        "monitor",
+        "BGP",
+        "RPKI",
+        "physical"
+      ],
+      "inputs": [
+        {
+          "id": "target",
+          "kind": "any",
+          "paramName": "target",
+          "default": "1.1.1.0/24"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (route-health)",
+        "anchorStepId": "prefix-status",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "prefix",
+        "multi_origin",
+        "anycast",
+        "withdrawn"
+      ],
+      "prompt": "Produce a BGP/RPKI health card for 1.1.1.0/24: run run_workflow (route-health) for MOAS conflicts, ROA coverage, RIR allocation, announced-prefix footprint and ASN reputation, and use explain_indicator on the prefix or ASN for a one-call routing-risk verdict. Cite every claim with the step's bound Cypher and rowCount; treat coverage gaps as no-data != benign.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "subdomain-takeover",
+      "title": "Subdomain Takeover Detection",
+      "purpose": "Find subdomains that point at abandoned services an attacker could claim.",
+      "why": "Walks subdomains and flags ones aiming at deprovisioned targets (dangling CNAME whose target no longer resolves) so you can reclaim/remove before someone else does. CNAME layer is prod-ahead.",
+      "category": "Attack surface & recon / SOC, DFIR & IR",
+      "docPath": "/docs/recipes/pentest-recon",
+      "tags": [
+        "workflow",
+        "detect",
+        "audit",
+        "DNS"
+      ],
+      "inputs": [
+        {
+          "id": "domain",
+          "kind": "domain",
+          "paramName": "value",
+          "default": "github.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (subdomain-takeover)",
+        "anchorStepId": "subdomains",
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "subdomain",
+        "ips"
+      ],
+      "prompt": "Detect takeover risk for github.com: run run_workflow (subdomain-takeover). A subdomain whose CNAME target no longer resolves is a takeover candidate - confirm with an active probe (Whisper is passive). The CNAME layer is prod-ahead.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "typosquat",
+      "title": "Typosquat & Brand-Impersonation Scanner",
+      "purpose": "Find registered look-alikes of your brand and check which ones are dangerous.",
+      "why": "Finds registered impersonations across misspellings/risky TLDs, separates your own defensive domains from strangers’, flags fresh/privacy/abuse-listed ones into a prioritised list.",
+      "category": "Brand protection / Threat intelligence",
+      "docPath": "/docs/recipes/brand-protection",
+      "tags": [
+        "workflow",
+        "detect",
+        "cluster",
+        "enrich",
+        "pivot",
+        "DNS",
+        "threat-intel",
+        "BGP",
+        "GeoIP",
+        "WHOIS",
+        "historical"
+      ],
+      "inputs": [
+        {
+          "id": "domain",
+          "kind": "domain",
+          "paramName": "domain",
+          "default": "paypal.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "flow",
+        "runVia": "run_workflow (typosquat)",
+        "anchorStepId": "registered",
+        "minSchema": 4,
+        "note": "Multi-step read flow: orchestrated by the console/agent run endpoint (run_workflow) or a future MCP engine over the same public graph endpoint; every step is a keyless READ (bounded by the 100/window keyless cap). Columns shown are from the anchor step's live probe."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "report",
+      "columns": [
+        "variant",
+        "method",
+        "confidence"
+      ],
+      "prompt": "Find every registered look-alike of paypal.com, separate your own defensive domains from third-party squats, and flag the malicious ones: run run_workflow (typosquat) to score each variant, source its feeds, hosting and registration age, and use explain_indicator to confirm any hot variant before takedown. Cite every claim with the step's bound Cypher and rowCount; treat coverage gaps as no-data != benign.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "identify",
+      "title": "Vendor / Operator Identity (whisper.identify)",
+      "purpose": "Name the vendor and operator role behind a host or IP in one call.",
+      "why": "Resolves a host/IP to its canonical vendor, category and operator roles (DNS_OPERATOR / CDN / ORIGIN_AS / MAIL_RECEIVER) with a confidence band.",
+      "category": "Infrastructure, supply-chain & compliance / Research & OSINT",
+      "docPath": "/docs/whisper-graph/procedures/identify",
+      "tags": [
+        "direct",
+        "enrich",
+        "attribute",
+        "DNS",
+        "BGP"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "any",
+          "paramName": "v",
+          "default": "api.openai.com",
+          "examples": [
+            "cloudflare.com",
+            "api.openai.com",
+            "8.8.8.8"
+          ]
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.identify([$v]) YIELD host, vendor_id, canonical_name, category, roles, host_class, band",
+        "params": {
+          "v": "api.openai.com"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "host",
+        "vendor_id",
+        "canonical_name",
+        "category",
+        "roles",
+        "host_class",
+        "band"
+      ],
+      "prompt": "Identify the vendor and operator roles behind api.openai.com. CALL whisper.identify([$v]) with v the host. Report canonical_name, category, roles and the confidence band; band:DERIVED means inferred from structure, not asserted.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "assess",
+      "title": "Threat Posture (whisper.assess)",
+      "purpose": "Get a labelled threat posture for a host or IP - malicious, benign, or unknown.",
+      "why": "Returns a posture label + severity band + sub-labels + coverage + evidence for an indicator; benign-allowlisted vs malicious-evidenced, never a bare score.",
+      "category": "SOC, DFIR & IR / Threat intelligence",
+      "docPath": "/docs/whisper-graph/procedures",
+      "tags": [
+        "direct",
+        "enrich",
+        "threat-intel"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "any",
+          "paramName": "v",
+          "default": "8.8.8.8",
+          "examples": [
+            "8.8.8.8",
+            "theblackservicenetwork.com",
+            "185.220.101.33"
+          ]
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.assess([$v]) YIELD host, label, band, sub_labels, coverage, evidence",
+        "params": {
+          "v": "8.8.8.8"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "host",
+        "label",
+        "band",
+        "sub_labels",
+        "coverage",
+        "evidence"
+      ],
+      "prompt": "Assess the threat posture of 8.8.8.8. CALL whisper.assess([$v]). Read the label + band + coverage together; coverage:known-clean/benign-allowlisted is a vouch, malicious-evidenced/CRITICAL is a listing. no-data != safe.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "variants",
+      "title": "Typosquat Variant Generator (whisper.variants)",
+      "purpose": "Generate look-alike domain variants of a brand and see which are registered.",
+      "why": "Enumerates permutations (omission, bitsquatting, ...) of a domain, flags which exist, with a per-variant confidence.",
+      "category": "Brand protection / Threat intelligence",
+      "docPath": "/docs/whisper-graph/procedures/variants",
+      "tags": [
+        "direct",
+        "detect",
+        "cluster"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "domain",
+          "paramName": "v",
+          "default": "paypal.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.variants($v) YIELD variant, method, exists, confidence",
+        "params": {
+          "v": "paypal.com"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "variant",
+        "method",
+        "exists",
+        "confidence"
+      ],
+      "prompt": "Enumerate look-alike variants of paypal.com. CALL whisper.variants($v) (scalar string arg). exists:true means it is registered - triage those first by confidence and method.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "walk",
+      "title": "Vendor Attribution Walk (whisper.walk)",
+      "purpose": "Walk the graph to the nearest known vendors behind a host, with the channel and confidence.",
+      "why": "Structural attribution: returns nearest_known_vendors with the channel (DELEGATED_TO / ORIGIN_AS) and confidence, plus siblings and coverage - explains WHY a host maps to a vendor.",
+      "category": "Infrastructure, supply-chain & compliance / Research & OSINT",
+      "docPath": "/docs/whisper-graph/procedures",
+      "tags": [
+        "direct",
+        "attribute",
+        "pivot",
+        "DNS",
+        "BGP"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "any",
+          "paramName": "v",
+          "default": "cloudflare.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.walk($v) YIELD coverage, host, nearest_known_vendors, no_atlas_match, siblings",
+        "params": {
+          "v": "cloudflare.com"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "coverage",
+        "host",
+        "nearest_known_vendors",
+        "no_atlas_match",
+        "siblings"
+      ],
+      "prompt": "Attribute cloudflare.com structurally. CALL whisper.walk($v). nearest_known_vendors carries the channel (DELEGATED_TO/ORIGIN_AS), via_ip and confidence for each candidate; is_canonical marks the authoritative one.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "explain",
+      "title": "Threat-Feed Explainer (whisper.explain / explain)",
+      "purpose": "Score an indicator against the threat feeds and explain exactly why.",
+      "why": "Threat-intel scorer: score + level + human explanation + the feeds it is listed in (feedId, weight, firstSeen/lastSeen). Two live forms: bare CALL explain($v) (full columns) and CALL whisper.explain($v) (restricted YIELD).",
+      "category": "SOC, DFIR & IR / Threat intelligence",
+      "docPath": "/docs/whisper-graph/procedures/explain",
+      "tags": [
+        "direct",
+        "enrich",
+        "threat-intel"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "any",
+          "paramName": "v",
+          "default": "paypal.com",
+          "examples": [
+            "paypal.com",
+            "ickaoex.com",
+            "github.com"
+          ]
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.explain($v) YIELD indicator, score, level, explanation, sources",
+        "params": {
+          "v": "paypal.com"
+        },
+        "altForm": "CALL explain($v) is the same engine, bare form (no whisper. prefix, no YIELD); it returns the fuller column set: indicator, type, available, cached, found, score, level, explanation, factors, sources, advisory."
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "indicator",
+        "score",
+        "level",
+        "explanation",
+        "sources"
+      ],
+      "prompt": "Explain the threat verdict for paypal.com. CALL whisper.explain($v) for indicator/score/level/explanation/sources, or bare CALL explain($v) for the full card (adds type/found/factors/advisory). level:NONE = not listed; the sources[] name each feed.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "psl-tldplusone",
+      "title": "Registrable Apex (whisper.psl.tldPlusOne)",
+      "purpose": "Reduce any hostname to its registrable apex (eTLD+1) via the Public Suffix List.",
+      "why": "PSL-correct eTLD+1: www.foo.co.uk -> foo.co.uk. The right way to group hosts by the thing someone actually registered.",
+      "category": "DNS & email security / Research & OSINT",
+      "docPath": "/docs/whisper-graph/procedures/helpers",
+      "tags": [
+        "direct",
+        "profile",
+        "DNS"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "hostname",
+          "paramName": "v",
+          "default": "www.foo.co.uk"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.psl.tldPlusOne($v) YIELD apex",
+        "params": {
+          "v": "www.foo.co.uk"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "apex"
+      ],
+      "prompt": "Reduce www.foo.co.uk to its registrable apex. CALL whisper.psl.tldPlusOne($v) -> apex (eTLD+1) using the Public Suffix List.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "psl-affiliation",
+      "title": "PSL Private-Suffix Affiliation (whisper.psl.affiliation)",
+      "purpose": "Check whether a domain is a PSL private-section suffix and who submitted it.",
+      "why": "For a PSL private-section suffix, returns the submitting org/login and evidence kind + confidence; found=false for ordinary registrable domains.",
+      "category": "DNS & email security / Research & OSINT",
+      "docPath": "/docs/whisper-graph/procedures/helpers",
+      "tags": [
+        "direct",
+        "attribute",
+        "DNS"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "domain",
+          "paramName": "v",
+          "default": "paypal.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.psl.affiliation($v) YIELD found, suffix, submitterOrg, submitterLogin, evidenceKind, confidence",
+        "params": {
+          "v": "paypal.com"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "found",
+        "suffix",
+        "submitterOrg",
+        "submitterLogin",
+        "evidenceKind",
+        "confidence"
+      ],
+      "prompt": "Check whether paypal.com is a PSL private-section suffix. CALL whisper.psl.affiliation($v). found=false means it is an ordinary registrable domain (org/login/evidence null); found=true surfaces the submitter.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "origins",
+      "title": "CDN-Origin De-cloaker (whisper.origins)",
+      "purpose": "Find the real origin IPs behind a CDN-fronted domain, ranked by confidence.",
+      "why": "Candidate origin IPs behind a CDN with confidence, the methods that found them (e.g. links_to), and the hosting ASN/name - de-cloaks to the real server.",
+      "category": "Attack surface & recon / Infrastructure, supply-chain & compliance",
+      "docPath": "/docs/whisper-graph/procedures/origins",
+      "tags": [
+        "direct",
+        "pivot",
+        "detect",
+        "DNS",
+        "BGP"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "domain",
+          "paramName": "v",
+          "default": "cloudflare.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.origins($v) YIELD ip, confidence, methods, asn, asnName, kind",
+        "params": {
+          "v": "cloudflare.com"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "ip",
+        "confidence",
+        "methods",
+        "asn",
+        "asnName",
+        "kind"
+      ],
+      "prompt": "De-cloak the real origins behind cloudflare.com. CALL whisper.origins($v) -> candidate origin IPs with confidence, the methods that found each, and the hosting ASN/name. Higher confidence = stronger origin evidence.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "history",
+      "title": "WHOIS History Timeline (whisper.history)",
+      "purpose": "Get the full historical WHOIS timeline for a domain.",
+      "why": "Every observed WHOIS snapshot over time: create/update/expiry, registrar, registrant, country, nameservers - the ownership/registration story.",
+      "category": "Research & OSINT / SOC, DFIR & IR",
+      "docPath": "/docs/whisper-graph/procedures/history",
+      "tags": [
+        "direct",
+        "enrich",
+        "historical",
+        "WHOIS"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "domain",
+          "paramName": "v",
+          "default": "paypal.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.history($v)",
+        "params": {
+          "v": "paypal.com"
+        },
+        "altForm": "CALL whisper.history.whois($v) YIELD queryTime, createDate, updateDate, expiryDate, registrar, registrant, country, nameServers gives the same timeline with a WHOIS-only projection (drops indicator/type/cached)."
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "indicator",
+        "type",
+        "queryTime",
+        "createDate",
+        "updateDate",
+        "expiryDate",
+        "registrar",
+        "registrant",
+        "country",
+        "nameServers",
+        "cached"
+      ],
+      "prompt": "Pull the WHOIS history timeline for paypal.com. CALL whisper.history($v) (auto-yields all columns). Each row is a snapshot at queryTime; watch registrar/registrant/nameServers changes for churn. Use whisper.history.whois($v) for the WHOIS-only projection.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "history-whois",
+      "title": "WHOIS History (projection) (whisper.history.whois)",
+      "purpose": "Get the WHOIS-only historical timeline for a domain.",
+      "why": "The registration-record projection of the history timeline: create/update/expiry, registrar, registrant, country, nameservers per snapshot.",
+      "category": "Research & OSINT / SOC, DFIR & IR",
+      "docPath": "/docs/whisper-graph/procedures/history",
+      "tags": [
+        "direct",
+        "enrich",
+        "historical",
+        "WHOIS"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "domain",
+          "paramName": "v",
+          "default": "paypal.com"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.history.whois($v) YIELD queryTime, createDate, updateDate, expiryDate, registrar, registrant, country, nameServers",
+        "params": {
+          "v": "paypal.com"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "queryTime",
+        "createDate",
+        "updateDate",
+        "expiryDate",
+        "registrar",
+        "registrant",
+        "country",
+        "nameServers"
+      ],
+      "prompt": "Pull the WHOIS-only history for paypal.com. CALL whisper.history.whois($v). Each row is a registration snapshot at queryTime; compare across rows for registrar/registrant/NS changes.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "asset",
+      "title": "AS-SET Membership (whisper.asSet)",
+      "purpose": "List the member ASNs of an AS-SET macro.",
+      "why": "Expands an AS-SET name (e.g. AS-CLOUDFLARE) to its member ASNs and source RIR. Arg is a STRING as-set name, not an integer ASN. (Membership is sparsely populated in the current graph.)",
+      "category": "Network & BGP",
+      "docPath": "/docs/whisper-graph/procedures",
+      "tags": [
+        "direct",
+        "profile",
+        "BGP"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "any",
+          "paramName": "v",
+          "default": "AS-CLOUDFLARE"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.asSet($v) YIELD asSetName, memberAsn, sourceRir",
+        "params": {
+          "v": "AS-CLOUDFLARE"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "asSetName",
+        "memberAsn",
+        "sourceRir"
+      ],
+      "prompt": "Expand the AS-SET AS-CLOUDFLARE. CALL whisper.asSet($v) with v a STRING as-set name (NOT an integer ASN). 0 rows means the macro's membership is not yet populated in the graph, not that it is empty.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "lookup-tor-relay",
+      "title": "Tor Exit-Relay Lookup (whisper.lookupTorRelay)",
+      "purpose": "Check whether an IP is a known Tor exit relay.",
+      "why": "Live Tor exit-node check: found + fingerprint + exit-address count + source + ingest time for an IPv4.",
+      "category": "SOC, DFIR & IR / Threat intelligence",
+      "docPath": "/docs/whisper-graph/procedures/helpers",
+      "tags": [
+        "direct",
+        "enrich",
+        "threat-intel"
+      ],
+      "inputs": [
+        {
+          "id": "value",
+          "kind": "ipv4",
+          "paramName": "v",
+          "default": "185.220.101.33"
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.lookupTorRelay($v) YIELD indicator, found, fingerprint, exitAddressCount, source, ingestedAt",
+        "params": {
+          "v": "185.220.101.33"
+        }
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "indicator",
+        "found",
+        "fingerprint",
+        "exitAddressCount",
+        "source",
+        "ingestedAt"
+      ],
+      "prompt": "Check whether 185.220.101.33 is a Tor exit relay. CALL whisper.lookupTorRelay($v). found=true returns the relay fingerprint and exit-address count from tor-onionoo.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "db-schema",
+      "title": "Graph Schema Catalog (db.schema)",
+      "purpose": "List every node and relationship type in the graph with counts and examples.",
+      "why": "The self-describing schema: node/relationship types with counts, descriptions, examples, source/target labels and query best-practices - the map of what the graph holds.",
+      "category": "Research & OSINT / Infrastructure, supply-chain & compliance",
+      "docPath": "/docs/whisper-graph/schema",
+      "tags": [
+        "direct",
+        "profile",
+        "schema"
+      ],
+      "inputs": [],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL db.schema()",
+        "params": {}
+      },
+      "access": "keyed",
+      "playgroundTryable": true,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "type",
+        "name",
+        "count",
+        "description",
+        "example",
+        "sourceLabels",
+        "targetLabels",
+        "fastPatterns",
+        "slowPatterns",
+        "bestPractices"
+      ],
+      "prompt": "List the graph schema. CALL db.schema() (no args). Returns node + relationship types with live counts (HOSTNAME ~2.63B, IPV4 ~619M, ...), descriptions, examples and per-type query best-practices.",
+      "provenance": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "submit",
+      "title": "Submit Observation / Feedback (whisper.submit)",
+      "purpose": "Contribute an indicator observation or feedback back into the graph (requires an API key).",
+      "why": "The write channel: submit an indicator/feedback with an attributable API key (anonymous submits are refused to preserve K-anonymity). Keyed-only by design.",
+      "category": "Threat intelligence / SOC, DFIR & IR",
+      "docPath": "/docs/cypher-api",
+      "tags": [
+        "direct",
+        "write",
+        "submit",
+        "threat-intel"
+      ],
+      "inputs": [
+        {
+          "id": "kind",
+          "kind": "select",
+          "paramName": "kind",
+          "default": "indicator",
+          "options": [
+            "indicator",
+            "feedback"
+          ]
+        },
+        {
+          "id": "identifierKind",
+          "kind": "select",
+          "paramName": "identifier_kind",
+          "default": "ip",
+          "options": [
+            "ip",
+            "asn",
+            "cert_sha256",
+            "cert_ja3_hash",
+            "cert_ja4_hash",
+            "cert_jarm",
+            "cidr",
+            "whois_pattern",
+            "host_hash_rotating",
+            "url_path_hash"
+          ]
+        },
+        {
+          "id": "value",
+          "kind": "any",
+          "paramName": "value",
+          "default": "203.0.113.5",
+          "examples": [
+            "203.0.113.5",
+            "AS64496",
+            "198.51.100.0/24"
+          ]
+        },
+        {
+          "id": "observationId",
+          "kind": "string",
+          "paramName": "observation_id",
+          "optional": true
+        },
+        {
+          "id": "confidence",
+          "kind": "number",
+          "paramName": "confidence",
+          "optional": true
+        },
+        {
+          "id": "firstSeen",
+          "kind": "string",
+          "paramName": "first_seen",
+          "optional": true
+        },
+        {
+          "id": "provenance",
+          "kind": "string",
+          "paramName": "provenance",
+          "optional": true
+        },
+        {
+          "id": "query",
+          "kind": "string",
+          "paramName": "query",
+          "optional": true
+        },
+        {
+          "id": "results",
+          "kind": "any",
+          "paramName": "results",
+          "optional": true
+        },
+        {
+          "id": "comment",
+          "kind": "string",
+          "paramName": "comment",
+          "optional": true
+        },
+        {
+          "id": "severity",
+          "kind": "string",
+          "paramName": "severity",
+          "optional": true
+        },
+        {
+          "id": "v",
+          "kind": "number",
+          "paramName": "v",
+          "optional": true
+        }
+      ],
+      "params": [],
+      "exec": {
+        "mode": "direct",
+        "cypher": "CALL whisper.submit({kind:$kind, identifier_kind:$identifier_kind, value:$value})",
+        "params": {
+          "kind": "indicator",
+          "identifier_kind": "ip",
+          "value": "203.0.113.5"
+        },
+        "altForm": "kind:'feedback' takes {observation_id?, query?, results?, comment?, severity?, v?} - all optional, a comment-only report is accepted - and returns the 4-column receipt: observation_id, accepted, advisory, v. Batch: UNWIND $records AS rec CALL whisper.submit(rec) dispatches one call per record, each row in its kind's shape.",
+        "note": "WRITE channel; needs an API key carrying the submit:write scope (anonymous callers get a clear 400: a write channel requires an attributable API key, preserving K-anonymity). Per-kind CLOSED arg schema, live-verified: kind:'indicator' allows {kind, identifier_kind, value, observation_id?, confidence?, first_seen?, provenance?, v?} and requires identifier_kind + value; kind:'feedback' allows {kind, observation_id?, query?, results?, comment?, severity?, v?}. identifier_kind is one of ip, asn, cert_sha256, cert_ja3_hash, cert_ja4_hash, cert_jarm, cidr, whois_pattern (plaintext, normalized server-side) or host_hash_rotating, url_path_hash (submitter-side pre-hashed 64-char SHA-256 hex; a plaintext host/URL is rejected, never auto-hashed). results is a list of strings. An unknown key or kind is rejected with a clear 400 naming the allowed set."
+      },
+      "access": "keyed",
+      "playgroundTryable": false,
+      "minTier": "free",
+      "resultShape": "table",
+      "columns": [
+        "observation_id",
+        "kind",
+        "accepted",
+        "idempotent",
+        "promotion_state",
+        "k_bucket",
+        "advisory",
+        "v"
+      ],
+      "prompt": "Submit an observation to the graph. CALL whisper.submit({kind:'indicator', identifier_kind:'ip', value:$v}) with a key carrying submit:write (writes are keyed; anonymous gets a clear 400). identifier_kind: ip / asn / cert_sha256 / cert_ja3_hash / cert_ja4_hash / cert_jarm / cidr / whois_pattern in plaintext, or host_hash_rotating / url_path_hash pre-hashed (64-char SHA-256 hex). kind:'feedback' files a free-form report ({query?, results?, comment?, severity?}). The indicator ack returns observation_id, accepted, idempotent, promotion_state and a bucketed k_bucket (below / promoted), never a raw count.",
+      "provenance": true,
+      "version": "1.0.0"
+    }
+  ]
+}

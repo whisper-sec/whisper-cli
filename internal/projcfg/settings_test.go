@@ -60,7 +60,7 @@ func TestMerge_CreatesEnvAndHookFromScratch(t *testing.T) {
 	}
 }
 
-// TestMerge_PreservesExistingKeys: every non-Whisper key the user set survives the merge —
+// TestMerge_PreservesExistingKeys: every non-Whisper key the user set survives the merge -
 // other env vars, permissions, model, and OTHER SessionStart hooks.
 func TestMerge_PreservesExistingKeys(t *testing.T) {
 	p := PathsFor(t.TempDir())
@@ -125,7 +125,7 @@ func TestMerge_PreservesExistingKeys(t *testing.T) {
 }
 
 // TestMerge_ReinitUpdatesNotDuplicates: running the merge twice (e.g. a re-init on a new port)
-// updates the managed env + hook IN PLACE — it never duplicates the env keys or the hook.
+// updates the managed env + hook IN PLACE - it never duplicates the env keys or the hook.
 func TestMerge_ReinitUpdatesNotDuplicates(t *testing.T) {
 	p := PathsFor(t.TempDir())
 	if _, err := MergeClaudeSettings(p, 28080, ".whisper/config"); err != nil {
@@ -136,7 +136,7 @@ func TestMerge_ReinitUpdatesNotDuplicates(t *testing.T) {
 	}
 
 	m := readSettings(t, p)
-	// Env updated to the new port (not duplicated — a map can't duplicate a key, but assert the
+	// Env updated to the new port (not duplicated - a map can't duplicate a key, but assert the
 	// VALUE is the latest).
 	env := m["env"].(map[string]any)
 	if env["HTTP_PROXY"] != "http://127.0.0.1:29090" {
@@ -161,7 +161,7 @@ func TestMerge_ReinitUpdatesNotDuplicates(t *testing.T) {
 }
 
 // TestMerge_ConflictingProxyWarns: a pre-existing managed proxy var with a DIFFERENT value is
-// reported as a conflict (the caller warns) — and still overridden (a stale/hostile value
+// reported as a conflict (the caller warns) - and still overridden (a stale/hostile value
 // must never win).
 func TestMerge_ConflictingProxyWarns(t *testing.T) {
 	p := PathsFor(t.TempDir())

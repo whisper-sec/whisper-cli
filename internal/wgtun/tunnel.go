@@ -2,11 +2,11 @@
 // Copyright (c) 2026 viaGraph B.V. (Whisper Security)
 
 // Package wgtun is the client-side Tier-1 WireGuard egress for the `whisper` CLI
-// : a USERSPACE WireGuard tunnel (wireguard-go + gVisor netstack — no root,
+// : a USERSPACE WireGuard tunnel (wireguard-go + gVisor netstack - no root,
 // no kernel wg, no /dev/net/tun) bound to the agent's /128, fronted by the SAME local
 // SOCKS5/HTTP-CONNECT proxy the Tier-1.5 egress uses. The user's tools point ALL_PROXY /
 // http_proxy at socks5h://127.0.0.1:<port> and every connection egresses from the agent's
-// routable Whisper /128 over the encrypted tunnel — reverse-DNS of that /128 is identity.
+// routable Whisper /128 over the encrypted tunnel - reverse-DNS of that /128 is identity.
 //
 //	user's tool ──socks5/http──▶ 127.0.0.1:<freeport>  (egress.Proxy front-end, NO auth)
 //	                                     │  tnet.DialContext (gVisor netstack)
@@ -21,12 +21,12 @@
 // because the box registered our public key as a peer with that /128 as its sole AllowedIPs
 // (server-side); cryptokey routing confines us to exactly our own identity.
 //
-// ROBUSTNESS (mirrors the server reaper philosophy — a stale tunnel is frustrating):
+// ROBUSTNESS (mirrors the server reaper philosophy - a stale tunnel is frustrating):
 //   - PersistentKeepalive 25s keeps the NAT/UDP path warm (set in the device config).
 //   - a health monitor polls the device's last-handshake; a tunnel that has had NO handshake
 //     past a dead-threshold is reconnected (the peer endpoint is re-set, forcing a fresh
 //     handshake) with capped exponential backoff. The local SOCKS5 endpoint NEVER changes
-//     across a reconnect — tools keep the same proxy string, the tunnel heals underneath.
+//     across a reconnect - tools keep the same proxy string, the tunnel heals underneath.
 //   - clean teardown: Stop() closes the front-end, stops the monitor, and closes the device.
 //
 // KEY HYGIENE: the private key lives ONLY in this process's memory (the device's IpcSet and
@@ -58,10 +58,10 @@ type Config struct {
 	PrivateKeyHex      string     // our client private key, hex (in-memory only; never logged)
 	ServerPublicKeyHex string     // the box's wg-agents public key, hex
 	Endpoint           string     // the box UDP endpoint, host:port (e.g. <box>:51826)
-	Address            netip.Addr // the agent's /128 — the tunnel's only source address
+	Address            netip.Addr // the agent's /128 - the tunnel's only source address
 	DNS                netip.Addr // the resolver to use inside the tunnel (DNS64/NAT64)
 	Keepalive          int        // PersistentKeepalive seconds (server default 25)
-	// MTU for the netstack interface. 0 ⇒ a safe default (1280, the IPv6 minimum — robust
+	// MTU for the netstack interface. 0 ⇒ a safe default (1280, the IPv6 minimum - robust
 	// across every underlay without PMTUD surprises). Conservative-emit (Postel).
 	MTU int
 }
@@ -73,10 +73,10 @@ type Options struct {
 	// HealthInterval is how often the monitor polls the device's handshake. 0 ⇒ 5s.
 	HealthInterval time.Duration
 	// DeadAfter is how long with NO fresh handshake before the monitor forces a reconnect.
-	// 0 ⇒ 180s (~7× the 25s keepalive — the server reaper's own black-hole threshold).
+	// 0 ⇒ 180s (~7× the 25s keepalive - the server reaper's own black-hole threshold).
 	DeadAfter time.Duration
 	// Logf, if set, receives one-line operational notes (reconnects). nil ⇒ silent. It must
-	// NEVER be handed a secret — callers pass a plain stderr writer; we only emit safe text.
+	// NEVER be handed a secret - callers pass a plain stderr writer; we only emit safe text.
 	Logf func(format string, args ...any)
 	// Port pins the LOCAL loopback port the tunnel's front-end proxy listens on. 0 ⇒ a free
 	// port (the default). `whisper init --tier wireguard` sets the project's DETERMINISTIC
@@ -113,7 +113,7 @@ type Tunnel struct {
 
 // Endpoint is the load-bearing connection string: socks5h://127.0.0.1:<port> (bearer-free,
 // key-free). socks5h ⇒ the client hands us the hostname and the tunnel's netstack resolver
-// (the box's DNS64/NAT64) resolves it sourced from the /128 — never the local box.
+// (the box's DNS64/NAT64) resolves it sourced from the /128 - never the local box.
 func (t *Tunnel) Endpoint() string { return t.proxy.Endpoint() }
 
 // Addr is the bare 127.0.0.1:<port> the local proxy listens on.
@@ -140,11 +140,11 @@ func (t *Tunnel) Stop() {
 }
 
 // ServeTLS starts a TLS listener bound to the tunnel's OWN /128 (t.cfg.Address) on port, serving cert
-// on every accepted connection — the agent-held identity leaf, so a DANE-EE verifier (`whisper
+// on every accepted connection - the agent-held identity leaf, so a DANE-EE verifier (`whisper
 // verify --trustless`) dialing [/128]:port sees the leaf THIS TUNNEL serves, proving the tunnel (not
 // a shared/wildcard listener) terminates the port. Runs for the tunnel's lifetime; Stop() closes
 // it alongside everything else. A bind failure is returned to the caller (best-effort: the tunnel
-// itself is unaffected either way — this is additive proof surface, not the egress data path).
+// itself is unaffected either way - this is additive proof surface, not the egress data path).
 func (t *Tunnel) ServeTLS(cert tls.Certificate, port int) error {
 	ln, err := t.tnet.ListenTCP(&net.TCPAddr{IP: net.IP(t.cfg.Address.AsSlice()), Port: port})
 	if err != nil {
@@ -175,7 +175,7 @@ func (t *Tunnel) ServeTLS(cert tls.Certificate, port int) error {
 
 // Healthy reports whether the tunnel has completed a handshake recently (within DeadAfter).
 // A tunnel that has never handshaked, or whose last handshake is older than the dead
-// threshold, is unhealthy — the monitor is (or will be) reconnecting it. Used by status.
+// threshold, is unhealthy - the monitor is (or will be) reconnecting it. Used by status.
 func (t *Tunnel) Healthy() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()

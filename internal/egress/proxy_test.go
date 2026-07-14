@@ -55,7 +55,7 @@ func socks5Dial(proxyAddr, target string) (net.Conn, error) {
 		c.Close()
 		return nil, err
 	}
-	// Reply: VER REP RSV ATYP BND.ADDR BND.PORT — we expect REP=0 and ATYP=IPv4 (the
+	// Reply: VER REP RSV ATYP BND.ADDR BND.PORT - we expect REP=0 and ATYP=IPv4 (the
 	// gotcha #2: a concrete 0.0.0.0:0 bind, NOT a DOMAIN echo, so a client never hangs).
 	head := make([]byte, 4)
 	if _, err := io.ReadFull(c, head); err != nil {
@@ -159,7 +159,7 @@ func (f *fakeEgress) handle(c net.Conn) {
 	defer up.Close()
 	_, _ = io.WriteString(c, "HTTP/1.1 200 Connection Established\r\n\r\n")
 	// Splice WITH half-close semantics (a correct CONNECT proxy propagates each side's FIN
-	// independently and only fully closes once BOTH halves are done) — so this fake faithfully
+	// independently and only fully closes once BOTH halves are done) - so this fake faithfully
 	// carries the half-closed keep-alive shape the regression test depends on.
 	halfCloser := func(w net.Conn) {
 		if cw, ok := w.(interface{ CloseWrite() error }); ok {
@@ -194,7 +194,7 @@ func echoBackend(t *testing.T) string {
 }
 
 // idleBackend accepts + holds the connection open, reading-and-discarding but NEVER
-// writing — the keep-alive / idle-upstream shape that hung Stop() before the splice
+// writing - the keep-alive / idle-upstream shape that hung Stop() before the splice
 // close-both fix (an egress→client io.Copy parked reading a peer that never sends EOF).
 func idleBackend(t *testing.T) string {
 	t.Helper()
@@ -217,7 +217,7 @@ func idleBackend(t *testing.T) string {
 
 // TestProxy_StopDrainsWithIdleTunnel: with a tunnel established to an IDLE upstream (the
 // egress→client copy parked reading a peer that never sends), Stop() must STILL return
-// promptly — not park on wg.Wait() forever. Guards the live regression where `whisper ip`
+// promptly - not park on wg.Wait() forever. Guards the live regression where `whisper ip`
 // and `whisper run` hung (exit 124) instead of exiting 0 after their work, because the
 // splice didn't force both ends shut when one direction ended.
 func TestProxy_StopDrainsWithIdleTunnel(t *testing.T) {
@@ -235,16 +235,16 @@ func TestProxy_StopDrainsWithIdleTunnel(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("Stop() hung with an idle tunnel open — the splice close-both regression is back")
+		t.Fatal("Stop() hung with an idle tunnel open - the splice close-both regression is back")
 	}
 }
 
 // halfWriteBackend models the ERR_SOCKET_CLOSED shape: on the accepted tunnel it
 // reads the first request, writes ONE response, then CloseWrite()s its OWN write half
-// (sends a FIN — an HTTP/1.1 origin that answered and ended that response) while KEEPING
+// (sends a FIN - an HTTP/1.1 origin that answered and ended that response) while KEEPING
 // its READ half open, exactly as a keep-alive origin awaiting the client's next request.
 // Any further bytes the client sends after the FIN are delivered on the `got` channel, so
-// the test can prove the client→egress→target (WRITE) half SURVIVED the target's FIN —
+// the test can prove the client→egress→target (WRITE) half SURVIVED the target's FIN -
 // i.e. the proxy did NOT force the whole tunnel shut (which is the ERR_SOCKET_CLOSED bug).
 func halfWriteBackend(t *testing.T, firstResp string, got chan<- string) string {
 	t.Helper()
@@ -379,11 +379,11 @@ func TestProxy_HTTPConnectTunnels(t *testing.T) {
 // as an HTTP CONNECT (Node/undici). The target answers ONE response and FINs its write
 // half (a Connection: close origin, or one keep-alive cycle), which makes the egress→client
 // io.Copy reach EOF. The OLD splice slammed BOTH ends shut on that first EOF, RSTing the
-// tunnel out from under a request undici still meant to finish/reuse — surfacing as
+// tunnel out from under a request undici still meant to finish/reuse - surfacing as
 // ERR_SOCKET_CLOSED. The fix: on a natural one-way EOF we only HALF-close (propagate the
 // FIN); the client→target direction stays open. This test drives exactly that shape and
 // asserts a follow-up the client sends after the FIN still reaches the target and echoes
-// back — i.e. the tunnel was NOT force-closed.
+// back - i.e. the tunnel was NOT force-closed.
 func TestProxy_HalfClosedTunnelSurvives(t *testing.T) {
 	got := make(chan string, 1)
 	backend := halfWriteBackend(t, "RESP1", got)
@@ -426,7 +426,7 @@ func TestProxy_HalfClosedTunnelSurvives(t *testing.T) {
 
 	// A follow-up the client sends AFTER the target's FIN must still REACH the target. If the
 	// proxy force-closed the whole tunnel on that FIN (the old behaviour), this write is RST
-	// and the target never sees it — the ERR_SOCKET_CLOSED the preflight saw. With the
+	// and the target never sees it - the ERR_SOCKET_CLOSED the preflight saw. With the
 	// half-close fix the client→egress→target half is still open and the target receives it.
 	const followup = "SECOND-REQUEST"
 	_ = raw.SetWriteDeadline(time.Now().Add(5 * time.Second))
@@ -444,7 +444,7 @@ func TestProxy_HalfClosedTunnelSurvives(t *testing.T) {
 }
 
 // TestProxy_RejectedBearerSurfacesCleanFailure: when the egress rejects the bearer (407),
-// the local dial fails — and no panic, no leak.
+// the local dial fails - and no panic, no leak.
 func TestProxy_RejectedBearerSurfacesCleanFailure(t *testing.T) {
 	backend := echoBackend(t)
 	fe := newFakeEgress(t, backend, func(string) bool { return true }) // reject all
@@ -510,7 +510,7 @@ func TestProxy_EndpointShapeAndStop(t *testing.T) {
 		t.Fatalf("addr = %q, want 127.0.0.1:<port>", p.Addr())
 	}
 	p.Stop()
-	p.Stop() // idempotent — must not panic
+	p.Stop() // idempotent - must not panic
 	// After Stop the listener is closed: a dial is refused.
 	if c, err := net.DialTimeout("tcp", p.Addr(), 200*time.Millisecond); err == nil {
 		c.Close()
@@ -520,11 +520,11 @@ func TestProxy_EndpointShapeAndStop(t *testing.T) {
 
 // TestProxy_SurvivesControlCtxCancel is THE lifetime regression guard: the local
 // proxy MUST NOT die when the short-lived control-plane ctx (the one used for op:connect +
-// verify) is cancelled. We start the proxy on a control ctx, CANCEL that ctx, and then —
-// AFTER the cancel — assert the proxy still ACCEPTS a new local client AND streams bytes
+// verify) is cancelled. We start the proxy on a control ctx, CANCEL that ctx, and then -
+// AFTER the cancel - assert the proxy still ACCEPTS a new local client AND streams bytes
 // end-to-end through the egress. Only Stop() ends it. (Before the fix, the proxy bound a
 // `<-ctx.Done(); Stop()` goroutine to this ctx, so cancel killed it and every persistent
-// path — whisper run / connect / the guided hold — got a DEAD proxy.)
+// path - whisper run / connect / the guided hold - got a DEAD proxy.)
 func TestProxy_SurvivesControlCtxCancel(t *testing.T) {
 	backend := echoBackend(t)
 	fe := newFakeEgress(t, backend, nil)
@@ -544,7 +544,7 @@ func TestProxy_SurvivesControlCtxCancel(t *testing.T) {
 	// The proxy must STILL accept a new client and stream bytes through to the backend.
 	conn, err := socks5Dial(p.Addr(), "example.com:80")
 	if err != nil {
-		t.Fatalf("after the control ctx was cancelled the proxy refused a NEW connection (it died with the ctx — the ctx-cancellation bug): %v", err)
+		t.Fatalf("after the control ctx was cancelled the proxy refused a NEW connection (it died with the ctx - the ctx-cancellation bug): %v", err)
 	}
 	defer conn.Close()
 	msg := "alive-after-cancel"
@@ -560,7 +560,7 @@ func TestProxy_SurvivesControlCtxCancel(t *testing.T) {
 		t.Fatalf("post-cancel echo = %q, want %q (bytes must still stream end-to-end)", buf, msg)
 	}
 
-	// And the proxy's lifetime ends ONLY at Stop() — not at the control ctx.
+	// And the proxy's lifetime ends ONLY at Stop() - not at the control ctx.
 	p.Stop()
 	if c, err := net.DialTimeout("tcp", p.Addr(), 200*time.Millisecond); err == nil {
 		c.Close()
@@ -569,7 +569,7 @@ func TestProxy_SurvivesControlCtxCancel(t *testing.T) {
 }
 
 // TestProxy_InFlightTunnelSurvivesControlCtxCancel: a tunnel OPENED while the control ctx
-// is still live must keep streaming AFTER that ctx is cancelled — the per-tunnel upstream
+// is still live must keep streaming AFTER that ctx is cancelled - the per-tunnel upstream
 // dial keys off the proxy's OWN context, not the control ctx, so an established splice is
 // never severed by the control call returning.
 func TestProxy_InFlightTunnelSurvivesControlCtxCancel(t *testing.T) {
@@ -590,7 +590,7 @@ func TestProxy_InFlightTunnelSurvivesControlCtxCancel(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Now cancel the control ctx — the established splice must keep working.
+	// Now cancel the control ctx - the established splice must keep working.
 	cancelControl()
 	time.Sleep(50 * time.Millisecond)
 

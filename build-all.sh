@@ -1,10 +1,10 @@
 #!/bin/sh
 # -----------------------------------------------------------------------------
-# build-all.sh — cross-compile the `whisper` CLI for every supported platform and
+# build-all.sh - cross-compile the `whisper` CLI for every supported platform and
 # stage the binaries + SHA-256 checksums into a dist/ directory, named exactly the
 # way the GitHub release uploads them and the installer downloads them.
 #
-# The set of targets is NOT hard-coded here — it is read from `platforms.txt` (the
+# The set of targets is NOT hard-coded here - it is read from `platforms.txt` (the
 # SINGLE source of truth, also consumed by the installer's os/arch map), so the
 # places can never drift.
 #
@@ -21,7 +21,7 @@
 #   VERSION    defaults to "dev" (CI / the release workflow stamps the real tag)
 #
 # Self-contained: needs only `go` on PATH. CGO is disabled so every binary is a
-# single static file that runs on a bare host (zero config — the install one-liner
+# single static file that runs on a bare host (zero config - the install one-liner
 # just works). Stripped (-s -w) to keep the binaries lean.
 #
 # SPDX-License-Identifier: MIT
@@ -37,7 +37,7 @@ PKG="github.com/whisper-sec/whisper-cli/internal/cli"
 LDFLAGS="-s -w -X ${PKG}.Version=${VERSION}"
 
 command -v go >/dev/null 2>&1 || {
-  echo "build-all.sh: 'go' not found on PATH — install Go 1.24+ (https://go.dev/dl/) and retry." >&2
+  echo "build-all.sh: 'go' not found on PATH - install Go 1.24+ (https://go.dev/dl/) and retry." >&2
   exit 1
 }
 [ -f "$PLATFORMS_FILE" ] || {
@@ -56,7 +56,7 @@ sha256() {  # $1 = file → stdout: the hex digest
 
 # Resolve OUT to an ABSOLUTE path before we cd into the module dir. `go build` with a
 # package import path (./cmd/whisper) discovers the module from the CWD, so we must run
-# from the module root — but the -o output dir must then still resolve correctly.
+# from the module root - but the -o output dir must then still resolve correctly.
 # (mkdir -p first so the path is realpath-able.)
 mkdir -p "$OUT"
 OUT="$(cd "$OUT" && pwd)"

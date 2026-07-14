@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/catalog"
 )
 
 // problemServer is a control-plane stub that always replies with one canned status+body.
@@ -68,16 +70,20 @@ func callLine(id int, tool, args string) string {
 	return fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":%q,"arguments":%s}}`, id, tool, args)
 }
 
-// TestMCP_ToolsList_WithKey: with a key resolved, tools/list advertises BOTH tiers — the 2
-// keyless tools plus all 6 control tools, each carrying a description and an inputSchema
-// (the LLM must know exactly when/how to use each).
+// TestMCP_ToolsList_WithKey: with a key resolved, tools/list advertises BOTH tiers - the 2
+// keyless tools plus all 6 control tools, the 7 whisper-ai reference tools (query,
+// explain_indicator, explain_schema, read_docs, list_workflows, run_workflow, text2cypher),
+// and the graph half (whisper_graph_query + one tool per embedded catalog recipe), each
+// carrying a description and an inputSchema (the LLM must know exactly when/how to use each).
 func TestMCP_ToolsList_WithKey(t *testing.T) {
 	pinKeyState(t, "whisper_live_test", "")
 	r := drive(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
 	res, _ := r[0]["result"].(map[string]any)
 	tools, _ := res["tools"].([]any)
-	if len(tools) != 8 {
-		t.Fatalf("expected 8 tools with a key (2 keyless + 6 control), got %d", len(tools))
+	want := 2 + 6 + 7 + 1 + len(catalog.All()) // keyless + control + reference + raw cypher + catalog
+	if len(tools) != want {
+		t.Fatalf("expected %d tools with a key (2 keyless + 6 control + 7 reference + 1 raw cypher + %d graph), got %d",
+			want, len(catalog.All()), len(tools))
 	}
 	names := map[string]bool{}
 	for _, ti := range tools {
@@ -95,6 +101,9 @@ func TestMCP_ToolsList_WithKey(t *testing.T) {
 		"whisper_verify", "whisper_rdap",
 		"whisper_register", "whisper_list", "whisper_policy",
 		"whisper_logs", "whisper_revoke", "whisper_egress_config",
+		"query", "explain_indicator", "explain_schema", "read_docs",
+		"list_workflows", "run_workflow", "text2cypher",
+		"whisper_graph_query", "whisper_identify", "whisper_typosquat", "whisper_dbSchema",
 	} {
 		if !names[want] {
 			t.Fatalf("missing tool %q (have %v)", want, names)
@@ -103,7 +112,7 @@ func TestMCP_ToolsList_WithKey(t *testing.T) {
 }
 
 // TestMCP_ControlCallWithoutKey: calling a control tool with NO key resolvable is a normal
-// MCP tool error (isError:true) whose text names the exact fix — never an opaque failure
+// MCP tool error (isError:true) whose text names the exact fix - never an opaque failure
 // and never a JSON-RPC protocol error.
 func TestMCP_ControlCallWithoutKey(t *testing.T) {
 	pinKeyState(t, "", "")
@@ -153,7 +162,7 @@ func TestMCP_Register_FiresOpIdentity(t *testing.T) {
 }
 
 // TestMCP_Register_WithKey_FiresOpRegister: with_key:true maps to op:register and returns
-// the once-only api_key exactly as the CLI does — no more, no less.
+// the once-only api_key exactly as the CLI does - no more, no less.
 func TestMCP_Register_WithKey_FiresOpRegister(t *testing.T) {
 	var seen []recordedCall
 	srv := recordingServer(t, nil, &seen)
@@ -184,7 +193,7 @@ func TestMCP_Register_RequiresName(t *testing.T) {
 }
 
 // TestMCP_ListLogsPolicyRevoke_OpMapping: each control tool fires its documented op with the
-// documented args — the exact same wire the CLI subcommands produce.
+// documented args - the exact same wire the CLI subcommands produce.
 func TestMCP_ListLogsPolicyRevoke_OpMapping(t *testing.T) {
 	var seen []recordedCall
 	srv := recordingServer(t, nil, &seen)
@@ -211,7 +220,7 @@ func TestMCP_ListLogsPolicyRevoke_OpMapping(t *testing.T) {
 		t.Fatalf("revoke must pass the agent, body=%q", body)
 	}
 	// The SET policy call (the second) must carry the block list; the READ (the first) fired
-	// op:policy with no entries — both are op:policy, CLI verb semantics.
+	// op:policy with no entries - both are op:policy, CLI verb semantics.
 	var policyBodies []string
 	for _, c := range seen {
 		if c.op == "policy" {
@@ -248,7 +257,7 @@ func TestMCP_ControlPlaneFailure_IsToolError(t *testing.T) {
 
 // TestMCP_EgressConfig_ExactStrings: whisper_egress_config returns the exact local endpoint +
 // proxy-env strings `whisper connect`/`whisper init` emit for the pinned port, plus the start
-// commands — with no secret anywhere in the output.
+// commands - with no secret anywhere in the output.
 func TestMCP_EgressConfig_ExactStrings(t *testing.T) {
 	pinKeyState(t, "whisper_live_test", "")
 	r := drive(t, callLine(1, "whisper_egress_config", `{"port":23456,"agent":"2a04:2a01:9::abcd"}`))
@@ -285,7 +294,7 @@ func TestMCP_EgressConfig_ExactStrings(t *testing.T) {
 }
 
 // TestMCP_EgressConfig_DefaultPortDeterministic: with no port given, the config picks the
-// deterministic project port (same machinery as `whisper init`) — a sane in-window value.
+// deterministic project port (same machinery as `whisper init`) - a sane in-window value.
 func TestMCP_EgressConfig_DefaultPortDeterministic(t *testing.T) {
 	pinKeyState(t, "whisper_live_test", "")
 	r := drive(t, callLine(1, "whisper_egress_config", `{}`))

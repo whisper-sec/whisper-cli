@@ -13,7 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// brailleRamp is the eight-level vertical bar ramp (Unicode block elements) — the btop
+// brailleRamp is the eight-level vertical bar ramp (Unicode block elements) - the btop
 // sparkline alphabet. asciiRamp is the NO_COLOR / non-UTF fallback (the v1 CLI ramp).
 var (
 	brailleRamp = []rune("▁▂▃▄▅▆▇█")
@@ -23,7 +23,7 @@ var (
 // Sparkline renders the last `width` samples of vals as a peak-normalised bar string.
 // When ascii is true (NO_COLOR or a non-UTF terminal) it uses the " .:-=+*#" ramp; a
 // coloured terminal gets the braille ramp. An empty/zero series renders as flat low
-// bars, never a blank — the panel always shows it is alive.
+// bars, never a blank - the panel always shows it is alive.
 //
 // Conservative-emit: width is clamped to a sane range; a nil/short series left-pads
 // with the lowest bar so the gauge keeps a fixed footprint (no layout jitter).
@@ -71,7 +71,7 @@ func Sparkline(vals []float64, width int, ascii bool) string {
 // SparklineGradient is Sparkline with a per-cell THREE-stop colour gradient (value-
 // mapped: short bars → lo, mid bars → mid, tall bars → hi). With colour off it returns
 // the plain ASCII sparkline. This gives the btop "value-mapped glow" without per-cell
-// state — each cell's colour is a pure function of its height fraction, so the render is
+// state - each cell's colour is a pure function of its height fraction, so the render is
 // deterministic and re-renders identically every frame (no flicker).
 func SparklineGradient(vals []float64, width int, noColor bool, lo, mid, hi lipgloss.TerminalColor) string {
 	if noColor {

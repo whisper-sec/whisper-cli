@@ -15,18 +15,21 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/tui/theme"
 )
 
-// mode is one of the five top-level views (the tab bar).
+// mode is one of the six top-level views (the tab bar). AGENTS is the merged primary
+// view (fleet + the selected agent's live monitor in one panel); GRAPH is the live,
+// self-expanding agent-activity graph fed by the monitor stream.
 type mode int
 
 const (
 	modeAgents mode = iota
-	modeMonitor
+	modeGraph
+	modeExplore
 	modeLogs
 	modePolicy
 	modeConfig
 )
 
-var modeNames = []string{"AGENTS", "MONITOR", "LOGS", "POLICY", "CONFIG"}
+var modeNames = []string{"AGENTS", "GRAPH", "EXPLORE", "LOGS", "POLICY", "CONFIG"}
 
 // overlay is a modal/palette state stacked above the active view.
 type overlay int
@@ -51,12 +54,16 @@ type Options struct {
 	NoColor    bool
 	Light      bool
 	StartAgent string // optional /128 to focus the monitor on at launch
-	StartOnMon bool   // open straight on the MONITOR tab (whisper monitor <addr>)
-	Version    string
+	StartOnMon bool   // launch with the merged dashboard focused on StartAgent (whisper monitor <addr>)
+
+	StartOnExplore bool   // open straight on the EXPLORE tab (whisper explore [node])
+	StartNode      string // optional node to land the explorer on (Phase 2 wires the fetch)
+
+	Version string
 }
 
 // App is the root Bubble Tea model. It holds the whole TUI state and folds every
-// message — key, resize, async result, stream event, tick — into a re-render.
+// message - key, resize, async result, stream event, tick - into a re-render.
 type App struct {
 	opts   Options
 	client *client.Client
@@ -80,6 +87,8 @@ type App struct {
 	policyView *policyView
 	configView *configView
 	monitorVw  *monitorView
+	exploreVw  *exploreView
+	graphVw    *graphView
 
 	// overlays
 	palette *palette
@@ -89,9 +98,10 @@ type App struct {
 	drill   string // pretty-JSON for the drill / result card
 	result  string
 
-	// always-on live monitor (the bottom panel + the MONITOR view share this state)
+	// always-on live monitor (the merged AGENTS panel + the GRAPH view share this state)
 	feed       *feedRing
 	join       *joinCache
+	lgraph     *liveGraph // the self-expanding agent-activity graph, fed from the same fold
 	stream     monitorState
 	source     feedSource // the data path currently filling the feed (backfill/live/poll)
 	paused     bool
@@ -101,10 +111,10 @@ type App struct {
 
 	// hybrid backfill/poll bookkeeping (the §6.4 pattern)
 	backfillToken int   // drops a stale backfill reply after a focus change
-	lastEventUS   int64 // newest folded event ts (µs) — dedup for the poll fallback
+	lastEventUS   int64 // newest folded event ts (µs) - dedup for the poll fallback
 	bufferedPause int   // events dropped while paused (the "⏸ N buffered" counter)
 	hbPulse       int   // heartbeat animation phase (●→◉→●), advanced on the tick
-	pollArmed     bool  // ONE poll chain at a time — N failed reconnects must not stack N pollers
+	pollArmed     bool  // ONE poll chain at a time - N failed reconnects must not stack N pollers
 
 	// toast (transient status)
 	toast      string
@@ -113,6 +123,10 @@ type App struct {
 
 	// tickCount drives the per-second ring advance from the 4Hz render tick.
 	tickCount int
+
+	// live-session counters: events folded from the LIVE tail this run (backfill and
+	// poll replays excluded, so a focus-change re-seed can never double-count them).
+	liveDNS, liveConn, liveBlocked int64
 
 	// stream plumbing (step C fully wires the goroutine; the channel + cancel live here)
 	streamCancel context.CancelFunc
@@ -131,6 +145,7 @@ func New(opts Options) *App {
 		mode:     modeAgents,
 		feed:     newFeedRing(2000),
 		join:     newJoinCache(512),
+		lgraph:   newLiveGraph(),
 		stream:   streamIdle,
 		streamMu: make(chan struct{}, 1),
 		loading:  true,
@@ -140,25 +155,37 @@ func New(opts Options) *App {
 	a.policyView = newPolicyView(a)
 	a.configView = newConfigView(a)
 	a.monitorVw = newMonitorView(a)
+	a.exploreVw = newExploreView(a)
+	a.graphVw = newGraphView(a)
 	a.palette = newPalette(a)
-	if opts.StartOnMon {
-		a.mode = modeMonitor
-		if opts.StartAgent != "" {
-			a.monitorVw.focused = opts.StartAgent
-		}
+	if opts.StartOnMon && opts.StartAgent != "" {
+		// `whisper monitor <addr>` lands on the merged dashboard already watching that
+		// agent (the SSE narrows to it via streamAddr; the backfill narrows via focused).
+		a.monitorVw.focused = opts.StartAgent
+	}
+	if opts.StartOnExplore {
+		a.mode = modeExplore
 	}
 	return a
 }
 
-// Init kicks off the first fleet load, the render tick, and (deferred to step C) the
-// live stream. Returning a batch keeps the UI responsive from frame one.
+// Init kicks off the first fleet load, the render tick, the live stream, and the
+// monitor's op:logs backfill (the merged AGENTS dashboard shows the live monitor from
+// frame one, so its history seed belongs at launch, not behind a tab switch). A launch
+// straight onto EXPLORE (whisper explore [node]) also fires its first live land here,
+// since onEnterMode only runs on a tab SWITCH.
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		loadFleet(a.client),
 		loadPolicy(a.client),
 		tick(),
 		a.startStream(),
-	)
+		a.monitorVw.onEnter(),
+	}
+	if a.mode == modeExplore {
+		cmds = append(cmds, a.exploreVw.onEnter())
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update is the Elm reducer: it folds each message and returns the next command.
@@ -212,7 +239,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case streamEventMsg:
 		a.onStreamEvent(m.event)
-		return a, a.waitStream()
+		return a, tea.Batch(a.waitStream(), a.graphEnrichCmd())
 
 	case streamStateMsg:
 		prev := a.stream
@@ -222,7 +249,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		// Hybrid §6.4: when the live tail drops to poll (503/EOF/404), kick the op:logs
 		// poll fallback so the picture keeps updating until the SSE reconnects. pollArmed
-		// keeps it to ONE chain — the reconnect loop oscillates retry→poll, and firing on
+		// keeps it to ONE chain - the reconnect loop oscillates retry→poll, and firing on
 		// every oscillation would stack N concurrent pollers.
 		_ = prev
 		var extra tea.Cmd
@@ -235,10 +262,16 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case monitorBackfillMsg:
 		a.onMonitorBackfill(m)
-		return a, nil
+		return a, a.graphEnrichCmd()
 
 	case monitorPollMsg:
-		return a, a.onMonitorPoll(m)
+		return a, tea.Batch(a.onMonitorPoll(m), a.graphEnrichCmd())
+
+	case lgAsnMsg:
+		// One IP's ASN enrichment landed (or honestly missed): fold it into the live
+		// graph and drain the next queued lookup (bounded in-flight, keyed only).
+		a.lgraph.onASN(m)
+		return a, a.graphEnrichCmd()
 
 	case pollFireMsg:
 		// Re-arm tick: issue a fresh op:logs poll only while the stream is still down.
@@ -255,10 +288,27 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case toastMsg:
 		a.setToast(m.text, m.isErr)
 		return a, nil
+
+	// EXPLORE async replies: each folds into exploreVw, which drops any reply whose
+	// focusToken is stale (the fast-walk-flurry discipline: never paint a node you
+	// already left).
+	case focusMsg:
+		return a, a.exploreVw.onFocus(m)
+	case edgesMsg:
+		return a, a.exploreVw.onEdges(m)
+	case neighborsMsg:
+		return a, a.exploreVw.onNeighbors(m)
+	case enrichMsg:
+		return a, a.exploreVw.onEnrich(m)
+	case verbResultMsg:
+		return a, a.exploreVw.onVerbResult(m)
+	case searchMsg:
+		_ = m // reserved for the Phase 3 JUMP match list
+		return a, nil
 	}
 	// Anything else while a form overlay is open belongs to the form: huh drives its
 	// field focus, validation, and group advance through its OWN messages (returned as
-	// commands from form.Update/Init) — swallowing them here freezes the form with a
+	// commands from form.Update/Init) - swallowing them here freezes the form with a
 	// dead Enter/Tab. Forward them, and the form comes alive.
 	switch a.overlay {
 	case overlayCreate:
@@ -277,7 +327,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // View renders the whole frame: header, tab bar, the active view, the always-on
-// monitor panel, the footer — with any overlay (palette/modal/help) drawn on top.
+// monitor panel, the footer - with any overlay (palette/modal/help) drawn on top.
 func (a *App) View() string {
 	if !a.ready || a.width == 0 {
 		return "starting whisper…"
@@ -359,7 +409,7 @@ func (a *App) mergeFleet(fresh []model.Agent) {
 
 // deriveTenant backfills the header's tenant handle from an agent fqdn
 // (<agent>.<t-handle>.agents.<zone>) when the launch-time best-effort lookup came
-// back empty — the fleet we already hold IS the answer (derive, don't fetch).
+// back empty - the fleet we already hold IS the answer (derive, don't fetch).
 func (a *App) deriveTenant() {
 	if a.opts.Tenant != "" {
 		return
@@ -406,7 +456,7 @@ func (a *App) upsertStreamAgent(addr128, agentID string) {
 	for i := range a.agents {
 		// Match on EITHER handle: an event that carries only the agent id must still
 		// collapse onto a roster entry keyed by its /128 (else every id-only event
-		// minted a phantom "(no /128)" duplicate row —).
+		// minted a phantom "(no /128)" duplicate row -).
 		if a.agents[i].Key() == key ||
 			(addr128 != "" && a.agents[i].Address == addr128) ||
 			(agentID != "" && a.agents[i].ID == agentID) {

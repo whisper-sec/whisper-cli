@@ -20,12 +20,12 @@ import (
 // ensure.go is the IDEMPOTENT, detached-daemon backbone behind `whisper connect --ensure`
 // and `whisper init claude`:
 //
-//   - probeWhisperProxy   — is a LIVE whisper proxy already serving 127.0.0.1:<port>? (a real
+//   - probeWhisperProxy   - is a LIVE whisper proxy already serving 127.0.0.1:<port>? (a real
 //     SOCKS5 handshake, so we never reuse a random foreign listener as if it were ours)
-//   - ensureDaemon        — reuse a live one (exit 0), else spawn the tunnel DETACHED (setsid /
+//   - ensureDaemon        - reuse a live one (exit 0), else spawn the tunnel DETACHED (setsid /
 //     DETACHED_PROCESS), write `.whisper/connect.pid`, and WAIT (bounded) until the port is
 //     live so --ensure is synchronous-enough for the user/hook.
-//   - runConnectDaemon    — the hidden in-process daemon body the re-exec lands in: bring the
+//   - runConnectDaemon    - the hidden in-process daemon body the re-exec lands in: bring the
 // tunnel up on the PINNED port and hold it (Background-rooted proxy + auto-reconnect).
 //
 // The daemon is the same op:connect → local proxy/tunnel the interactive `connect` uses, only
@@ -34,7 +34,7 @@ import (
 // live in the daemon's memory exactly as in every other connect path.
 
 // ensureProbeTimeout bounds the quick "is the port already ours" handshake. Loopback, so a
-// live proxy normally answers in single-digit ms — but a busy daemon (mid op:connect, serving
+// live proxy normally answers in single-digit ms - but a busy daemon (mid op:connect, serving
 // other splices, or under a cold control-plane keepalive) can be briefly slower. Too tight a
 // timeout false-negatives → a spurious duplicate spawn, so we keep a generous loopback budget;
 // a genuinely dead/foreign port still fails fast (the TCP connect itself refuses immediately).
@@ -48,9 +48,9 @@ const ensureStartupBudget = 10 * time.Second
 
 // probeWhisperProxy reports whether a LIVE whisper local proxy is already serving
 // 127.0.0.1:<port>. It does a real SOCKS5 no-auth handshake (greeting → method-select): our
-// proxy answers 0x05 0x00 (it requires NO auth from the local client — see egress/proxy.go),
+// proxy answers 0x05 0x00 (it requires NO auth from the local client - see egress/proxy.go),
 // which distinguishes it from a random TCP listener that merely accepts the connection. A
-// plain TCP connect alone is NOT enough — some other service could hold the port — so we
+// plain TCP connect alone is NOT enough - some other service could hold the port - so we
 // confirm the protocol. Any error / unexpected reply ⇒ "not ours" (false).
 //
 // It is a package var so a command test can stub the network decision deterministically.
@@ -91,7 +91,7 @@ func readFull(conn net.Conn, buf []byte) (int, error) {
 // ensureDaemon is the idempotent core of `--ensure`. Given the resolved project config, it:
 //
 //  1. PROBE: if a live whisper proxy already serves cfg.Port, it's already ensured → return
-//     (port, alreadyLive=true, nil). Zero work, zero spawn — safe to call on every SessionStart.
+//     (port, alreadyLive=true, nil). Zero work, zero spawn - safe to call on every SessionStart.
 //  2. SPAWN: else re-exec THIS binary in the hidden daemon mode, DETACHED (setsid /
 //     DETACHED_PROCESS), so the tunnel outlives this command and the launching shell. Write the
 //     child PID to `.whisper/connect.pid`.
@@ -104,7 +104,7 @@ var ensureDaemon = func(p projcfg.Paths, cfg projcfg.Config) (port int, alreadyL
 	port = cfg.Port
 	if port <= 0 {
 		return 0, false, &client.ProblemError{Status: 400,
-			Detail: "no port in .whisper/config — re-run `whisper init claude`"}
+			Detail: "no port in .whisper/config - re-run `whisper init claude`"}
 	}
 	if probeWhisperProxy(port) {
 		return port, true, nil
@@ -113,7 +113,7 @@ var ensureDaemon = func(p projcfg.Paths, cfg projcfg.Config) (port int, alreadyL
 		return port, false, err
 	}
 	// Wait until the daemon's proxy is live (bounded). A SessionStart hook can tolerate the
-	// daemon still coming up — but the common path is sub-second once op:connect returns.
+	// daemon still coming up - but the common path is sub-second once op:connect returns.
 	deadline := time.Now().Add(ensureStartupBudget)
 	for time.Now().Before(deadline) {
 		if probeWhisperProxy(port) {
@@ -124,13 +124,13 @@ var ensureDaemon = func(p projcfg.Paths, cfg projcfg.Config) (port int, alreadyL
 	// Not live within budget: not necessarily fatal (the daemon may still be finishing
 	// op:connect), but we report it so a human run sees an honest result.
 	return port, false, &client.ProblemError{Status: 504,
-		Detail: fmt.Sprintf("the Whisper connection didn't come up on port %d within %s — check `whisper status`", port, ensureStartupBudget)}
+		Detail: fmt.Sprintf("the Whisper connection didn't come up on port %d within %s - check `whisper status`", port, ensureStartupBudget)}
 }
 
 // spawnConnectDaemon re-execs this binary in the hidden `__connect-daemon` mode, DETACHED, so
 // the tunnel keeps running after the launching command/shell exits. It threads the project's
 // config path + the global flags the daemon needs (the control URL override + key file, NOT the
-// raw key — the daemon re-resolves the credential from the same ladder), writes the child PID to
+// raw key - the daemon re-resolves the credential from the same ladder), writes the child PID to
 // `.whisper/connect.pid`, and returns once the child is started (the parent then WAITs on the
 // port). Stdout/stderr/stdin are detached to /dev/null so the daemon never writes to the user's
 // terminal.
@@ -143,7 +143,7 @@ var spawnConnectDaemon = func(p projcfg.Paths) error {
 	args := []string{"__connect-daemon", "--config", p.ConfigFile}
 	// Forward only the SAFE, non-secret global overrides the daemon needs to re-resolve and
 	// reach the control plane. The credential is re-resolved by the daemon from env/file/flag
-	// — we forward the key-file override but NEVER the raw --key value on argv (it would show
+	// - we forward the key-file override but NEVER the raw --key value on argv (it would show
 	// in `ps`). If the run used --key explicitly, forward it via the environment instead.
 	if g.controlURL != "" {
 		args = append(args, "--control-url", g.controlURL)
@@ -159,14 +159,14 @@ var spawnConnectDaemon = func(p projcfg.Paths) error {
 		cmd.Stdin, cmd.Stdout, cmd.Stderr = devnull, devnull, devnull
 		defer devnull.Close()
 	}
-	// Pass the raw key (if any) ONLY via the environment, never argv — env is not visible in
+	// Pass the raw key (if any) ONLY via the environment, never argv - env is not visible in
 	// `ps` to other users and the daemon's key ladder reads WHISPER_API_KEY.
 	cmd.Env = daemonEnv(os.Environ())
 	applyDetach(cmd) // platform-specific: setsid (unix) / DETACHED_PROCESS (windows)
 
 	if err := cmd.Start(); err != nil {
 		return &client.ProblemError{Status: 500,
-			Detail: "couldn't start the Whisper connection daemon — please try again"}
+			Detail: "couldn't start the Whisper connection daemon - please try again"}
 	}
 	// Record the PID so `whisper status` / a teardown can find the daemon. Best-effort: a
 	// failure to write the pidfile must not fail the ensure (the daemon is already running).
@@ -176,7 +176,7 @@ var spawnConnectDaemon = func(p projcfg.Paths) error {
 	}
 	_ = os.MkdirAll(p.WhisperDir, 0o700)
 	_ = os.WriteFile(p.PIDFile, []byte(strconv.Itoa(pid)+"\n"), 0o600)
-	// We deliberately do NOT Wait() the child — it is a detached daemon that must outlive us.
+	// We deliberately do NOT Wait() the child - it is a detached daemon that must outlive us.
 	// Releasing it avoids leaving a zombie if the parent lingers.
 	if cmd.Process != nil {
 		_ = cmd.Process.Release()
@@ -223,7 +223,7 @@ func loadProjectConfig(configFlag string) (projcfg.Paths, projcfg.Config, error)
 		}
 		if cfg == nil {
 			return p, projcfg.Config{}, &client.ProblemError{Status: 404,
-				Detail: fmt.Sprintf("no Whisper config at %s — run `whisper init claude` in the project", cf)}
+				Detail: fmt.Sprintf("no Whisper config at %s - run `whisper init claude` in the project", cf)}
 		}
 		return p, *cfg, nil
 	}
@@ -253,7 +253,7 @@ func discoverProjectConfig() (string, projcfg.Config, error) {
 		parent := filepath.Dir(dir)
 		if parent == dir { // reached the filesystem root
 			return "", projcfg.Config{}, &client.ProblemError{Status: 404,
-				Detail: "no .whisper/config found here — run `whisper init claude` first"}
+				Detail: "no .whisper/config found here - run `whisper init claude` first"}
 		}
 		dir = parent
 	}

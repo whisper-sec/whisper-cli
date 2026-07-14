@@ -34,16 +34,16 @@ const defaultMTU = 1280
 //
 // On ANY setup error it tears down whatever it built and returns a clean, non-leaky error
 // (never the private key, never a stack trace). The returned tunnel's lifetime is Stop()
-// ONLY — the front-end proxy is Background-rooted, so a short control ctx can never kill it.
+// ONLY - the front-end proxy is Background-rooted, so a short control ctx can never kill it.
 func Start(cfg Config, opts Options) (*Tunnel, error) {
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	// wireguard-go's UAPI IpcSet needs a LITERAL ip:port endpoint — it does not resolve DNS.
+	// wireguard-go's UAPI IpcSet needs a LITERAL ip:port endpoint - it does not resolve DNS.
 	// The control plane returns a hostname (e.g. ns1.whisper.online:51826), so resolve it here.
 	resolved, rerr := resolveEndpoint(cfg.Endpoint)
 	if rerr != nil {
-		return nil, fmt.Errorf("could not resolve the WireGuard endpoint — please try again")
+		return nil, fmt.Errorf("could not resolve the WireGuard endpoint - please try again")
 	}
 	cfg.Endpoint = resolved
 	mtu := cfg.MTU
@@ -59,21 +59,21 @@ func Start(cfg Config, opts Options) (*Tunnel, error) {
 	}
 	tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{cfg.Address}, dnsServers, mtu)
 	if err != nil {
-		return nil, fmt.Errorf("could not start the WireGuard tunnel — please try again")
+		return nil, fmt.Errorf("could not start the WireGuard tunnel - please try again")
 	}
 
-	// 2. The wireguard-go device. Silent logger — wireguard-go's own logs would be noise and
+	// 2. The wireguard-go device. Silent logger - wireguard-go's own logs would be noise and
 	//    could surface peer/key detail; we emit only our own safe one-liners via opts.Logf.
 	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
 	if err := dev.IpcSet(uapiConfig(cfg)); err != nil {
 		dev.Close() // closes the netstack TUN too
-		return nil, errors.New("could not configure the WireGuard tunnel — please try again")
+		return nil, errors.New("could not configure the WireGuard tunnel - please try again")
 	}
 
 	// 3. Bring the device up: this kicks off the handshake and the persistent keepalive.
 	if err := dev.Up(); err != nil {
 		dev.Close()
-		return nil, errors.New("could not bring up the WireGuard tunnel — please try again")
+		return nil, errors.New("could not bring up the WireGuard tunnel - please try again")
 	}
 
 	t := &Tunnel{
@@ -96,7 +96,7 @@ func Start(cfg Config, opts Options) (*Tunnel, error) {
 	}, opts.Port)
 	if err != nil {
 		dev.Close()
-		return nil, errors.New("could not open the local connection — please try again")
+		return nil, errors.New("could not open the local connection - please try again")
 	}
 	t.proxy = proxy
 
@@ -128,8 +128,8 @@ func (c Config) validate() error {
 // (route everything out the tunnel; v4 rides DNS64/NAT64 on the box), and the keepalive.
 //
 // All keys are HEX here (the UAPI form); FromWgQuick converts the base64 the server returns.
-// The endpoint is a literal ip:port (Start resolves the hostname first — IpcSet does not do DNS).
-// This string holds the private key — it is handed ONLY to dev.IpcSet and never logged.
+// The endpoint is a literal ip:port (Start resolves the hostname first - IpcSet does not do DNS).
+// This string holds the private key - it is handed ONLY to dev.IpcSet and never logged.
 func uapiConfig(cfg Config) string {
 	keepalive := cfg.Keepalive
 	if keepalive <= 0 {
@@ -139,7 +139,7 @@ func uapiConfig(cfg Config) string {
 	fmt.Fprintf(&b, "private_key=%s\n", cfg.PrivateKeyHex)
 	fmt.Fprintf(&b, "public_key=%s\n", cfg.ServerPublicKeyHex)
 	fmt.Fprintf(&b, "endpoint=%s\n", cfg.Endpoint)
-	// Route all v6 AND v4 through the peer — the box egresses both (v4 via DNS64/NAT64),
+	// Route all v6 AND v4 through the peer - the box egresses both (v4 via DNS64/NAT64),
 	// exactly as the wg-quick AllowedIPs=::/0 config does for the SOCKS/kernel paths.
 	b.WriteString("allowed_ip=0.0.0.0/0\n")
 	b.WriteString("allowed_ip=::/0\n")
@@ -160,7 +160,7 @@ func resolveEndpoint(hostPort string) (string, error) {
 }
 
 // setPeerEndpoint re-sets ONLY the peer endpoint via the UAPI without dropping the peer or
-// the keys — this is how a reconnect forces a fresh handshake on a dead tunnel: update_only
+// the keys - this is how a reconnect forces a fresh handshake on a dead tunnel: update_only
 // keeps the existing peer/keys, and re-asserting the endpoint nudges wireguard-go to send a
 // new handshake initiation. It does NOT carry the private key, so it is cheap and safe.
 func (t *Tunnel) setPeerEndpoint() error {
@@ -182,7 +182,7 @@ type netDialer struct {
 
 // Dial dials target ("host:port") over the tunnel. A bare IP literal dials directly; a
 // hostname is resolved by the netstack resolver (the box's in-tunnel DNS) so the lookup, too,
-// sources from the /128 — never the local box (Postel: we accept a name and resolve it remotely,
+// sources from the /128 - never the local box (Postel: we accept a name and resolve it remotely,
 // the socks5h contract). It honours the proxy ctx (cancel on Stop) AND a per-dial timeout.
 func (d *netDialer) Dial(ctx context.Context, target string) (net.Conn, error) {
 	dctx := ctx

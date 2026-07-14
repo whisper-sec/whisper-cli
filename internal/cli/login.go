@@ -34,7 +34,7 @@ func newLoginCmd() *cobra.Command {
 		Short: "Sign in at console.whisper.security (or save an API key) to ~/.config/whisper-ns/key",
 		Long: "Sign in to Whisper. With NO key argument on a terminal you can just press Enter to\n" +
 			"open console.whisper.security in your browser and approve the login (the device\n" +
-			"flow, RFC 8628) — or paste an API key instead. Pass the key as an argument to skip\n" +
+			"flow, RFC 8628) - or paste an API key instead. Pass the key as an argument to skip\n" +
 			"the prompt entirely. The key is saved to the key file (mode 600) so every later\n" +
 			"command uses it with no further config, then verified with a quick op:list.\n\n" +
 			"  whisper login                 # press Enter to sign in via browser, or paste a key\n" +
@@ -64,7 +64,7 @@ func newLoginCmd() *cobra.Command {
 			// 3) --manual forces the bare key prompt (interactive) or errors with guidance.
 			if manual {
 				if !isInteractive() {
-					return usageErr("no key supplied — usage: whisper login <key> (get one at https://console.whisper.security/settings)")
+					return usageErr("no key supplied - usage: whisper login <key> (get one at https://console.whisper.security/settings)")
 				}
 				k, err := promptForKey()
 				if err != nil {
@@ -92,10 +92,10 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			// 5) No TTY and no key: a clear, helpful error (never an opaque hang).
-			return usageErr("no key supplied — usage: whisper login <key>, or 'whisper login --web' to sign in via browser (get a key at https://console.whisper.security/settings)")
+			return usageErr("no key supplied - usage: whisper login <key>, or 'whisper login --web' to sign in via browser (get a key at https://console.whisper.security/settings)")
 		},
 	}
-	cmd.Flags().BoolVar(&web, "web", false, "force the browser sign-in (device flow) — useful with no key on hand")
+	cmd.Flags().BoolVar(&web, "web", false, "force the browser sign-in (device flow) - useful with no key on hand")
 	cmd.Flags().BoolVar(&web, "device", false, "alias for --web (the RFC 8628 device flow)")
 	cmd.Flags().BoolVar(&manual, "manual", false, "force the manual API-key prompt instead of the browser sign-in")
 	_ = cmd.Flags().MarkHidden("device") // keep --help tidy; --web is the documented name
@@ -133,12 +133,12 @@ func runDeviceFlow(consoleURL string, timeout time.Duration) (string, error) {
 		return "", err
 	}
 
-	// Tell the user exactly what to do (on stderr — stdout stays clean), then make a
+	// Tell the user exactly what to do (on stderr - stdout stays clean), then make a
 	// best-effort attempt to open the browser. A failed open is fine: the URL is printed.
 	openURL := auth.OpenURL()
 	fmt.Fprintf(os.Stderr, "whisper: open %s to authorize (code: %s)\n", openURL, auth.UserCode)
 	if err := openBrowser(openURL); err != nil {
-		fmt.Fprintln(os.Stderr, "whisper: couldn't open a browser automatically — open the URL above by hand")
+		fmt.Fprintln(os.Stderr, "whisper: couldn't open a browser automatically - open the URL above by hand")
 	}
 	fmt.Fprintln(os.Stderr, "whisper: waiting for approval…")
 
@@ -164,11 +164,11 @@ func deviceCallTimeout(timeout time.Duration) time.Duration {
 }
 
 // saveAndVerify writes the key to the key file (mode 600) and verifies it with a quick
-// op:list. A saved-but-unverified key is still saved (fail-soft) — verification failure
+// op:list. A saved-but-unverified key is still saved (fail-soft) - verification failure
 // is reported but is not fatal, exactly like the prior behaviour.
 func saveAndVerify(key string) error {
 	if key == "" {
-		return usageErr("no key supplied — usage: whisper login <key> (get one at https://console.whisper.security/settings)")
+		return usageErr("no key supplied - usage: whisper login <key> (get one at https://console.whisper.security/settings)")
 	}
 	path := g.keyFile
 	if path == "" {
@@ -189,7 +189,7 @@ func saveAndVerify(key string) error {
 	defer cancel()
 	env, err := c.Agents(cx, "list", map[string]any{"kind": "agents"})
 	if err != nil || env == nil || !env.Ok {
-		fmt.Fprintln(os.Stderr, "whisper: saved — but the control plane didn't accept it yet (check the key / connectivity)")
+		fmt.Fprintln(os.Stderr, "whisper: saved - but the control plane didn't accept it yet (check the key / connectivity)")
 		return nil
 	}
 	fmt.Fprintln(os.Stderr, "whisper: key saved and verified")
@@ -203,7 +203,7 @@ func newConfigCmd() *cobra.Command {
 		Use:   "config",
 		Short: "Show the resolved configuration (endpoints + which key source is in effect)",
 		Long: "Print the effective configuration: the control/monitor/RDAP endpoints and WHICH\n" +
-			"rung of the key ladder is providing the credential — so an operator can see at a\n" +
+			"rung of the key ladder is providing the credential - so an operator can see at a\n" +
 			"glance what the CLI will use (zero-config clarity). The key value is NEVER printed.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {

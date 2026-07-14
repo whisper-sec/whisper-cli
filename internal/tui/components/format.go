@@ -68,7 +68,7 @@ func Gauge(value, max float64, width int, ascii bool) string {
 }
 
 // GaugeGrad renders a fixed-width fraction bar whose FILLED portion is coloured by a
-// three-stop value map of the fill fraction (low→lo, mid→mid, high→hi — the btop
+// three-stop value map of the fill fraction (low→lo, mid→mid, high→hi - the btop
 // green→amber→red "load" look). The empty portion is dim. value/max clamps to [0,1].
 // With colour off it falls back to the plain ascii Gauge (meaning never depends on
 // colour). Pure: deterministic per (value,max,width), so no flicker on re-render.
@@ -90,7 +90,7 @@ func GaugeGrad(value, max float64, width int, noColor bool, lo, mid, hi, empty l
 		frac = 1
 	}
 	fill := int(frac * float64(width))
-	// Colour the whole filled run by the fill fraction (one colour per gauge — clean,
+	// Colour the whole filled run by the fill fraction (one colour per gauge - clean,
 	// and a saturated gauge reads as solid red at a glance).
 	col := lo
 	switch {

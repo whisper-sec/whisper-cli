@@ -11,7 +11,7 @@ import (
 )
 
 // ProblemError is the RFC-7807 problem object the control plane returns on failure
-// (ok:false). Its Detail is written to be helpful and secret-free — surface it
+// (ok:false). Its Detail is written to be helpful and secret-free - surface it
 // verbatim to the operator (Postel: a clear, helpful error, never an opaque 500).
 type ProblemError struct {
 	Type        string   `json:"type,omitempty"`
@@ -22,7 +22,7 @@ type ProblemError struct {
 }
 
 // Error renders the most helpful single line we have: prefer detail, then title, then
-// type, then a generic note — never an empty string.
+// type, then a generic note - never an empty string.
 func (e *ProblemError) Error() string {
 	switch {
 	case e.Detail != "":
@@ -50,7 +50,7 @@ type Envelope struct {
 	Status int
 	Result *Result
 	Err    *ProblemError
-	// Raw is the verbatim JSON body — the scriptable `--json` path echoes this so a
+	// Raw is the verbatim JSON body - the scriptable `--json` path echoes this so a
 	// script sees EXACTLY what the server sent (no re-encoding, no field loss).
 	Raw json.RawMessage
 }
@@ -63,19 +63,19 @@ type rawEnvelope struct {
 	Status int     `json:"status"`
 	Result *Result `json:"result"`
 	// Error is kept RAW (not *ProblemError) because a row-level failure may carry its
-	// detail as a bare string rather than an RFC-7807 object — decodeProblem accepts
+	// detail as a bare string rather than an RFC-7807 object - decodeProblem accepts
 	// either (Postel: liberal in what we accept, so a real server explanation is never
 	// silently dropped in favour of a generic message).
 	Error json.RawMessage `json:"error"`
 	// Columns/Rows are the ALTERNATIVE Neo4j-procedure-row wrapper the live /api/query
-	// returns: a `whisper.agents({op:...})` CALL comes back as its own little table —
+	// returns: a `whisper.agents({op:...})` CALL comes back as its own little table -
 	// outer columns `op, ok, status, result, error, retry_after`, one row per call:
 	//   { "columns":[...], "rows": [ {"op":"connect","ok":true,"result":{...},...} ] }
 	// That outer row can arrive EITHER as a column-keyed object (above) OR, just as
 	// validly for a tabular Cypher result, as a POSITIONAL array matched against
 	// Columns (`"rows":[["connect",true,200,{...},null,null]]`). We accept BOTH, and a
 	// column reorder in either form, so the client works against the live box AND the
-	// documented contract (Postel: liberal in what we accept — map by column NAME,
+	// documented contract (Postel: liberal in what we accept - map by column NAME,
 	// never by a fixed index; see decodeOuterRow).
 	Columns []string          `json:"columns"`
 	Rows    []json.RawMessage `json:"rows"`
@@ -93,7 +93,7 @@ type outerRow struct {
 
 // decodeOuterRow decodes one element of rawEnvelope.Rows into an outerRow. It tries the
 // column-keyed object form first (the common live shape); if the row is instead a
-// positional array, it zips the values against columns BY NAME — so a column reorder on
+// positional array, it zips the values against columns BY NAME - so a column reorder on
 // the wire never breaks extraction (Postel: liberal in what we accept). A malformed,
 // short, or empty row yields a zero outerRow rather than an error: the caller degrades to
 // a clear "no result" message, never an opaque decode failure.
@@ -139,7 +139,7 @@ func decodeOuterRow(raw json.RawMessage, columns []string) outerRow {
 // decodeProblem parses a control-plane error field LIBERALLY: an RFC-7807 object
 // ({"detail":...}/{"title":...}/{"type":...}), a bare string (many row-level failures
 // come back as a plain reason string, not a structured problem), or null/empty (nil).
-// Postel: never let an unexpected — but perfectly legible — error-field shape get
+// Postel: never let an unexpected - but perfectly legible - error-field shape get
 // silently dropped in favour of a generic "control plane reported failure".
 func decodeProblem(raw json.RawMessage) *ProblemError {
 	s := strings.TrimSpace(string(raw))
@@ -168,13 +168,13 @@ func hasContent(raw json.RawMessage) bool {
 // LIBERAL in what it accepts:
 //
 //  1. The dev-guide shape: {ok,status,result,error}. ok:false -> Err is set. If the top
-//     level omits result (the payload lives in the outer YIELD row instead — see 2), it
+//     level omits result (the payload lives in the outer YIELD row instead - see 2), it
 //     is recovered from there rather than treated as absent.
 //  2. The live outer whisper.agents YIELD-table wrapper: {columns:[op,ok,status,result,
 //     error,retry_after], rows:[...]} -> the first row is read for ok/result/error,
 //     whether that row arrived as a column-keyed object OR a positional array matched
 //     against columns BY NAME (never a fixed index, so a column reorder never breaks
-//     extraction — see decodeOuterRow). A row with ok:false is a real failure, surfaced
+//     extraction - see decodeOuterRow). A row with ok:false is a real failure, surfaced
 //     as Err, never silently downgraded to an empty/absent result.
 //  3. A bare problem object {type,title,status,detail} with NO ok/result/rows -> Err.
 //
@@ -185,7 +185,7 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 
 	var re rawEnvelope
 	if err := json.Unmarshal(body, &re); err != nil {
-		// A non-JSON reply is itself a fault — surface it as a helpful problem, never
+		// A non-JSON reply is itself a fault - surface it as a helpful problem, never
 		// a raw decode error the operator can't act on.
 		if httpStatus >= 400 {
 			env.Err = &ProblemError{Status: httpStatus, Detail: "control plane returned a non-JSON error reply"}
@@ -205,7 +205,7 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 		env.Err = decodeProblem(re.Error)
 		if env.Result == nil && len(re.Rows) > 0 {
 			// The top level carries ok/status but the actual payload lives in the outer
-			// whisper.agents YIELD row (the live tabular shape) — recover it by name
+			// whisper.agents YIELD row (the live tabular shape) - recover it by name
 			// rather than concluding there is no result.
 			row := decodeOuterRow(re.Rows[0], re.Columns)
 			env.Result = row.Result
@@ -217,7 +217,7 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 			}
 		}
 		if !env.Ok && env.Err == nil {
-			// ok:false with no error object — synthesise a helpful one from the status.
+			// ok:false with no error object - synthesise a helpful one from the status.
 			env.Err = &ProblemError{Status: env.Status, Detail: "control plane reported failure"}
 		}
 		if env.Err != nil && env.Err.Status == 0 {
@@ -241,7 +241,7 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 	}
 
 	// Shape 2: the Neo4j row wrapper (or a top-level result with no ok flag) -> success,
-	// UNLESS the row itself carries an explicit ok:false — a real op failure the caller
+	// UNLESS the row itself carries an explicit ok:false - a real op failure the caller
 	// must see, never masked as an empty/absent result ("no egress" for a call that
 	// actually failed for a legible reason).
 	switch {
@@ -269,7 +269,7 @@ func DecodeEnvelope(body []byte, httpStatus int) (*Envelope, error) {
 			env.Result = row.Result
 		} else {
 			// ok (or no explicit verdict) but genuinely no result row: a clear empty
-			// result, never a decode failure — the caller renders its own clear message.
+			// result, never a decode failure - the caller renders its own clear message.
 			env.Result = &Result{}
 		}
 	default:
@@ -317,7 +317,7 @@ func AsProblem(err error) (*ProblemError, bool) {
 	return nil, false
 }
 
-// Records turns a Result into a slice of column-keyed maps — the ergonomic form the
+// Records turns a Result into a slice of column-keyed maps - the ergonomic form the
 // TUI and the human-readable subcommands render from. A nil Result yields nil.
 func (r *Result) Records() []map[string]any {
 	if r == nil {

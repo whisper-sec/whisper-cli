@@ -45,7 +45,7 @@ func TestProbeFreePort_ReturnsBaseWhenFree(t *testing.T) {
 }
 
 // TestProbeFreePort_StepsPastTaken: when the base (and the next few) are taken, the probe steps
-// upward to the first free port — deterministic AND collision-avoiding.
+// upward to the first free port - deterministic AND collision-avoiding.
 func TestProbeFreePort_StepsPastTaken(t *testing.T) {
 	saved := portFreeFn
 	defer func() { portFreeFn = saved }()
@@ -60,7 +60,7 @@ func TestProbeFreePort_StepsPastTaken(t *testing.T) {
 		t.Fatalf("ProbeFreePort: %v", err)
 	}
 	if got != base+3 {
-		t.Fatalf("ProbeFreePort = %d, want base+3 (%d) — should step past the taken ports", got, base+3)
+		t.Fatalf("ProbeFreePort = %d, want base+3 (%d) - should step past the taken ports", got, base+3)
 	}
 }
 

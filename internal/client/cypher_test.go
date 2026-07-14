@@ -75,7 +75,7 @@ func TestLit(t *testing.T) {
 }
 
 func TestCypherMapIsDeterministic(t *testing.T) {
-	// Keys must come out sorted regardless of insertion/iteration order — stable for
+	// Keys must come out sorted regardless of insertion/iteration order - stable for
 	// tests, caches, and logs.
 	m := map[string]any{"zeta": 1, "alpha": "x", "mid": true}
 	want := "{alpha:'x',mid:true,zeta:1}"
@@ -103,14 +103,14 @@ func TestBuildAgentsQuery(t *testing.T) {
 	})
 	t.Run("injection attempt is trapped inside the literal", func(t *testing.T) {
 		got := BuildAgentsQuery("list", map[string]any{"kind": "agents'}}) DETACH DELETE n //"})
-		// The whole hostile value remains a single quoted literal — the only un-escaped
+		// The whole hostile value remains a single quoted literal - the only un-escaped
 		// quotes in the string are the literal's own delimiters; the args map never
 		// closes early.
 		if !strings.Contains(got, "args:{kind:'agents''}}) DETACH DELETE n //'}") {
 			t.Fatalf("injection not trapped: %q", got)
 		}
 		if strings.Contains(got, "DETACH DELETE n //'}})\n") {
-			t.Fatalf("query terminated early — breakout: %q", got)
+			t.Fatalf("query terminated early - breakout: %q", got)
 		}
 	})
 }

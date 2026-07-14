@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// TestWriteProxyEnv_Content: the proxy.env carries the canonical vars — HTTP-CONNECT primary,
+// TestWriteProxyEnv_Content: the proxy.env carries the canonical vars - HTTP-CONNECT primary,
 // SOCKS additive, NO_PROXY incl. the IPv6 loopback ::1, and BOTH upper- and lower-case twins.
 func TestWriteProxyEnv_Content(t *testing.T) {
 	p := PathsFor(t.TempDir())
@@ -44,7 +44,7 @@ func TestWriteProxyEnv_Content(t *testing.T) {
 		}
 	}
 
-	// Perms 0600 (advisory/no-op on Windows — Go synthesizes 0666 there regardless).
+	// Perms 0600 (advisory/no-op on Windows - Go synthesizes 0666 there regardless).
 	if runtime.GOOS != "windows" {
 		fi, _ := os.Stat(p.ProxyEnvFile)
 		if perm := fi.Mode().Perm(); perm != 0o600 {
@@ -87,7 +87,7 @@ func TestWriteProxyEnv_Idempotent(t *testing.T) {
 }
 
 // TestWriteProxyEnv_RefusesSymlink: a symlinked proxy.env -> ../.env must NOT be written through
-// (clobber-safety) — the user's ./.env stays byte-identical and we return a clear error.
+// (clobber-safety) - the user's ./.env stays byte-identical and we return a clear error.
 func TestWriteProxyEnv_RefusesSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("symlink semantics differ on Windows")

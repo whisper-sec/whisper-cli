@@ -11,8 +11,8 @@ import (
 )
 
 // TestCreate_JSON_EmitsEnvelopeToStdout is the regression test: under --json, the default
-// (op:identity) `whisper create` MUST write the machine JSON envelope — carrying the routable
-// /128 address — to STDOUT so a programmatic caller (the whisper-id Node+Python SDKs'
+// (op:identity) `whisper create` MUST write the machine JSON envelope - carrying the routable
+// /128 address - to STDOUT so a programmatic caller (the whisper-id Node+Python SDKs'
 // register()) can JSON-parse it. Human chrome stays on stderr. Without the fix, create prints
 // only a human line to stderr and emits ZERO bytes to stdout, so this test fails (empty stdout,
 // which is not valid JSON).
@@ -39,7 +39,7 @@ func TestCreate_JSON_EmitsEnvelopeToStdout(t *testing.T) {
 		t.Fatalf("create must fire op:identity, ops=%v", opsSeen(seen))
 	}
 
-	// STDOUT must be VALID JSON — a programmatic caller parses exactly these bytes.
+	// STDOUT must be VALID JSON - a programmatic caller parses exactly these bytes.
 	trimmed := strings.TrimSpace(stdout)
 	if trimmed == "" {
 		t.Fatalf("create --json emitted 0 bytes to stdout; want the machine JSON envelope")

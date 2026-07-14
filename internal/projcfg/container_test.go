@@ -12,7 +12,7 @@ import (
 )
 
 // TestWriteComposeSidecar_Content: the compose overlay carries the whisper sidecar on the config
-// port, the official image, the env-var-sourced API key (never a literal), and — with a service —
+// port, the official image, the env-var-sourced API key (never a literal), and - with a service -
 // an app wired via shared netns + proxy.env. No secret may appear.
 func TestWriteComposeSidecar_Content(t *testing.T) {
 	p := PathsFor(t.TempDir())

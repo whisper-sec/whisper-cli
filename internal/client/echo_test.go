@@ -5,7 +5,7 @@ package client
 
 import "testing"
 
-// TestParseEchoIP: the echo body is read liberally — a JSON {"ip":…} object OR a bare
+// TestParseEchoIP: the echo body is read liberally - a JSON {"ip":…} object OR a bare
 // text/plain IP line (Postel: liberal in what we accept).
 func TestParseEchoIP(t *testing.T) {
 	cases := []struct {

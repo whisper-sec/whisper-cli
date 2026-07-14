@@ -14,7 +14,7 @@ import (
 )
 
 // The activity chain rendered AS STRUCTURE (the design's showpiece): each event is one
-// row laid out in FIXED LANES — time · client_src · ⟶qname · ⟶peer · flow-heat — so the
+// row laid out in FIXED LANES - time · client_src · ⟶qname · ⟶peer · flow-heat - so the
 // eye scans columns, not free text. The connector between lanes encodes the decision as
 // a DISTINCT SHAPE, not just a colour:
 //
@@ -23,7 +23,7 @@ import (
 //	blocked AT EGRESS    client ──▶ qname ──╳ peer               (resolved, then denied)
 //
 // So "blocked at dns" and "blocked at egress" are different silhouettes you can read at a
-// glance across a fast-scrolling feed — the ──╳ sits at a different lane. Colour
+// glance across a fast-scrolling feed - the ──╳ sits at a different lane. Colour
 // reinforces (green allow / red block) but is never the only signal (NO_COLOR keeps the
 // glyph shapes). A flow-heat bar maps this row's bytes against the busiest row on screen,
 // so a fat transfer stands out without reading the number.
@@ -49,7 +49,7 @@ func laneFor(w int) chainLanes {
 	const spacesW = 8  // inter-segment single spaces
 	rest := w - tsW - kindW - 2*connW - heatW - reasonW - spacesW
 	if rest < 12 {
-		// Too narrow for full lanes — collapse the heat bar and shrink connectors.
+		// Too narrow for full lanes - collapse the heat bar and shrink connectors.
 		rest = w - tsW - kindW - 2*2 - 2
 		if rest < 6 {
 			rest = 6
@@ -109,7 +109,7 @@ func (a *App) chainDNS(e model.Event, ln chainLanes, ts string) string {
 	return line
 }
 
-// chainConn renders a conn row — the egress side. A denied egress (fw-deny/ssrf-block/
+// chainConn renders a conn row - the egress side. A denied egress (fw-deny/ssrf-block/
 // reset/error) shows the qname lane filled (it resolved) then ──╳ at the PEER lane
 // (silhouette: "blocked AT EGRESS"). A clean transfer shows the flow-heat bar sized to
 // this row's bytes vs the busiest row on screen.
@@ -132,7 +132,7 @@ func (a *App) chainConn(e model.Event, ln chainLanes, ts string, peakBytes int64
 	conn1 := a.connector(true)    // client ──▶ qname
 	conn2 := a.connector(!denied) // qname ──▶/╳ peer
 	// The flow-heat bar IS the bandwidth visual; show the numeric ↑↓ only when there is no
-	// heat bar (narrow terminals), so the close-reason glyph — the "why" — always fits.
+	// heat bar (narrow terminals), so the close-reason glyph - the "why" - always fits.
 	var tailParts []string
 	if ln.heat > 0 {
 		tailParts = append(tailParts, a.flowHeat(e.BytesUp+e.BytesDown, peakBytes, ln.heat-1))
@@ -158,7 +158,7 @@ func (a *App) connector(allowed bool) string {
 }
 
 // flowHeat renders a tiny inline bar (▰ filled / ▱ empty, framed in ▕ ▏) sizing this
-// row's bytes against the busiest row on screen — a fat transfer stands out without
+// row's bytes against the busiest row on screen - a fat transfer stands out without
 // reading the number. With colour off the frame + glyphs still convey it.
 func (a *App) flowHeat(bytes, peak int64, width int) string {
 	if width < 2 {
@@ -246,9 +246,9 @@ func isDeny(reason string) bool {
 // --- text lane helpers -----------------------------------------------------------
 
 // padTrunc fits a plain string to exactly n visible columns: truncate-with-ellipsis when
-// too long, right-pad when short — so the lane keeps a fixed footprint (no jitter). It is
+// too long, right-pad when short - so the lane keeps a fixed footprint (no jitter). It is
 // applied to the PLAIN text BEFORE styling (styling adds zero-width ANSI), which is the
-// correct order — measuring a styled string's runes would be wrong.
+// correct order - measuring a styled string's runes would be wrong.
 func padTrunc(s string, n int) string {
 	if n <= 0 {
 		return ""

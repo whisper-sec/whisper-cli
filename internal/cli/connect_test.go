@@ -95,7 +95,7 @@ func connectResult() *client.Result {
 }
 
 // fakeSession is a verified session with a bearer-free local endpoint, as connectAndVerify
-// would yield. It carries NO bearer (the whole point — the bearer stays in the proxy).
+// would yield. It carries NO bearer (the whole point - the bearer stays in the proxy).
 func fakeSession() *egressSession {
 	return &egressSession{
 		endpoint: "socks5h://127.0.0.1:1080",
@@ -143,7 +143,7 @@ func TestRenderConnect_QuietOnlyValue(t *testing.T) {
 }
 
 // TestRenderConnect_VerboseLocalDetailNoBearer: --verbose adds the LOCAL endpoint detail
-// only — never a server proxy string, and NEVER the bearer (§4.4 bearer hygiene).
+// only - never a server proxy string, and NEVER the bearer (§4.4 bearer hygiene).
 func TestRenderConnect_VerboseLocalDetailNoBearer(t *testing.T) {
 	savedG := g
 	g = globalFlags{}
@@ -155,14 +155,14 @@ func TestRenderConnect_VerboseLocalDetailNoBearer(t *testing.T) {
 	}
 	for _, leak := range []string{"et_secretbearer", "egress.whisper.online", "http_proxy", "connection_string", "doh_url"} {
 		if strings.Contains(stdout+stderr, leak) {
-			t.Fatalf("--verbose leaked %q — bearer/server-field hygiene violated: out=%q err=%q", leak, stdout, stderr)
+			t.Fatalf("--verbose leaked %q - bearer/server-field hygiene violated: out=%q err=%q", leak, stdout, stderr)
 		}
 	}
 }
 
 // TestConnect_BearerNeverInOutput: run the FULL connect command (verbose + quiet) against
 // a control plane whose op:connect carries an et_ bearer in http_proxy/connection_string,
-// and grep ALL output for the bearer / server proxy host. It must NEVER appear — this is
+// and grep ALL output for the bearer / server proxy host. It must NEVER appear - this is
 // the load-bearing §4.4 bearer-hygiene guarantee.
 func TestConnect_BearerNeverInOutput(t *testing.T) {
 	// "json" is the load-bearing case here: the raw op:connect envelope carries the et_
@@ -225,7 +225,7 @@ func TestParseConnectEnvelope_ExtractsUpstreamAndBearer(t *testing.T) {
 }
 
 // connectNestedEnvelopeJSON is the EXACT op:connect wire shape verified against the live
-// control plane — see client.connectNestedEnvelopeJSON for the shared fixture text.
+// control plane - see client.connectNestedEnvelopeJSON for the shared fixture text.
 // Duplicated here (package cli can't import a client _test.go const) with the same bytes.
 const connectNestedEnvelopeJSON = `{"columns":["op","ok","status","result","error","retry_after"],
  "rows":[{"op":"connect","ok":true,"status":200,
@@ -235,7 +235,7 @@ const connectNestedEnvelopeJSON = `{"columns":["op","ok","status","result","erro
 
 // TestParseConnectEnvelope_NestedIssueEnvelope feeds the EXACT nested envelope
 // through the FULL decode path (client.DecodeEnvelope -> parseConnectEnvelope) and
-// asserts the CLI extracts a usable connection string + /128 — no "no egress".
+// asserts the CLI extracts a usable connection string + /128 - no "no egress".
 func TestParseConnectEnvelope_NestedIssueEnvelope(t *testing.T) {
 	env, err := client.DecodeEnvelope([]byte(connectNestedEnvelopeJSON), 200)
 	if err != nil {
@@ -264,7 +264,7 @@ func TestParseConnectEnvelope_NestedIssueEnvelope(t *testing.T) {
 
 // TestParseConnectEnvelope_EmptyResultRows_ClearMessage is the NEGATIVE case:
 // op:connect genuinely returns ok with NO egress row. The CLI must still fail with the
-// same clear, helpful message — never a decode crash.
+// same clear, helpful message - never a decode crash.
 func TestParseConnectEnvelope_EmptyResultRows_ClearMessage(t *testing.T) {
 	body := []byte(`{"columns":["op","ok","status","result","error","retry_after"],
  "rows":[{"op":"connect","ok":true,"status":200,"result":{"columns":["tier","address"],"rows":[]},"error":null,"retry_after":null}]}`)
@@ -310,7 +310,7 @@ func TestParseConnectEnvelope_HttpProxyMissingPortDefaultsTo443(t *testing.T) {
 
 // TestConnect_FullCommand_NestedEnvelope runs the WHOLE `whisper connect` command against
 // a control plane that replies with the EXACT nested envelope shape (object-keyed
-// outer YIELD row) and confirms it succeeds end-to-end — the historical symptom was
+// outer YIELD row) and confirms it succeeds end-to-end - the historical symptom was
 // RunE returning "the control plane returned no egress" despite a valid egress row.
 func TestConnect_FullCommand_NestedEnvelope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -320,7 +320,7 @@ func TestConnect_FullCommand_NestedEnvelope(t *testing.T) {
 		switch sniffOp(string(raw)) {
 		case "connect":
 			_, _ = w.Write([]byte(connectNestedEnvelopeJSON))
-		default: // op:list — an existing fleet so connect skips the create-first path
+		default: // op:list - an existing fleet so connect skips the create-first path
 			_, _ = w.Write([]byte(listJSON([]agentChoice{{name: "scout", addr: "2a04:2a01:beef::1"}})))
 		}
 	}))

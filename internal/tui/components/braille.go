@@ -12,12 +12,12 @@ import (
 // Braille is the btop-grade hero graph: a multi-row chart of a value series drawn on a
 // 2×4 sub-cell Unicode-braille canvas (U+2800–U+28FF). Each character cell packs 2
 // horizontal dot-columns × 4 vertical dot-rows, so a w×h cell area carries 2w×4h plot
-// points — far higher resolution than a one-row sparkline. The series is value-mapped
+// points - far higher resolution than a one-row sparkline. The series is value-mapped
 // to a green→cyan→amber gradient by height (the btop glow), Y- and time-axes frame it,
 // and a NO_COLOR/non-UTF terminal falls back to a stacked ASCII bar chart.
 //
 // Pure render function (value-in, string-out): no Bubble Tea, no network, no per-cell
-// state — so it is trivially unit-testable and re-renders identically each frame.
+// state - so it is trivially unit-testable and re-renders identically each frame.
 
 // brailleDot maps a (col∈{0,1}, row∈{0..3}) sub-cell position to its braille bit. This
 // is the standard Unicode-braille dot numbering (NOT raster order): the low six dots are
@@ -37,7 +37,7 @@ const brailleBlank = rune(0x2800)
 
 // BrailleOpts configures a hero-graph render.
 type BrailleOpts struct {
-	Width   int  // total width in CELLS (incl. the Y-axis gutter) — the panel interior
+	Width   int  // total width in CELLS (incl. the Y-axis gutter) - the panel interior
 	Height  int  // total height in CELLS (incl. the time-axis row)
 	NoColor bool // ascii fallback + no gradient
 	// Gradient stops, low→high (a tall bar shifts toward Hi). Ignored when NoColor.
@@ -50,15 +50,15 @@ type BrailleOpts struct {
 
 // Braille renders vals as a hero graph filling Width×Height cells. The most-recent
 // samples occupy the right edge; older samples scroll off the left. A flat/empty series
-// renders a clean baseline (never a blank panel — the graph is always alive).
+// renders a clean baseline (never a blank panel - the graph is always alive).
 func Braille(vals []float64, o BrailleOpts) string {
 	if o.Width < 8 || o.Height < 2 {
-		// Too small for axes — degrade to a single-row sparkline (never break the layout).
+		// Too small for axes - degrade to a single-row sparkline (never break the layout).
 		return Sparkline(vals, max(o.Width, 1), o.NoColor)
 	}
 
 	// Reserve a left gutter for Y labels and a bottom row for the time axis.
-	const gutter = 7 // "999.9k│" — wide enough for a compact peak label + the rule
+	const gutter = 7 // "999.9k│" - wide enough for a compact peak label + the rule
 	plotW := o.Width - gutter
 	plotH := o.Height - 1 // bottom row is the time axis
 	if plotW < 2 {
@@ -167,7 +167,7 @@ func (o BrailleOpts) yLabel(cellRow, plotH int, peak float64) string {
 
 // timeAxis renders the bottom axis row: a corner, then a "-Nm … now" rule spanning the
 // plot width (each cell holds 2 samples; samples are seconds at the per-second tick).
-// The plain axis string is built first, then styled ONCE — so width math never trips
+// The plain axis string is built first, then styled ONCE - so width math never trips
 // over ANSI escapes (a real foot-gun: styling per-rune then counting runes is wrong).
 func (o BrailleOpts) timeAxis(plotW, gutter int) string {
 	corner := o.Axis.Render(strings.Repeat(" ", gutter-1) + "└")

@@ -11,8 +11,8 @@ import (
 )
 
 // The Whisper brand mark as terminal art (approved on): the four-ring
-// cloverleaf, baked at two sizes in logo_gen.go. Colour is the BRAND ramp —
-// blue → violet — deliberately theme-independent (a logo keeps its colours);
+// cloverleaf, baked at two sizes in logo_gen.go. Colour is the BRAND ramp -
+// blue → violet - deliberately theme-independent (a logo keeps its colours);
 // lipgloss/termenv degrade truecolor to 256 automatically. On NO_COLOR every
 // helper returns "" / plain text and the callers keep their text-only layout,
 // so the mark never renders uncoloured.
@@ -24,21 +24,34 @@ const (
 )
 
 // renderLogo builds the coloured mark from a baked span table ("" on NoColor).
+//
+// The baked rows are RAGGED (each row's spans stop at its last glyph), but a raster
+// must ship as a RECTANGLE: every emitted line is right-padded to the table's widest
+// row. Any aligner downstream (lipgloss.JoinVertical, lipgloss.Place) then shifts the
+// whole block uniformly. Without the padding, per-line centering re-aligned each row
+// by its OWN width and bent the mark sideways (the broken `?` help logo: the narrow
+// top/bottom rings drifted two columns right of the middle ones).
 func renderLogo(rows [][]logoSpan, noColor bool) string {
 	if noColor {
 		return ""
 	}
+	w := logoWidth(rows)
 	var b strings.Builder
 	for i, row := range rows {
 		if i > 0 {
 			b.WriteByte('\n')
 		}
+		vis := 0
 		for _, sp := range row {
 			if sp.c == "" {
 				b.WriteString(sp.s)
 			} else {
 				b.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color(sp.c)).Render(sp.s))
 			}
+			vis += len([]rune(sp.s)) // quadrant blocks + spaces are all single-width
+		}
+		if vis < w {
+			b.WriteString(strings.Repeat(" ", w-vis))
 		}
 	}
 	return b.String()
@@ -47,8 +60,23 @@ func renderLogo(rows [][]logoSpan, noColor bool) string {
 // logoRows reports a baked table's height in terminal rows.
 func logoRows(rows [][]logoSpan) int { return len(rows) }
 
+// logoWidth reports a baked table's width in terminal columns (its widest row).
+func logoWidth(rows [][]logoSpan) int {
+	w := 0
+	for _, row := range rows {
+		vis := 0
+		for _, sp := range row {
+			vis += len([]rune(sp.s))
+		}
+		if vis > w {
+			w = vis
+		}
+	}
+	return w
+}
+
 // brandGradient colours each rune of s across the blue→violet brand ramp
-// (the header wordmark). Plain bold on NoColor — meaning never colour-only.
+// (the header wordmark). Plain bold on NoColor - meaning never colour-only.
 func brandGradient(s string, noColor bool) string {
 	if noColor {
 		return lipgloss.NewStyle().Bold(true).Render(s)

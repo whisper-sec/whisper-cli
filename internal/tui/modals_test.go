@@ -6,7 +6,7 @@ package tui
 import "testing"
 
 // TestValidateAgentName covers the create-modal mandatory-name validator (§3.2 hole b):
-// the "(required)" label is now TRUE — an empty/blank/whitespace name is rejected, any
+// the "(required)" label is now TRUE - an empty/blank/whitespace name is rejected, any
 // non-blank name is accepted (the server polices reserved/premium names beyond this).
 func TestValidateAgentName(t *testing.T) {
 	bad := []string{"", " ", "\t", "\n", "   \t  "}
@@ -25,7 +25,7 @@ func TestValidateAgentName(t *testing.T) {
 
 // TestBuildCreateArgs_RejectsBlankAtWriteLayer covers §3.2 hole b's DEFENSE IN DEPTH: the
 // create modal's submit goes through buildCreateArgs, which re-applies the trimmed-non-blank
-// guard at the WRITE layer — so a blank name can NEVER fire op:identity/op:register unnamed
+// guard at the WRITE layer - so a blank name can NEVER fire op:identity/op:register unnamed
 // even if the huh field validator were somehow bypassed. A non-blank name yields a trimmed
 // label and the right op.
 func TestBuildCreateArgs_RejectsBlankAtWriteLayer(t *testing.T) {

@@ -42,7 +42,7 @@ func wireguardRecordingServer(t *testing.T, seen *[]recordedCall) *httptest.Serv
 				`"columns":["tier","wireguard_config","server_public_key","endpoint","client_public_key","client_private_key","address","allowed_ips","fqdn","ptr","dns","note"],` +
 				`"rows":[["wireguard","[Interface]\nAddress = 2a04:2a01:9::abcd/128\nDNS = 2a04:2a01:0:53::1\n\n[Peer]\nPublicKey = ` + srvPub + `\nEndpoint = box.example:51826\nAllowedIPs = ::/0\nPersistentKeepalive = 25\n",` +
 				`"` + srvPub + `","box.example:51826","wg-client-pub","","2a04:2a01:9::abcd","2a04:2a01:9::abcd/128","scout.agents.example","...","2a04:2a01:0:53::1","Tier-1 routed WireGuard"]]}}`))
-		default: // list — one existing agent so connect binds it without a create
+		default: // list - one existing agent so connect binds it without a create
 			_, _ = w.Write([]byte(listJSON([]agentChoice{{name: "scout", addr: "2a04:2a01:9::abcd"}})))
 		}
 	}))
@@ -101,7 +101,7 @@ func TestConnect_WireGuardTier_SendsPublicKeyNotPrivate(t *testing.T) {
 	})
 
 	// The op:connect body must carry tier:'wireguard', a public_key (the generated WG one), AND
-	// identity_public_key (the generated identity SPKI) — and must NOT carry any private key
+	// identity_public_key (the generated identity SPKI) - and must NOT carry any private key
 	// or PEM anywhere in the body or in stdout/stderr.
 	body, ok := bodyForOp(seen, "connect")
 	if !ok {
@@ -150,7 +150,7 @@ func TestConnect_WireGuardTier_SendsPublicKeyNotPrivate(t *testing.T) {
 	}
 
 	// The identity key must be persisted 0600 (idkey.Save's contract) and REUSED on a second
-	// connect for the same (connect-first ⇒ "default"-handle) identity — same SPKI both times.
+	// connect for the same (connect-first ⇒ "default"-handle) identity - same SPKI both times.
 	entries, rerr := os.ReadDir(idDir)
 	if rerr != nil || len(entries) == 0 {
 		t.Fatalf("expected the identity key to be persisted under %s, readdir err=%v entries=%v", idDir, rerr, entries)
@@ -165,7 +165,7 @@ func TestConnect_WireGuardTier_SendsPublicKeyNotPrivate(t *testing.T) {
 }
 
 // TestPrepareWireGuard_NoOpForSocks5: a non-WG tier mints no key and touches no args (the
-// socks5/anyip path is untouched — zero behaviour change for the existing tiers).
+// socks5/anyip path is untouched - zero behaviour change for the existing tiers).
 func TestPrepareWireGuard_NoOpForSocks5(t *testing.T) {
 	for _, tier := range []string{"", "socks5", "anyip"} {
 		args := map[string]any{"agent": "x"}
@@ -205,7 +205,7 @@ func TestPrepareWireGuard_AliasWG(t *testing.T) {
 }
 
 // TestPrepareIdentityKey_NoOpForSocks5 ( client-side mirror): the identity keypair is
-// minted+injected ONLY for the routed tier — socks5/anyip (and no tier) must touch neither the key
+// minted+injected ONLY for the routed tier - socks5/anyip (and no tier) must touch neither the key
 // nor the args.
 func TestPrepareIdentityKey_NoOpForSocks5(t *testing.T) {
 	defer idkey.SetIdentityDirForTest(t.TempDir())()
@@ -249,7 +249,7 @@ func TestPrepareIdentityKey_WireGuard_InjectsPublicSpkiOnly(t *testing.T) {
 }
 
 // TestPrepareIdentityKey_ReusesPersistedKeyForTheSameHandle ( client-side mirror): a second
-// connect for the SAME handle reuses the SAME persisted key — the server-side idempotent re-pin
+// connect for the SAME handle reuses the SAME persisted key - the server-side idempotent re-pin
 // then costs zero zone writes.
 func TestPrepareIdentityKey_ReusesPersistedKeyForTheSameHandle(t *testing.T) {
 	defer idkey.SetIdentityDirForTest(t.TempDir())()
@@ -272,7 +272,7 @@ func TestPrepareIdentityKey_ReusesPersistedKeyForTheSameHandle(t *testing.T) {
 }
 
 // TestParseConnectEnvelope_WireGuard: a tier:wireguard result is parsed into the WG fields
-// (server pubkey, endpoint, address, dns) and flagged isWireGuard — the seam bring-up uses.
+// (server pubkey, endpoint, address, dns) and flagged isWireGuard - the seam bring-up uses.
 func TestParseConnectEnvelope_WireGuard(t *testing.T) {
 	srvPub := base64.StdEncoding.EncodeToString(make([]byte, 32))
 	res := &client.Result{

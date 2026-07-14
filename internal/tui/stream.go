@@ -28,7 +28,7 @@ func (a *App) startStream() tea.Cmd {
 	}
 	// Guard: only one stream goroutine at a time (the 1-token channel). If the previous
 	// goroutine hasn't released yet (a slow teardown after a narrow change), don't bind to
-	// its soon-to-close channel — retry the re-arm shortly so the restart always lands.
+	// its soon-to-close channel - retry the re-arm shortly so the restart always lands.
 	select {
 	case a.streamMu <- struct{}{}:
 	default:
@@ -49,7 +49,7 @@ func (a *App) startStream() tea.Cmd {
 	go func() {
 		// On exit: release the single-stream token AND close this goroutine's own channel.
 		// Each goroutine is the sole sender on its `ch` (created fresh above, captured by
-		// value), so closing it here is safe — and it unblocks any pending waitStream still
+		// value), so closing it here is safe - and it unblocks any pending waitStream still
 		// reading the OLD channel after a restart (it gets ok=false → streamIdle), which
 		// prevents a leaked, forever-blocked tea.Cmd per focus change. `send` already guards
 		// on ctx.Done, so no send races the close.
@@ -69,7 +69,7 @@ func (a *App) startStream() tea.Cmd {
 			}
 			// The stream ended (EOF, a 503 subscriber-cap, a 404/401, a transport
 			// error). ALWAYS drop to the op:logs poll fallback so the picture keeps
-			// updating — fail OPEN, never a hard stop — and surface a non-503 error
+			// updating - fail OPEN, never a hard stop - and surface a non-503 error
 			// once (not every retry) so a deterministic failure is never silent.
 			st := streamStateMsg{state: streamPoll}
 			if pe, ok := client.AsProblem(err); ok && pe.Status != 503 && pe.Status != lastStatus {
@@ -139,6 +139,6 @@ func send(ch chan tea.Msg, ctx context.Context, msg tea.Msg) {
 	case ch <- msg:
 	case <-ctx.Done():
 	default:
-		// full — drop (the ring buffer in the UI already bounds memory)
+		// full - drop (the ring buffer in the UI already bounds memory)
 	}
 }

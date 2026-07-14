@@ -67,7 +67,7 @@ func TestSaveLoad_RoundTripAndShape(t *testing.T) {
 	}
 }
 
-// TestLoad_MissingIsNotError: a project with no .whisper/config returns (nil, nil) — "no
+// TestLoad_MissingIsNotError: a project with no .whisper/config returns (nil, nil) - "no
 // config" is a normal state the caller decides on, not an error.
 func TestLoad_MissingIsNotError(t *testing.T) {
 	p := PathsFor(t.TempDir())
@@ -81,7 +81,7 @@ func TestLoad_MissingIsNotError(t *testing.T) {
 }
 
 // TestLoad_CorruptIsClearError: a present-but-malformed config is a clear error (never an
-// opaque decode panic) — Postel: fail with a helpful message.
+// opaque decode panic) - Postel: fail with a helpful message.
 func TestLoad_CorruptIsClearError(t *testing.T) {
 	p := PathsFor(t.TempDir())
 	if err := os.MkdirAll(p.WhisperDir, 0o700); err != nil {

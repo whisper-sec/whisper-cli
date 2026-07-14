@@ -15,7 +15,7 @@ import (
 // ip_test.go covers `whisper ip`: a verified /128 → green line + exit 0; a mismatch /
 // out-of-range egress → the remediation + a non-zero exit; --json shape. The live-egress
 // tail (local proxy + network echo) is replaced via the connectAndVerify seam so the test
-// runs offline and deterministically — the verify ASSERTIONS themselves (range + ==/128)
+// runs offline and deterministically - the verify ASSERTIONS themselves (range + ==/128)
 // are covered directly in TestVerifyRange (connect_test.go).
 
 // ipStub installs a connectAndVerify that simulates an echo returning observedIP, applies
@@ -32,10 +32,10 @@ func ipStub(t *testing.T, observedIP string) func() {
 		sess := &egressSession{endpoint: "socks5h://127.0.0.1:1080", addr: ce.address, name: name}
 		// Mirror verifyEgress's assertions against the simulated observed source IP.
 		if !inWhisperRange(observedIP) {
-			return nil, &client.ProblemError{Status: 502, Detail: "your traffic isn't going through Whisper yet — please try `whisper connect` again"}
+			return nil, &client.ProblemError{Status: 502, Detail: "your traffic isn't going through Whisper yet - please try `whisper connect` again"}
 		}
 		if sess.addr != "" && !sameIP(observedIP, sess.addr) {
-			return nil, &client.ProblemError{Status: 502, Detail: "connected, but the address didn't match your agent — please try `whisper connect` again"}
+			return nil, &client.ProblemError{Status: 502, Detail: "connected, but the address didn't match your agent - please try `whisper connect` again"}
 		}
 		sess.verified = true
 		return sess, nil

@@ -27,7 +27,7 @@ func stubEnsureDaemon(t *testing.T) func() {
 
 // TestInitClaude_ExistingAgent_WritesEverything: `init claude --agent <128>` on an existing
 // agent writes .whisper/config, the project agent file, and the merged settings, gitignores
-// them, and starts the daemon — all without minting an agent.
+// them, and starts the daemon - all without minting an agent.
 func TestInitClaude_ExistingAgent_WritesEverything(t *testing.T) {
 	var seen []recordedCall
 	srv := recordingServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:9::abcd"}}, &seen)

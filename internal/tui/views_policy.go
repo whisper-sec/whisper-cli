@@ -14,7 +14,7 @@ import (
 // policyView is the POLICY tab: the per-tenant DNS resolver policy editor. It reads the
 // current policy (op:policy, no args), lets the operator stage allow/block entries and
 // a default action, then writes them back (op:policy with args) on `w`. Edits are
-// LOCAL until written — nothing hits the control plane until the operator confirms.
+// LOCAL until written - nothing hits the control plane until the operator confirms.
 type policyView struct {
 	app    *App
 	w, h   int
@@ -205,7 +205,7 @@ func (v *policyView) view(w, h int) string {
 		b.WriteString(th.Accent.Render(fmt.Sprintf("add %s: ", v.editKind)) + v.editBuf + "▌\n")
 	}
 	if v.dirty {
-		b.WriteString("\n" + th.Warn.Render("unwritten changes — press  w  to apply") + "\n")
+		b.WriteString("\n" + th.Warn.Render("unwritten changes - press  w  to apply") + "\n")
 	}
 	if !v.loaded {
 		b.WriteString(th.Dim.Render("loading current policy…") + "\n")

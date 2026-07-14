@@ -5,10 +5,10 @@
 // palette (the signature 'whisper' theme plus nord/gruvbox), the Lip Gloss style set
 // every view renders through, and the colour policy.
 //
-// Robustness Principle: conservative in what we EMIT — colour is a courtesy, never a
+// Robustness Principle: conservative in what we EMIT - colour is a courtesy, never a
 // requirement. NO_COLOR (https://no-color.org) always wins; with colour off every
 // status that relied on it also carries a glyph (●/✓/✗/BLOCK), so meaning never
-// depends on colour alone (accessibility). Liberal in what we ACCEPT — an unknown
+// depends on colour alone (accessibility). Liberal in what we ACCEPT - an unknown
 // theme name falls back to the signature default, never an error.
 package theme
 
@@ -51,7 +51,7 @@ type Palette struct {
 	Warn  string // warnings (amber-ish)
 }
 
-// whisperPalette is the dev-guide §10 reference — web + TUI parity (verbatim hex).
+// whisperPalette is the dev-guide §10 reference - web + TUI parity (verbatim hex).
 var whisperPalette = Palette{
 	Bg:        "#0b0e14",
 	Surface:   "#0e1320",
@@ -68,7 +68,7 @@ var whisperPalette = Palette{
 	Warn:      "#e9c98f",
 }
 
-// nordPalette — the Nord scheme (nordtheme.com), adapted to our token set.
+// nordPalette - the Nord scheme (nordtheme.com), adapted to our token set.
 var nordPalette = Palette{
 	Bg:        "#2e3440",
 	Surface:   "#3b4252",
@@ -85,7 +85,7 @@ var nordPalette = Palette{
 	Warn:      "#d08770",
 }
 
-// gruvboxPalette — Gruvbox dark (github.com/morhetz/gruvbox).
+// gruvboxPalette - Gruvbox dark (github.com/morhetz/gruvbox).
 var gruvboxPalette = Palette{
 	Bg:        "#282828",
 	Surface:   "#32302f",
@@ -198,7 +198,7 @@ func Next(n Name) Name {
 	return Whisper
 }
 
-// color returns a Lip Gloss colour, or the no-op colour when colour is disabled — so a
+// color returns a Lip Gloss colour, or the no-op colour when colour is disabled - so a
 // single NoColor flag makes the whole style set render as plain text.
 func (t *Theme) color(hex string) lipgloss.TerminalColor {
 	if t.NoColor {
@@ -227,7 +227,7 @@ func (t *Theme) build() {
 	t.Header = lipgloss.NewStyle().Bold(true).Foreground(t.color(p.Text))
 	t.TabActive = lipgloss.NewStyle().Bold(true).Foreground(t.color(p.Bg)).Background(t.color(p.Accent)).Padding(0, 1)
 	if t.NoColor {
-		// No background to invert against — mark the active tab with brackets + bold.
+		// No background to invert against - mark the active tab with brackets + bold.
 		t.TabActive = lipgloss.NewStyle().Bold(true).Underline(true)
 	}
 	t.TabIdle = fg(p.Dim).Padding(0, 1)
@@ -262,8 +262,8 @@ func (t *Theme) build() {
 //
 // Two gradients, both three-stop and both glyph-backed elsewhere so colour is never the
 // only signal. "Flow" maps a TRAFFIC height (taller bars are busier, not worse):
-// green→cyan→amber — the calm, alive look for the hero graph + bandwidth sparkline.
-// "Load" maps a DANGER fraction (higher is worse): green→amber→red — for the conn/min,
+// green→cyan→amber - the calm, alive look for the hero graph + bandwidth sparkline.
+// "Load" maps a DANGER fraction (higher is worse): green→amber→red - for the conn/min,
 // bandwidth-saturation, and block-rate gauges. With colour off, callers fall back to the
 // ascii ramp / a plain bar (the components do this when NoColor is set).
 
@@ -326,7 +326,7 @@ func ColorDisabled(noColorFlag bool) bool {
 }
 
 // LightBackground reports whether a light terminal background was detected. We honour
-// COLORFGBG (the de-facto standard many terminals export) and otherwise assume dark —
+// COLORFGBG (the de-facto standard many terminals export) and otherwise assume dark -
 // the safe default for an infra tool. Liberal-in: a malformed COLORFGBG is ignored.
 func LightBackground() bool {
 	v := os.Getenv("COLORFGBG")

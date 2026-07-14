@@ -59,7 +59,7 @@ func TestMCP_Initialize(t *testing.T) {
 }
 
 // TestMCP_ToolsList: WITHOUT a key, tools/list returns exactly the keyless tools, each with an
-// inputSchema — the control tools are NOT advertised (graceful two-tier).
+// inputSchema - the control tools are NOT advertised (graceful two-tier).
 func TestMCP_ToolsList(t *testing.T) {
 	pinKeyState(t, "", "")
 	r := drive(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
@@ -93,7 +93,7 @@ func TestMCP_ToolsList(t *testing.T) {
 func TestMCP_PingAndNotificationsAndUnknown(t *testing.T) {
 	r := drive(t,
 		`{"jsonrpc":"2.0","id":3,"method":"ping"}`,
-		`{"jsonrpc":"2.0","method":"notifications/initialized"}`, // notification — no response
+		`{"jsonrpc":"2.0","method":"notifications/initialized"}`, // notification - no response
 		`{"jsonrpc":"2.0","id":4,"method":"does/notExist"}`,
 	)
 	if len(r) != 2 {

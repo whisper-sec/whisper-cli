@@ -18,18 +18,18 @@
 // Why this shape (and NOT wireproxy / WireGuard): the upstream egress ALREADY
 // mints a working et_ bearer bound to the /128 and speaks the HTTPS-CONNECT proxy
 // form on :443 (proven live). So needs no external binary and no WG peer
-// issuance — just this small goroutine-based listener. It is byte-identical across
+// issuance - just this small goroutine-based listener. It is byte-identical across
 // Linux / macOS / Windows (pure net + crypto/tls, no cgo, no privilege, no TUN).
 //
 // BEARER HYGIENE (THE load-bearing security property): the et_ bearer is held ONLY
 // in this process's memory (the upstream dialer closure). It is NEVER logged, never
 // printed, never placed in the local endpoint string, and never put in the child
-// environment — the child only ever sees socks5h://127.0.0.1:<port>. A tool, a
+// environment - the child only ever sees socks5h://127.0.0.1:<port>. A tool, a
 // shell history, a `ps`, or an env dump can never observe it.
 //
 // Postel: we accept BOTH SOCKS5 and HTTP-CONNECT from the local client (liberal in),
 // and we always send a hostname (not a pre-resolved IP) up to the egress so the
-// EGRESS resolves it — no local DNS stall, and the agent's /128 is the resolver
+// EGRESS resolves it - no local DNS stall, and the agent's /128 is the resolver
 // source too (conservative, deterministic out).
 package egress
 
@@ -54,7 +54,7 @@ import (
 // splice, lifetime) is parameterised over: the egress tier dials the HTTPS-CONNECT egress
 // (upstream below); the WireGuard tier (internal/wgtun) dials straight through the
 // userspace tunnel's netstack. Both reuse the SAME battle-tested front-end (half-close
-// Stop-drain, Background-rooted lifetime) — DRY, so every fix lands once.
+// Stop-drain, Background-rooted lifetime) - DRY, so every fix lands once.
 //
 // target is always a NAME or IP literal as the local client gave it; a Dialer that egresses
 // remotely (the egress) forwards the NAME so the far side resolves it from the /128 (no
@@ -62,7 +62,7 @@ import (
 // tunnel. connect MUST NOT log target or any secret it holds.
 type Dialer interface {
 	// Dial is EXPORTED so a Dialer implemented in ANOTHER package (internal/wgtun) can
-	// satisfy this interface — Go only lets the defining package satisfy an interface with
+	// satisfy this interface - Go only lets the defining package satisfy an interface with
 	// an unexported method, so the cross-package WG dialer requires an exported method here.
 	Dial(ctx context.Context, target string) (net.Conn, error)
 }
@@ -73,26 +73,26 @@ type Dialer interface {
 //
 // LIFETIME (the load-bearing fix): the proxy's serving loop is keyed off its
 // OWN context (life/cancel below), cancelled ONLY by Stop(). It is deliberately NOT tied
-// to the short-lived control-plane context the caller used for op:connect + verify — that
+// to the short-lived control-plane context the caller used for op:connect + verify - that
 // context is cancelled the instant the control call returns, so binding the proxy to it
 // would hand every persistent path (whisper run / connect / the guided hold) a DEAD proxy.
 // The owner (run = child lifetime, connect/guided = until SIGINT) calls Stop() when the
 // SESSION ends; the control ctx never reaches the accept loop or the per-tunnel dials.
 type Proxy struct {
-	endpoint string // socks5h://127.0.0.1:<port> — the ONLY value a caller may surface
-	addr     string // 127.0.0.1:<port> — the bare host:port, for an HTTP-proxy client
+	endpoint string // socks5h://127.0.0.1:<port> - the ONLY value a caller may surface
+	addr     string // 127.0.0.1:<port> - the bare host:port, for an HTTP-proxy client
 	ln       net.Listener
-	life     context.Context    // the proxy's OWN context — outlives the control ctx
+	life     context.Context    // the proxy's OWN context - outlives the control ctx
 	cancel   context.CancelFunc // cancels life; called by Stop() (and only Stop())
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 	osMu     sync.Mutex
-	onStop   func() // optional extra teardown (e.g. the WG device) — run once, under Stop()
+	onStop   func() // optional extra teardown (e.g. the WG device) - run once, under Stop()
 	dialer   Dialer
 }
 
 // Endpoint is the load-bearing connection string: socks5h://127.0.0.1:<port>.
-// (socks5h ⇒ the client hands us the hostname and WE forward it remotely — the
+// (socks5h ⇒ the client hands us the hostname and WE forward it remotely - the
 // egress resolves it, sourced from the /128, never the local box.)
 func (p *Proxy) Endpoint() string { return p.endpoint }
 
@@ -102,7 +102,7 @@ func (p *Proxy) Addr() string { return p.addr }
 
 // Stop shuts the listener, cancels the proxy's own lifetime context (tearing any
 // in-flight tunnels), and waits for in-flight conns to drain. Idempotent. This is the
-// SOLE thing that ends a proxy's life — the control ctx never does.
+// SOLE thing that ends a proxy's life - the control ctx never does.
 func (p *Proxy) Stop() {
 	p.stopOnce.Do(func() {
 		if p.cancel != nil {
@@ -134,7 +134,7 @@ func (p *Proxy) takeOnStop() func() {
 }
 
 // upstream holds everything needed to open ONE tunnel to the HTTPS-CONNECT egress.
-// The bearer lives here, in memory only — never logged, never surfaced.
+// The bearer lives here, in memory only - never logged, never surfaced.
 type upstream struct {
 	host    string      // egress host:port, e.g. egress.whisper.online:443
 	auth    string      // the full Proxy-Authorization header value (Basic w:<bearer>)
@@ -164,11 +164,11 @@ type Options struct {
 // returns a running *Proxy. upstreamHostPort is the egress (e.g.
 // "egress.whisper.online:443"); bearer is the et_ token (held in memory only).
 //
-// LIFETIME CONTRACT (the fix): the returned Proxy serves until Stop() — and
+// LIFETIME CONTRACT (the fix): the returned Proxy serves until Stop() - and
 // ONLY Stop(). The ctx passed here is NOT a lifetime signal: it is used solely as the
 // parent for input validation/setup. It is the caller's short-lived control-plane ctx
 // (cancelled the moment op:connect + verify return), so tying the proxy's accept loop or
-// its upstream dials to it would kill the proxy right after verify — handing every
+// its upstream dials to it would kill the proxy right after verify - handing every
 // persistent path (whisper run / connect / the guided hold) a DEAD endpoint. Instead the
 // proxy derives its OWN context from context.Background(), cancelled only by Stop(). The
 // owner Stop()s it when the SESSION ends (the child exits, or SIGINT/SIGTERM arrives).
@@ -182,7 +182,7 @@ func StartLocalProxy(ctx context.Context, upstreamHostPort, bearer string, opts 
 	// Liberal-accept a scheme/userinfo a caller might have left on the value.
 	host = stripScheme(host)
 	if !strings.Contains(host, ":") {
-		host += ":443" // sensible default — the egress speaks TLS on 443
+		host += ":443" // sensible default - the egress speaks TLS on 443
 	}
 	tok := strings.TrimSpace(bearer)
 	if tok == "" {
@@ -220,17 +220,17 @@ func StartLocalProxy(ctx context.Context, upstreamHostPort, bearer string, opts 
 // It is how the WireGuard tier (internal/wgtun) reuses every hardened front-end property
 // without re-implementing it: the WG side supplies a Dialer that dials through the userspace
 // tunnel's netstack. onStop (may be nil) runs ONCE under Stop() AFTER the accept loop and all
-// tunnels have drained — the seam to tear down the WG device + its health goroutine cleanly.
+// tunnels have drained - the seam to tear down the WG device + its health goroutine cleanly.
 //
 // The returned proxy's lifetime is Stop() ONLY (never a caller ctx), exactly like the egress
-// path — so a persistent connect/run/guided hold gets a live endpoint, not a dead one.
+// path - so a persistent connect/run/guided hold gets a live endpoint, not a dead one.
 func StartWithDialer(d Dialer, onStop func()) (*Proxy, error) {
 	return StartWithDialerPort(d, onStop, 0)
 }
 
 // StartWithDialerPort is StartWithDialer with an explicit local loopback port (0 ⇒ a free
 // port). `whisper init --tier wireguard` threads the project's DETERMINISTIC port through
-// here so the WG tier listens on the same fixed 127.0.0.1:<port> the egress tier would —
+// here so the WG tier listens on the same fixed 127.0.0.1:<port> the egress tier would -
 // the two tiers stay byte-identical on the local surface (only the upstream leg differs).
 func StartWithDialerPort(d Dialer, onStop func(), port int) (*Proxy, error) {
 	if d == nil {
@@ -251,7 +251,7 @@ func startWithDialer(d Dialer, onStop func(), wantPort int) (*Proxy, error) {
 	}
 	_, port, _ := net.SplitHostPort(ln.Addr().String())
 
-	// The proxy's OWN lifetime — rooted at Background, NOT at the caller's control ctx.
+	// The proxy's OWN lifetime - rooted at Background, NOT at the caller's control ctx.
 	// Cancelled only by Stop(). This is what every accept + per-tunnel dial keys off, so
 	// the proxy keeps serving long after the (short-lived) control ctx has been cancelled.
 	life, cancel := context.WithCancel(context.Background())
@@ -274,7 +274,7 @@ func startWithDialer(d Dialer, onStop func(), wantPort int) (*Proxy, error) {
 // listenLoopback opens a TCP listener on 127.0.0.1. wantPort 0 ⇒ the OS picks a free port
 // (the zero-config default); a non-zero wantPort pins that exact port so a project's
 // deterministic proxy is always reachable at the same address. A pinned port already in
-// use (e.g. a stale or foreign listener) is a clean, actionable error — never an opaque
+// use (e.g. a stale or foreign listener) is a clean, actionable error - never an opaque
 // stack trace (Postel: fail with a clear message).
 func listenLoopback(wantPort int) (net.Listener, error) {
 	addr := "127.0.0.1:0"
@@ -284,7 +284,7 @@ func listenLoopback(wantPort int) (net.Listener, error) {
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		if wantPort > 0 {
-			return nil, fmt.Errorf("egress: local port %d is already in use — is another whisper proxy running?", wantPort)
+			return nil, fmt.Errorf("egress: local port %d is already in use - is another whisper proxy running?", wantPort)
 		}
 		return nil, fmt.Errorf("egress: cannot open a local proxy port: %w", err)
 	}
@@ -293,19 +293,19 @@ func listenLoopback(wantPort int) (net.Listener, error) {
 
 // serve is the accept loop. Each accepted local conn is handled on its own goroutine
 // and either SOCKS5 or HTTP-CONNECT, sniffed from the first byte (Postel: accept both).
-// Every handler is given the proxy's OWN context (p.life) — never the control ctx — so a
+// Every handler is given the proxy's OWN context (p.life) - never the control ctx - so a
 // tunnel lives as long as the proxy does, not as long as the op:connect call did.
 //
 // Stop() cancels p.life; a per-conn watcher then closes the client conn, which unblocks
 // the splice's io.Copy so Stop()'s wg.Wait() drains promptly instead of parking on an
 // idle-but-open tunnel. (The watcher exits the instant the handler finishes on its own,
-// via the per-conn done channel — no leak when a client closes normally.)
+// via the per-conn done channel - no leak when a client closes normally.)
 func (p *Proxy) serve() {
 	defer p.wg.Done()
 	for {
 		conn, err := p.ln.Accept()
 		if err != nil {
-			return // listener closed (Stop) — clean exit
+			return // listener closed (Stop) - clean exit
 		}
 		p.wg.Add(1)
 		go func() {
@@ -384,7 +384,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 	}
 	defer up.Close()
 
-	// Success. Reply with a CONCRETE bind addr 0.0.0.0:0 (ATYP=IPv4) — NOT the DOMAIN
+	// Success. Reply with a CONCRETE bind addr 0.0.0.0:0 (ATYP=IPv4) - NOT the DOMAIN
 	// type, which makes some clients hang (the gotcha #2). After this byte the
 	// stream is a raw splice; no SOCKS codec sits in the path.
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
@@ -394,7 +394,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 }
 
 // readSocks5Target reads DST.ADDR + DST.PORT for the given ATYP and returns
-// "host:port". For a DOMAIN we keep the NAME (never resolve here — the egress does
+// "host:port". For a DOMAIN we keep the NAME (never resolve here - the egress does
 // remote DNS sourced from the /128). For v4/v6 we pass the literal up unchanged.
 func readSocks5Target(br *bufio.Reader, atyp byte) (string, bool) {
 	var host string
@@ -491,7 +491,7 @@ func (u *upstream) Dial(ctx context.Context, target string) (net.Conn, error) {
 		return nil, fmt.Errorf("TLS handshake to the Whisper egress failed")
 	}
 
-	// The CONNECT request — target sent as a NAME so the egress resolves it remotely.
+	// The CONNECT request - target sent as a NAME so the egress resolves it remotely.
 	// Proxy-Authorization carries the bearer; it is written to the SOCKET, never a log.
 	req := "CONNECT " + target + " HTTP/1.1\r\n" +
 		"Host: " + target + "\r\n" +
@@ -556,19 +556,19 @@ func stripScheme(s string) string {
 // upstream tunnel in both directions and blocks until the tunnel is fully done.
 //
 // HALF-CLOSE IS LOAD-BEARING. A TCP tunnel is two independent half-streams:
-// one direction reaching EOF means only THAT peer is done writing — the OTHER direction
+// one direction reaching EOF means only THAT peer is done writing - the OTHER direction
 // may still have data to carry. So on a natural peer EOF we ONLY half-close (CloseWrite)
 // the corresponding far end, propagating the FIN, and let the other io.Copy run to its
 // own EOF. We must NOT force the whole tunnel shut on the first EOF: doing so severs a
 // pooled keep-alive proxy connection mid-flight, which is exactly what surfaces to a
-// Node/undici client (Claude Code's connectivity preflight) as ERR_SOCKET_CLOSED — the
+// Node/undici client (Claude Code's connectivity preflight) as ERR_SOCKET_CLOSED - the
 // proxy RSTs the socket out from under a request it still intended to complete/reuse.
 //
 // STOP() STILL DRAINS PROMPTLY. The earlier Stop()-hang fix (whisper ip/run exiting 124
 // on an idle keep-alive upstream) is preserved a different, surgical way: when ctx
 // (the proxy's OWN p.life, cancelled ONLY by Stop()) fires, we force BOTH ends shut so a
 // copy parked reading an idle-but-open peer unblocks at once and wg.Wait() returns. The
-// natural-EOF path no longer slams the tunnel — only Stop() does.
+// natural-EOF path no longer slams the tunnel - only Stop() does.
 func splice(ctx context.Context, client net.Conn, clientBuf *bufio.Reader, up net.Conn) {
 	done := make(chan struct{}, 2)
 	go func() {
@@ -584,7 +584,7 @@ func splice(ctx context.Context, client net.Conn, clientBuf *bufio.Reader, up ne
 
 	// Wait for the tunnel to finish on its own (both half-streams reached EOF), OR for
 	// Stop() to cancel p.life. ONLY Stop() force-closes both ends; a natural one-way EOF
-	// does not — the half-close above already signalled the peer and the other direction
+	// does not - the half-close above already signalled the peer and the other direction
 	// keeps streaming until it, too, ends. This is what lets a half-closed keep-alive
 	// tunnel deliver its remaining direction instead of being RST (the fix).
 	n := 0
@@ -593,7 +593,7 @@ func splice(ctx context.Context, client net.Conn, clientBuf *bufio.Reader, up ne
 		case <-done:
 			n++
 		case <-ctx.Done():
-			// Stop() — tear both ends so any copy parked on an idle peer unblocks now.
+			// Stop() - tear both ends so any copy parked on an idle peer unblocks now.
 			_ = client.Close()
 			_ = up.Close()
 			for n < 2 {

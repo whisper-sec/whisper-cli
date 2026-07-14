@@ -33,7 +33,7 @@ type Event struct {
 	RCode    string
 	Decision string // lowercase: allow/block/sinkhole/rewrite/refused
 	Source   string // cache/graph/upstream/tenant-block/authoritative
-	Answer   string // null today — render "-"
+	Answer   string // null today - render "-"
 	LatUS    int64  // dns latency, microseconds
 
 	// conn (egress)
@@ -54,7 +54,7 @@ type Event struct {
 	// flashTick is a TUI-only render hint: the render-tick count at which this event was
 	// folded onto the live feed, so the monitor can flash the row in for ~400ms after it
 	// arrives (motion). Unexported ⇒ ignored by JSON (the drill card never shows it) and
-	// invisible to the scriptable CLI — it is purely a presentation stamp.
+	// invisible to the scriptable CLI - it is purely a presentation stamp.
 	flashTick int
 }
 

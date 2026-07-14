@@ -19,7 +19,7 @@ import (
 //	POST <console>/api/device/authorize  (no auth) -> DeviceAuth
 //	POST <console>/api/device/token      (no auth) -> DeviceToken (polled)
 //
-// It carries NO API key — that is the whole point: the device flow is how a user with
+// It carries NO API key - that is the whole point: the device flow is how a user with
 // only a browser obtains a key. Neither the device_code nor the issued api_key is ever
 // logged. Errors are returned as helpful, secret-free messages, never a panic
 // (Postel: a clear, helpful error, never an opaque failure).
@@ -175,7 +175,7 @@ func PollDeviceToken(ctx context.Context, hc *http.Client, consoleURL, deviceCod
 			// error, and returning it would both leak that noise and make this path racy. A
 			// timeout is a timeout.
 			return "", &ProblemError{Status: 408, Title: "login timed out",
-				Detail: "the sign-in wasn't approved in time — run 'whisper login' again to retry"}
+				Detail: "the sign-in wasn't approved in time - run 'whisper login' again to retry"}
 		case <-timer.C:
 		}
 
@@ -192,12 +192,12 @@ func PollDeviceToken(ctx context.Context, hc *http.Client, consoleURL, deviceCod
 			key := strings.TrimSpace(tok.APIKey)
 			if key == "" {
 				return "", &ProblemError{Status: 502, Title: "approved without a key",
-					Detail: "the console approved the sign-in but returned no api_key — try again"}
+					Detail: "the console approved the sign-in but returned no api_key - try again"}
 			}
 			return key, nil
 		case DeviceStatusExpired:
 			return "", &ProblemError{Status: 410, Title: "login code expired",
-				Detail: "the sign-in code expired before approval — run 'whisper login' again to retry"}
+				Detail: "the sign-in code expired before approval - run 'whisper login' again to retry"}
 		case DeviceStatusPending:
 			timer.Reset(interval)
 		default:
@@ -222,7 +222,7 @@ func pollOnce(ctx context.Context, hc *http.Client, base, deviceCode string) (*D
 	return &tok, nil
 }
 
-// devicePostJSON POSTs a small JSON body (no auth header — the device endpoints are
+// devicePostJSON POSTs a small JSON body (no auth header - the device endpoints are
 // keyless) and returns the response body for a 2xx, or a helpful *ProblemError. The
 // read is capped so a hostile/huge body can never exhaust memory.
 func devicePostJSON(ctx context.Context, hc *http.Client, url string, payload map[string]any) ([]byte, error) {
@@ -246,7 +246,7 @@ func devicePostJSON(ctx context.Context, hc *http.Client, url string, payload ma
 		return nil, fmt.Errorf("console unreachable at %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap — these replies are tiny
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20)) // 1 MiB cap - these replies are tiny
 	if err != nil {
 		return nil, fmt.Errorf("reading the console reply: %w", err)
 	}

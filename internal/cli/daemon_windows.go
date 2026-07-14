@@ -14,7 +14,7 @@ import (
 // CREATE_NEW_PROCESS_GROUP but not DETACHED_PROCESS, so we declare the latter ourselves.
 const (
 	createNewProcessGroup = 0x00000200 // CREATE_NEW_PROCESS_GROUP
-	detachedProcess       = 0x00000008 // DETACHED_PROCESS — no inherited console
+	detachedProcess       = 0x00000008 // DETACHED_PROCESS - no inherited console
 )
 
 // applyDetach detaches a spawned daemon from the parent console on Windows:
@@ -23,7 +23,7 @@ const (
 // in the parent's group doesn't propagate to it). HideWindow keeps any transient window from
 // flashing. This is the Windows equivalent of unix Setsid for the userspace tunnel
 // daemon. NOTE: HideWindow + DETACHED_PROCESS is the documented, robust combination; a future
-// caveat to watch is that some AV/EDR setups flag newly-spawned detached processes — if that
+// caveat to watch is that some AV/EDR setups flag newly-spawned detached processes - if that
 // surfaces in the field, fall back to a foreground `whisper claude` launch (run.go), which
 // needs no detach at all.
 func applyDetach(cmd *exec.Cmd) {

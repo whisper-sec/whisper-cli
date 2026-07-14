@@ -19,7 +19,7 @@ import (
 // recordingServer stubs the control plane for the connect/create command tests: it records
 // every (op, rawBody) it sees so a test can assert WHICH op ran and with WHICH args, and it
 // replies sensibly per op. `agents` is what op:list returns (so we can simulate a fresh
-// account = nil, or an existing fleet). It NEVER auto-creates anything itself — the point of
+// account = nil, or an existing fleet). It NEVER auto-creates anything itself - the point of
 // these tests is that the CLI must not silently fire an unnamed create.
 type recordedCall struct {
 	op   string
@@ -56,11 +56,15 @@ func recordingServer(t *testing.T, agents []agentChoice, seen *[]recordedCall) *
 		w.WriteHeader(200)
 		switch op {
 		case "identity":
-			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["label","address"],"rows":[["created-name","2a04:2a01:9::abcd"]]}}`))
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["label","address","fqdn"],"rows":[["created-name","2a04:2a01:9::abcd","created-name.agents.whisper.online."]]}}`))
 		case "register":
-			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["agent","address","api_key"],"rows":[["ag_1","2a04:2a01:9::beef","whisper_live_oncekey"]]}}`))
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["agent","address","api_key","fqdn"],"rows":[["ag_1","2a04:2a01:9::beef","whisper_live_oncekey","ag1beef.agents.whisper.online."]]}}`))
 		case "connect":
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["tier","address","http_proxy","socks5_endpoint","connection_string"],"rows":[["socks5","2a04:2a01:9::abcd","https://w:et_testbearer@egress.whisper.online:443","egress.whisper.online:443","socks5h://w:et_testbearer@egress.whisper.online:443"]]}}`))
+		case "host":
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["record_id","fqdn","type","value","ttl","status"],"rows":[["rec-1","_x402.created-name","TXT","x402-wallet=0xabc",300,"upserted"]]}}`))
+		case "domain":
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["domain",{"label":"example.com","fqdn":"example.com.","state":"pending"}]]}}`))
 		default: // list
 			_, _ = w.Write([]byte(listJSON(agents)))
 		}
@@ -148,7 +152,7 @@ func TestConnect_NameMapsToLabelNotFriendlyName(t *testing.T) {
 	}
 }
 
-// Sibling: with an EXISTING agent, connect must NOT create anything — it binds egress to the
+// Sibling: with an EXISTING agent, connect must NOT create anything - it binds egress to the
 // fleet (the zero-config reuse path stays intact; the guard only fires for a fresh account).
 func TestConnect_ExistingAgent_NoCreate(t *testing.T) {
 	var seen []recordedCall

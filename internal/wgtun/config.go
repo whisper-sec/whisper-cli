@@ -52,7 +52,7 @@ func GenerateKeypair() (Keypair, error) {
 // locally-held private key (hex). It is LIBERAL in what it accepts (Postel): it prefers the
 // structured fields the control plane returns (server_public_key, endpoint, address, dns,
 // allowed_ips) but falls back to PARSING the wg-quick `wireguard_config` blob for any that
-// are missing — so a future server that returns only the blob still works.
+// are missing - so a future server that returns only the blob still works.
 //
 // privKeyHex is OUR key (we generated it; the server never returns it because we supplied the
 // public half). If the server DID mint and return a base64 client_private_key (the zero-key
@@ -116,7 +116,7 @@ func keyBase64ToHex(b64 string) (string, error) {
 
 // parseWgQuick does a tolerant parse of a wg-quick config blob into a flat key→value map
 // (last value wins; section headers ignored). Whitespace around `=` is trimmed. It never
-// errors — a value the caller needs but didn't find is simply absent, and the structured
+// errors - a value the caller needs but didn't find is simply absent, and the structured
 // fields cover the common case.
 func parseWgQuick(blob string) map[string]string {
 	out := map[string]string{}

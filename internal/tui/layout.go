@@ -13,22 +13,19 @@ import (
 )
 
 // Layout constants (rows reserved for chrome). The body height is what's left for the
-// active view + the always-on monitor panel.
+// active view (the merged AGENTS dashboard carries the live monitor inside itself).
 const (
 	headerRows = 1
 	tabRows    = 1
 	footerRows = 1
-	// monitorRows is the always-on live panel height (border + a few feed lines). It
-	// shrinks on short terminals and is hidden entirely when there is no room.
-	monitorRowsDefault = 7
 )
 
 // layout recomputes derived geometry after a resize. It is cheap and idempotent.
 func (a *App) layout() {
-	a.agentsView.resize(a.bodyWidth(), a.viewHeight())
+	a.agentsView.resize(a.bodyWidth(), a.bodyHeight())
 	a.logsView.resize(a.bodyWidth(), a.bodyHeight())
 	a.policyView.resize(a.bodyWidth(), a.bodyHeight())
-	a.monitorVw.resize(a.bodyWidth(), a.bodyHeight())
+	a.exploreVw.resize(a.bodyWidth(), a.bodyHeight())
 }
 
 func (a *App) bodyWidth() int { return a.width }
@@ -42,36 +39,13 @@ func (a *App) bodyHeight() int {
 	return h
 }
 
-// monitorRows returns the always-on monitor panel height for the AGENTS view, scaling
-// down on short terminals and disappearing when there is no room (graceful degrade).
-func (a *App) monitorRows() int {
-	if a.bodyHeight() < 16 {
-		return 0 // too short — drop the always-on panel; the MONITOR tab still has it
-	}
-	r := monitorRowsDefault
-	if a.bodyHeight() < 24 {
-		r = 5
-	}
-	return r
-}
-
-// viewHeight is the active view's height on the AGENTS dashboard (body minus the
-// always-on monitor panel).
-func (a *App) viewHeight() int {
-	h := a.bodyHeight() - a.monitorRows()
-	if h < 1 {
-		h = 1
-	}
-	return h
-}
-
 // --- header ----------------------------------------------------------------------
 
 func (a *App) renderHeader() string {
 	left := " " + brandGradient("whisper", a.th.NoColor) + " "
 	tenant := a.opts.Tenant
 	if tenant == "" {
-		tenant = "—"
+		tenant = "-"
 	}
 	keyMark := a.th.OK.Render("key ✓")
 	if a.client == nil || a.client.Credential().IsZero() {
@@ -95,7 +69,7 @@ func (a *App) renderHeader() string {
 	return a.bar(left, right)
 }
 
-// renderTabs draws the AGENTS · MONITOR · LOGS · POLICY · CONFIG tab strip.
+// renderTabs draws the AGENTS · GRAPH · EXPLORE · LOGS · POLICY · CONFIG tab strip.
 func (a *App) renderTabs() string {
 	var tabs []string
 	for i, name := range modeNames {
@@ -129,15 +103,17 @@ func (a *App) renderFooter() string {
 func (a *App) footerHints() string {
 	switch a.mode {
 	case modeAgents:
-		return "j/k move · ↵ details · c create · x kill · e connect · m monitor · / filter · : palette · q quit"
-	case modeMonitor:
-		return "space pause · f kind · / filter · ↵ drill · s agent · 1 agents · q quit"
+		return "j/k move · ↵ watch agent · a all · d details · c create · x kill · e connect · space pause · / filter · q quit"
+	case modeGraph:
+		return "j/k scroll · space pause · C clear · 1 agents · q quit"
 	case modeLogs:
 		return "j/k move · ↵ drill · r run · k kind · t time · / filter · q quit"
 	case modePolicy:
 		return "a allow · b block · d default · w write · r reload · q quit"
 	case modeConfig:
 		return "t theme · l login · 1 agents · q quit"
+	case modeExplore:
+		return "j/k select · space peek · ↵ walk-in · h back · [ ] edge-type · z ornament · o catalog · / jump · : repl · q quit"
 	default:
 		return "q quit"
 	}
@@ -149,39 +125,35 @@ func (a *App) renderBody() string {
 	switch a.mode {
 	case modeAgents:
 		return a.renderAgentsDashboard()
-	case modeMonitor:
-		return a.monitorVw.view(a.bodyWidth(), a.bodyHeight())
+	case modeGraph:
+		return a.graphVw.view(a.bodyWidth(), a.bodyHeight())
 	case modeLogs:
 		return a.logsView.view(a.bodyWidth(), a.bodyHeight())
 	case modePolicy:
 		return a.policyView.view(a.bodyWidth(), a.bodyHeight())
 	case modeConfig:
 		return a.configView.view(a.bodyWidth(), a.bodyHeight())
+	case modeExplore:
+		return a.exploreVw.view(a.bodyWidth(), a.bodyHeight())
 	}
 	return ""
 }
 
-// renderAgentsDashboard composes the AGENTS view: the fleet+detail region on top and
-// the always-on live monitor panel underneath. On a first-run empty fleet it shows the
-// centred hero instead.
+// renderAgentsDashboard composes the merged primary view: the fleet table and the
+// selected agent's live monitor side by side, one panel each. On a first-run empty
+// fleet it shows the centred hero instead.
 func (a *App) renderAgentsDashboard() string {
 	if len(a.agents) == 0 && !a.loading {
 		return a.renderHero(a.bodyWidth(), a.bodyHeight())
 	}
-	top := a.agentsView.view(a.bodyWidth(), a.viewHeight())
-	mr := a.monitorRows()
-	if mr <= 0 {
-		return top
-	}
-	mon := a.renderLiveStrip(a.bodyWidth(), mr)
-	return lipgloss.JoinVertical(lipgloss.Left, top, mon)
+	return a.agentsView.view(a.bodyWidth(), a.bodyHeight())
 }
 
 // renderHero is the first-run welcome: the four-ring brand mark (when colour and
-// height allow — the -approved art) over the wordmark + "press c to create".
+// height allow - the -approved art) over the wordmark + "press c to create".
 func (a *App) renderHero(w, h int) string {
 	mark := brandGradient("whisper", a.th.NoColor)
-	sub := a.th.Dim.Render("identity-on-the-wire DNS — an agent IS a routable /128")
+	sub := a.th.Dim.Render("identity-on-the-wire DNS - an agent IS a routable /128")
 	cta := a.th.Accent.Render("press  c  to create your first agent") + "\n" +
 		a.th.Dim.Render("or  :  for the command palette  ·  ?  for help")
 	loading := ""

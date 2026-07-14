@@ -18,13 +18,13 @@ import (
 // op:agent detail + live counters. Zero values are fine (a freshly-seen agent from the
 // stream has only Address until op:agent fills the rest).
 type Agent struct {
-	ID      string // the LIST id ("agent-…") — used for op:agent / op:logs / kill
-	Address string // the /128 — the identity, and the SSE ?agent= narrow selector
+	ID      string // the LIST id ("agent-…") - used for op:agent / op:logs / kill
+	Address string // the /128 - the identity, and the SSE ?agent= narrow selector
 	Label   string
 	FQDN    string
 	PTR     string
 	State   string // active / pending / released / …
-	Contact string // opt-in public contact (may be empty — never fabricate)
+	Contact string // opt-in public contact (may be empty - never fabricate)
 	Created int64  // epoch ms (allocated_at)
 
 	// Counters from op:agent (zero until detail is fetched; fail-open to zero, never 500).
@@ -71,7 +71,7 @@ func (a Agent) Key() string {
 }
 
 // TenantFromFQDN extracts the opaque tenant handle from an agent fqdn of the form
-// <agent>.<t-handle>.agents.<zone> — the second label. The fleet a caller already
+// <agent>.<t-handle>.agents.<zone> - the second label. The fleet a caller already
 // holds IS the tenant answer (derive, don't fetch). Returns "" when the shape does
 // not match (never a wrong guess).
 func TenantFromFQDN(fqdn string) string {

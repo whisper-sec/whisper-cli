@@ -14,7 +14,7 @@ import (
 )
 
 // TestInitPython_ExistingAgent_WritesProxyEnv: `init python --agent <128>` writes .whisper/config,
-// the project agent file, and the wholly-owned .whisper/proxy.env — and does NOT write a
+// the project agent file, and the wholly-owned .whisper/proxy.env - and does NOT write a
 // .claude/settings.local.json (that is Claude-only).
 func TestInitPython_ExistingAgent_WritesProxyEnv(t *testing.T) {
 	srv := recordingServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:9::abcd"}}, nil)
@@ -77,7 +77,7 @@ func TestInitPython_NeverClobbersUserDotEnv(t *testing.T) {
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 
-	// Run twice (incl. --force) — the most dangerous path — and assert ./.env is untouched both times.
+	// Run twice (incl. --force) - the most dangerous path - and assert ./.env is untouched both times.
 	if err := runInitPython(initOptions{tier: "socks5", agent: "2a04:2a01:9::abcd", dir: dir}); err != nil {
 		t.Fatalf("init python: %v", err)
 	}
@@ -252,7 +252,7 @@ func TestInitPython_IdempotentReusesPort(t *testing.T) {
 
 // TestInitPython_RefusesPlantedNamespaceSymlink: a cloned/malicious repo that ships a leaf
 // symlink inside .whisper/ pointing at a user file (e.g. `.whisper/config -> ../.env`) must NOT
-// let `init python` read-exfiltrate or write-clobber it — AssertSafeNamespace refuses up front and
+// let `init python` read-exfiltrate or write-clobber it - AssertSafeNamespace refuses up front and
 // the user's ./.env stays byte-identical. Covers the default (no --force) path.
 func TestInitPython_RefusesPlantedNamespaceSymlink(t *testing.T) {
 	for _, leaf := range []string{"config", "agent"} {
@@ -320,7 +320,7 @@ func TestRun_ExplicitFlagOverridesProjectConfig(t *testing.T) {
 }
 
 // TestRun_PrefersProjectConfigAgent: after `init python` (which writes .whisper/config), a bare
-// `whisper run` from inside the project must egress as the PROJECT agent — not the global default.
+// `whisper run` from inside the project must egress as the PROJECT agent - not the global default.
 func TestRun_PrefersProjectConfigAgent(t *testing.T) {
 	var seen []recordedCall
 	srv := recordingServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:9::abcd"}}, &seen)

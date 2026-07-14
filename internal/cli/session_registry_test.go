@@ -16,7 +16,7 @@ import (
 )
 
 // session_registry_test.go: a one-shot (`whisper ip`, `whisper run`) must DETECT a
-// live, locally-held `whisper connect` session for the target /128 and REUSE its proxy —
+// live, locally-held `whisper connect` session for the target /128 and REUSE its proxy -
 // never open a competing op:connect (which would replace, and on exit remove, the daemon's
 // server-side WG peer, killing the tunnel). Fall-through to a fresh connect stays intact
 // when there is no record / a dead record (regression guard).
@@ -179,7 +179,7 @@ func TestFindLiveSession_MatchingLadder(t *testing.T) {
 		}
 	})
 
-	t.Run("no selector + several records is ambiguous — never guess", func(t *testing.T) {
+	t.Run("no selector + several records is ambiguous - never guess", func(t *testing.T) {
 		stubSessionsDir(t)
 		stubProbe(t, true, nil)
 		newRecord("2a04:2a01:9::abcd")
@@ -227,7 +227,7 @@ func TestFindLiveSession_MatchingLadder(t *testing.T) {
 // --- the one-shot surfaces -----------------------------------------------------------
 
 // TestIP_ReusesLiveDaemonSession: with a live held session for the /128, `whisper ip`
-// verifies THROUGH the daemon's proxy and never issues its own op:connect — the call
+// verifies THROUGH the daemon's proxy and never issues its own op:connect - the call
 // counter on the control-plane stub stays free of "connect" (no competing session), and
 // the reused session's Stop() (local==nil) cannot touch the daemon's tunnel.
 func TestIP_ReusesLiveDaemonSession(t *testing.T) {
@@ -273,7 +273,7 @@ func TestIP_ReusesLiveDaemonSession(t *testing.T) {
 }
 
 // TestIP_FallsBackToFreshConnectWhenRecordDead: a stale record (probe fails) must not
-// change today's behavior — op:connect runs exactly as before (regression guard).
+// change today's behavior - op:connect runs exactly as before (regression guard).
 func TestIP_FallsBackToFreshConnectWhenRecordDead(t *testing.T) {
 	stubSessionsDir(t)
 	stubProbe(t, false, nil)
@@ -333,7 +333,7 @@ func TestRun_ReusesLiveDaemonSessionAndInjectsItsEndpoint(t *testing.T) {
 }
 
 // TestRun_TierMismatchStillReusesWithOneNote: an explicit different --tier must NOT clobber
-// the live tunnel — it reuses and says so once on stderr.
+// the live tunnel - it reuses and says so once on stderr.
 func TestRun_TierMismatchStillReusesWithOneNote(t *testing.T) {
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
@@ -395,7 +395,7 @@ func TestGuided_QuietReusesLiveDaemonSession(t *testing.T) {
 	}
 }
 
-// endpointPort is load-bearing for the probe — pin its parsing.
+// endpointPort is load-bearing for the probe - pin its parsing.
 func TestEndpointPort(t *testing.T) {
 	cases := map[string]int{
 		"socks5h://127.0.0.1:41080": 41080,

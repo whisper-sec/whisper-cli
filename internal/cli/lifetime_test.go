@@ -30,14 +30,14 @@ import (
 //
 // THE bug it guards: StartLocalProxy used to bind its teardown to the caller's SHORT
 // control-plane ctx (`go func(){ <-ctx.Done(); p.Stop() }()`), and the callers cancel that
-// ctx the instant op:connect + verify return — so every persistent path got a DEAD proxy:
+// ctx the instant op:connect + verify return - so every persistent path got a DEAD proxy:
 //   - whisper run / claude : the proxy was torn down before the child ever ran.
 //   - the guided hold       : holdUntilSignal parked forever on a dead tunnel.
 //   - whisper connect       : the 30s control-ctx timeout killed the held-open egress.
 //
 // These tests back the session with a REAL egress.StartLocalProxy (against a fake CONNECT
 // egress), drive the actual caller code (runWithEgress, connectVia), CANCEL the control
-// ctx, and assert the proxy is still LIVE — and that the OWNER's Stop() is what ends it.
+// ctx, and assert the proxy is still LIVE - and that the OWNER's Stop() is what ends it.
 
 // --- a fake CONNECT egress for the CLI package (mirrors the egress package's helper) ----
 
@@ -203,7 +203,7 @@ func selfSignedCLI(t *testing.T) tls.Certificate {
 
 // stubLiveProxyTail replaces connectAndVerify with one that brings up a REAL local proxy
 // (egress.StartLocalProxy) pointed at the fake egress, USING THE CONTROL CTX the caller
-// passes — exactly as production does. It records every live session it produced so a test
+// passes - exactly as production does. It records every live session it produced so a test
 // can dial the proxy after the caller has cancelled that control ctx. It does NOT stub the
 // network verify (no echo endpoint needed): the point here is the proxy LIFETIME, which is
 // the egress package's job and independent of the verify HTTP. It returns a restore func.
@@ -231,7 +231,7 @@ func stubLiveProxyTail(t *testing.T, egressAddr, verifiedAddr string) (sessions 
 // --- run.go lifetime: the child gets a LIVE proxy, not a dead one --------------------
 
 // TestRun_ProxyLiveForChild proves the fix for `whisper run`: the local proxy in
-// the child's injected ALL_PROXY must still ACCEPT + STREAM while the child runs — i.e.
+// the child's injected ALL_PROXY must still ACCEPT + STREAM while the child runs - i.e.
 // AFTER the control ctx that op:connect/verify used has been cancelled. The child here
 // dials its own $ALL_PROXY through to the echo backend and reports OK only if the tunnel
 // is live; before the fix the proxy was torn down with the control ctx and the dial failed.
@@ -261,12 +261,12 @@ func TestRun_ProxyLiveForChild(t *testing.T) {
 	})
 	// No python3 in the child env ⇒ inconclusive (the child can't probe). The core run.go
 	// lifetime is covered without a child by TestRun_ProxyLiveAfterControlCtxCancel, so skip
-	// rather than fail — a missing test dependency is never a product regression.
+	// rather than fail - a missing test dependency is never a product regression.
 	if strings.Contains(stdout, "SKIP") {
 		t.Skip("python3 unavailable in the child env; core run.go lifetime covered by TestRun_ProxyLiveAfterControlCtxCancel")
 	}
 	if !strings.Contains(stdout, "LIVE") {
-		t.Fatalf("child could not stream through its injected ALL_PROXY — the proxy died with the control ctx (the ctx-cancellation bug); child stdout=%q", stdout)
+		t.Fatalf("child could not stream through its injected ALL_PROXY - the proxy died with the control ctx (the ctx-cancellation bug); child stdout=%q", stdout)
 	}
 
 	// The owner (runWithEgress) must have Stop()'d the proxy after the child exited.
@@ -316,7 +316,7 @@ print("LIVE" if got==probe else "DEAD")
 
 // TestRun_ProxyLiveAfterControlCtxCancel is the child-independent core of the run.go fix:
 // it drives the SAME bring-up connectAndVerify does on the control ctx, cancels that ctx
-// (as runWithEgress does the instant verify returns), and then dials the proxy directly —
+// (as runWithEgress does the instant verify returns), and then dials the proxy directly -
 // it MUST still stream. This needs no child process, so it always runs (no python3 gate).
 func TestRun_ProxyLiveAfterControlCtxCancel(t *testing.T) {
 	backend := echoBackendCLI(t)
@@ -349,7 +349,7 @@ func TestRun_ProxyLiveAfterControlCtxCancel(t *testing.T) {
 // TestGuidedHold_ProxySurvivesPastConnectAndVerify proves the fix for the guided
 // front door: connectVia cancels the control ctx right after connectAndVerify, then parks
 // in holdUntilSignal. The proxy MUST survive that cancel so the "Connected ✓ verified"
-// terminal holds a LIVE tunnel — before the fix the proxy died with the control ctx and the
+// terminal holds a LIVE tunnel - before the fix the proxy died with the control ctx and the
 // hold sat on a dead endpoint. We capture the live session inside holdUntilSignal (the hold
 // point), dial it, and only THEN let the stubbed hold Stop() it.
 func TestGuidedHold_ProxySurvivesPastConnectAndVerify(t *testing.T) {
@@ -380,6 +380,6 @@ func TestGuidedHold_ProxySurvivesPastConnectAndVerify(t *testing.T) {
 		t.Fatalf("connectVia errored: %v", err)
 	}
 	if holdErr != nil {
-		t.Fatalf("the guided hold held a DEAD proxy — it did not survive past connectAndVerify (the ctx-cancellation bug): %v", holdErr)
+		t.Fatalf("the guided hold held a DEAD proxy - it did not survive past connectAndVerify (the ctx-cancellation bug): %v", holdErr)
 	}
 }

@@ -35,7 +35,7 @@ func TestAgentDomain(t *testing.T) {
 }
 
 // TestChoicesFromResult_CarriesDomain proves op:list rows flow their fqdn through to the
-// agentChoice.domain the picker shows — so a BYOD vs hosted agent is distinguishable. Also
+// agentChoice.domain the picker shows - so a BYOD vs hosted agent is distinguishable. Also
 // covers the {kind,item} wrapper (Postel: liberal in what we read) and a row with no fqdn.
 func TestChoicesFromResult_CarriesDomain(t *testing.T) {
 	res := &client.Result{

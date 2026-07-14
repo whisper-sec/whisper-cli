@@ -6,7 +6,7 @@ package client
 import "testing"
 
 func TestDecodeEnvelopeDevGuideShape(t *testing.T) {
-	// {ok,status,result,error} — the documented contract.
+	// {ok,status,result,error} - the documented contract.
 	body := []byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["agents",{"agent":"a1"}]]},"error":null}`)
 	env, err := DecodeEnvelope(body, 200)
 	if err != nil {
@@ -22,7 +22,7 @@ func TestDecodeEnvelopeDevGuideShape(t *testing.T) {
 }
 
 func TestDecodeEnvelopeLiveNeo4jWrapper(t *testing.T) {
-	// {rows:[{result:{columns,rows}}]} — the shape the LIVE /api/query actually returns.
+	// {rows:[{result:{columns,rows}}]} - the shape the LIVE /api/query actually returns.
 	body := []byte(`{"rows":[{"result":{"columns":["address","state"],"rows":[["2a04:2a01::42","active"]]}}]}`)
 	env, err := DecodeEnvelope(body, 200)
 	if err != nil {
@@ -40,7 +40,7 @@ func TestDecodeEnvelopeLiveNeo4jWrapper(t *testing.T) {
 // connectNestedEnvelopeJSON is the EXACT op:connect wire shape verified against the live
 // control plane: the outer whisper.agents YIELD table (columns: op, ok, status,
 // result, error, retry_after) wraps the actual egress payload one level down in
-// `rows[0].result`. The bearer is a synthetic `et_TEST` fixture token — never a real key.
+// `rows[0].result`. The bearer is a synthetic `et_TEST` fixture token - never a real key.
 const connectNestedEnvelopeJSON = `{"columns":["op","ok","status","result","error","retry_after"],
  "rows":[{"op":"connect","ok":true,"status":200,
  "result":{"columns":["tier","http_proxy","connection_string","socks5_endpoint","address","fqdn","ptr","dns","tls","note","doh_url","dns_note"],
@@ -48,7 +48,7 @@ const connectNestedEnvelopeJSON = `{"columns":["op","ok","status","result","erro
  "error":null,"retry_after":null}]}`
 
 // TestDecodeEnvelopeConnectNestedEnvelope_ExactIssueJSON feeds the EXACT nested envelope
-// this test asserts the egress fields decode correctly — the CLI must
+// this test asserts the egress fields decode correctly - the CLI must
 // extract the connection string + /128, never conclude "no egress".
 func TestDecodeEnvelopeConnectNestedEnvelope_ExactIssueJSON(t *testing.T) {
 	env, err := DecodeEnvelope([]byte(connectNestedEnvelopeJSON), 200)
@@ -59,7 +59,7 @@ func TestDecodeEnvelopeConnectNestedEnvelope_ExactIssueJSON(t *testing.T) {
 		t.Fatalf("op:connect ok:true must decode as ok: %+v", env)
 	}
 	if env.Result == nil {
-		t.Fatal("Result must not be nil — the egress payload lives in the nested result")
+		t.Fatal("Result must not be nil - the egress payload lives in the nested result")
 	}
 	recs := env.Result.Records()
 	if len(recs) != 1 {
@@ -84,7 +84,7 @@ func TestDecodeEnvelopeConnectNestedEnvelope_ExactIssueJSON(t *testing.T) {
 }
 
 // TestDecodeEnvelopeOuterRowsPositionalArray covers the canonical Cypher CALL...YIELD
-// tabular rendering of the SAME outer table — rows as POSITIONAL arrays matched against
+// tabular rendering of the SAME outer table - rows as POSITIONAL arrays matched against
 // the outer columns, rather than column-keyed objects. Both are valid tabular Cypher
 // results; the client must decode either.
 func TestDecodeEnvelopeOuterRowsPositionalArray(t *testing.T) {
@@ -141,7 +141,7 @@ func TestDecodeEnvelopeOuterRowFailureNotMaskedAsEmptyResult(t *testing.T) {
 }
 
 // TestDecodeEnvelopeOuterRowFailureBareStringDetail proves a row-level failure whose
-// "error" field is a BARE STRING (not an RFC-7807 object — a shape a thin control-plane
+// "error" field is a BARE STRING (not an RFC-7807 object - a shape a thin control-plane
 // proxy can legitimately send, e.g. forwarding a plain "agent ... not found" reason) still
 // surfaces its real detail, rather than silently collapsing to the generic "control plane
 // reported failure" (a stale-persisted-agent symptom).
@@ -161,7 +161,7 @@ func TestDecodeEnvelopeOuterRowFailureBareStringDetail(t *testing.T) {
 }
 
 // TestDecodeEnvelopeTopLevelOkFalseBareStringDetail covers the same liberal-string
-// decode for the top-level dev-guide shape ({ok,status,error}) — a bare-string "error"
+// decode for the top-level dev-guide shape ({ok,status,error}) - a bare-string "error"
 // there must surface too, never be swallowed by the JSON struct-decode mismatch.
 func TestDecodeEnvelopeTopLevelOkFalseBareStringDetail(t *testing.T) {
 	body := []byte(`{"ok":false,"status":404,"result":null,"error":"agent not found"}`)
@@ -179,7 +179,7 @@ func TestDecodeEnvelopeTopLevelOkFalseBareStringDetail(t *testing.T) {
 
 // TestDecodeEnvelopeOuterRowFailurePropagatesRowStatus proves the row's OWN status (404
 // for a not-found agent, distinct from the outer HTTP 200 the whole envelope arrived
-// with) is carried onto the surfaced ProblemError — so friendly() / mapProblem() can
+// with) is carried onto the surfaced ProblemError - so friendly() / mapProblem() can
 // give the right actionable hint instead of treating every row failure as a generic 500.
 func TestDecodeEnvelopeOuterRowFailurePropagatesRowStatus(t *testing.T) {
 	body := []byte(`{"columns":["op","ok","status","result","error","retry_after"],
@@ -197,7 +197,7 @@ func TestDecodeEnvelopeOuterRowFailurePropagatesRowStatus(t *testing.T) {
 }
 
 // TestDecodeEnvelopeTopLevelOkNoResultFallsBackToRow covers a top-level {ok,status} with
-// NO top-level "result" — the payload lives only in the outer YIELD row. The client must
+// NO top-level "result" - the payload lives only in the outer YIELD row. The client must
 // recover it from there rather than concluding Result is absent.
 func TestDecodeEnvelopeTopLevelOkNoResultFallsBackToRow(t *testing.T) {
 	body := []byte(`{"ok":true,"status":200,

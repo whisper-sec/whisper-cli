@@ -33,7 +33,7 @@ func TestValidateRRSet_HappyChainToAnchor(t *testing.T) {
 
 func TestValidateRRSet_TamperedTLSAFails(t *testing.T) {
 	h := buildHierarchy(t, testChild, testLeaf, testTLSA)
-	// Mutate the RDATA AFTER signing — the RRSIG no longer covers it.
+	// Mutate the RDATA AFTER signing - the RRSIG no longer covers it.
 	msg := h.res.answers[rkey(testLeaf, dns.TypeTLSA)]
 	msg.Answer[0].(*dns.TLSA).Certificate = "deadbeef" + testTLSA[8:]
 	if _, err := h.validator().ValidateRRSet(context.Background(), testLeaf, dns.TypeTLSA); err == nil {
@@ -74,7 +74,7 @@ func TestValidateRRSet_WrongAnchorFails(t *testing.T) {
 
 func TestValidateRRSet_BrokenDSChainFails(t *testing.T) {
 	h := buildHierarchy(t, testChild, testLeaf, testTLSA)
-	// Corrupt the child's DS digest — the child DNSKEY is now unanchored.
+	// Corrupt the child's DS digest - the child DNSKEY is now unanchored.
 	msg := h.res.answers[rkey(testChild, dns.TypeDS)]
 	msg.Answer[0].(*dns.DS).Digest = "00" + msg.Answer[0].(*dns.DS).Digest[2:]
 	if _, err := h.validator().ValidateRRSet(context.Background(), testLeaf, dns.TypeTLSA); err == nil {
@@ -84,7 +84,7 @@ func TestValidateRRSet_BrokenDSChainFails(t *testing.T) {
 
 func TestValidateRRSet_ExpiredSignatureFails(t *testing.T) {
 	h := buildHierarchy(t, testChild, testLeaf, testTLSA)
-	// Evaluate 30 days in the future — beyond the signature validity window.
+	// Evaluate 30 days in the future - beyond the signature validity window.
 	v := NewValidator(h.res, h.anchors, h.now.Add(30*24*time.Hour))
 	if _, err := v.ValidateRRSet(context.Background(), testLeaf, dns.TypeTLSA); err == nil {
 		t.Fatal("expected FAIL for an expired RRSIG")
@@ -93,7 +93,7 @@ func TestValidateRRSet_ExpiredSignatureFails(t *testing.T) {
 
 func TestValidateRRSet_InsecureDelegationFails(t *testing.T) {
 	h := buildHierarchy(t, testChild, testLeaf, testTLSA)
-	// Remove the child's DS entirely — an insecure delegation cannot be proven trustlessly.
+	// Remove the child's DS entirely - an insecure delegation cannot be proven trustlessly.
 	delete(h.res.answers, rkey(testChild, dns.TypeDS))
 	if _, err := h.validator().ValidateRRSet(context.Background(), testLeaf, dns.TypeTLSA); err == nil {
 		t.Fatal("expected FAIL for an insecure delegation (no DS)")

@@ -17,8 +17,8 @@ import (
 // (reverse-DNS PTR + forward-confirm AAAA + the DANE-EE TLSA pin + the JWS identity doc),
 // folded into ONE verdict so a caller need not stitch four protocols together itself.
 //
-// DANE (the DNSSEC-anchored TLSA) is THE trust anchor for an agent cert — not a public
-// CA — so DaneOK is the load-bearing field: it is true only when a strong DANE-EE pin is
+// DANE (the DNSSEC-anchored TLSA) is THE trust anchor for an agent cert - not a public
+// CA - so DaneOK is the load-bearing field: it is true only when a strong DANE-EE pin is
 // published AND (where the server could cross-check) the served leaf satisfies it.
 type VerifyVerdict struct {
 	IsWhisperAgent bool   `json:"is_whisper_agent"`
@@ -37,7 +37,7 @@ type VerifyVerdict struct {
 
 // VerifyIdentity asks the public, KEYLESS verify-identity endpoint whether addr is a real
 // Whisper agent, and returns the decoded verdict, the raw JSON body (for --json, so a
-// script sees the server's exact bytes), and the HTTP status. It carries NO key — the
+// script sees the server's exact bytes), and the HTTP status. It carries NO key - the
 // answer exposes only the same public facts RDAP already does.
 //
 // Liberal in what we accept: addr may be a bare or bracketed v6/v4 literal; it is sent as
@@ -70,7 +70,7 @@ func (c *Client) VerifyIdentity(ctx context.Context, addr string) (*VerifyVerdic
 	}
 	var v VerifyVerdict
 	if err := json.Unmarshal(raw, &v); err != nil {
-		// A non-JSON body (a proxy error page, a captive portal) — surface the status with
+		// A non-JSON body (a proxy error page, a captive portal) - surface the status with
 		// a clear message rather than a confusing decode error (never an opaque failure).
 		return nil, raw, resp.StatusCode,
 			fmt.Errorf("verify-identity returned a non-JSON body (HTTP %d) from %s", resp.StatusCode, base)

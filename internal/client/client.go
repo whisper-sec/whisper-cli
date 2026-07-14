@@ -18,7 +18,7 @@ import (
 
 // Canonical endpoints. graph.whisper.security is the ONE control endpoint; the live
 // monitor SSE is served directly by the active/active ns nodes (the gateway does not
-// proxy /monitor/stream —); rdap.whisper.online is the public RDAP service. All
+// proxy /monitor/stream -); rdap.whisper.online is the public RDAP service. All
 // overridable by env for pre-prod (Postel: liberal in, but a sane zero-config default).
 const (
 	DefaultControlURL = "https://graph.whisper.security/api/query"
@@ -27,7 +27,7 @@ const (
 	// DefaultConsoleURL is the user-facing console that hosts the device-authorization
 	// (RFC 8628) login flow: POST /api/device/authorize and POST /api/device/token. It
 	// is the default sign-in surface for `whisper login` (overridable with --console-url
-	// for pre-prod — Postel: liberal in, sane zero-config default).
+	// for pre-prod - Postel: liberal in, sane zero-config default).
 	DefaultConsoleURL = "https://console.whisper.security"
 	// DefaultVerifyURL is the public, KEYLESS one-call identity-verification surface
 	//: GET /verify-identity?ip=<addr> runs the full agent-trust chain
@@ -152,7 +152,7 @@ func (c *Client) Agents(ctx context.Context, op string, args map[string]any) (*E
 func (c *Client) Query(ctx context.Context, query string) (*Envelope, error) {
 	if c.cred.IsZero() {
 		return nil, &ProblemError{Status: 401, Title: "no key",
-			Detail: "no API key — run 'whisper login', set WHISPER_API_KEY, or pass --key"}
+			Detail: "no API key - run 'whisper login', set WHISPER_API_KEY, or pass --key"}
 	}
 	body, _ := json.Marshal(map[string]string{"query": query})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.controlURL, strings.NewReader(string(body)))
@@ -169,7 +169,7 @@ func (c *Client) Query(ctx context.Context, query string) (*Envelope, error) {
 		return nil, fmt.Errorf("control plane unreachable at %s: %w", c.controlURL, err)
 	}
 	defer resp.Body.Close()
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // 16 MiB cap — generous, never unbounded
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 16<<20)) // 16 MiB cap - generous, never unbounded
 	if err != nil {
 		return nil, fmt.Errorf("reading control-plane reply: %w", err)
 	}
@@ -178,7 +178,7 @@ func (c *Client) Query(ctx context.Context, query string) (*Envelope, error) {
 
 // StreamMonitor opens the live SSE monitor stream and emits each decoded event on
 // emit() until ctx is cancelled or the stream ends. agentAddr (a /128 address, NOT an
-// agent id — see the dev guide §6.1) optionally narrows the stream within the tenant;
+// agent id - see the dev guide §6.1) optionally narrows the stream within the tenant;
 // pass "" for the whole tenant. A non-2xx response is surfaced as a *ProblemError
 // (e.g. 503 subscriber-cap with Retry-After) so the caller can back off.
 func (c *Client) StreamMonitor(ctx context.Context, agentAddr string, emit func(MonitorEvent)) error {
@@ -214,7 +214,7 @@ func (c *Client) StreamMonitor(ctx context.Context, agentAddr string, emit func(
 		c.monitorIdx.Add(1) // fail over: next reconnect tries the other node
 		pe := &ProblemError{Status: resp.StatusCode, Detail: "monitor stream rejected the request"}
 		if resp.StatusCode == http.StatusServiceUnavailable {
-			pe.Detail = "monitor subscriber cap reached — back off and retry"
+			pe.Detail = "monitor subscriber cap reached - back off and retry"
 		}
 		return pe
 	}

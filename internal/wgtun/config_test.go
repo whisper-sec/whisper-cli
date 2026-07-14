@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// TestGenerateKeypair: a minted keypair is a valid clamped Curve25519 pair — 32-byte hex
+// TestGenerateKeypair: a minted keypair is a valid clamped Curve25519 pair - 32-byte hex
 // private key, 32-byte base64 public key, and two successive mints differ (real randomness).
 func TestGenerateKeypair(t *testing.T) {
 	kp, err := GenerateKeypair()
@@ -31,7 +31,7 @@ func TestGenerateKeypair(t *testing.T) {
 	}
 	kp2, _ := GenerateKeypair()
 	if kp.PrivateKeyHex == kp2.PrivateKeyHex {
-		t.Fatal("two mints produced identical private keys — randomness is broken")
+		t.Fatal("two mints produced identical private keys - randomness is broken")
 	}
 }
 
@@ -148,7 +148,7 @@ func TestConfigValidate_RejectsMissing(t *testing.T) {
 }
 
 // TestUapiConfig_ContainsKeysAndKeepalive: the UAPI doc carries the private key, the peer key,
-// the endpoint, ::/0 + 0.0.0.0/0 allowed-ips, and the keepalive — the exact wireguard-go form.
+// the endpoint, ::/0 + 0.0.0.0/0 allowed-ips, and the keepalive - the exact wireguard-go form.
 func TestUapiConfig_ContainsKeysAndKeepalive(t *testing.T) {
 	cfg := Config{
 		PrivateKeyHex:      strings.Repeat("11", 32),

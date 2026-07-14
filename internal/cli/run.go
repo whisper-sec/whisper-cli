@@ -26,7 +26,7 @@ func isProjectNotFound(err error) bool {
 
 // run.go is `whisper run <cmd…>` and the `whisper claude` convenience.
 // It brings the local egress proxy up, then EXECS the child with the proxy env
-// injected AT SPAWN — never asked-for in a prompt (the agent-network-env-injection
+// injected AT SPAWN - never asked-for in a prompt (the agent-network-env-injection
 // lesson: spawned, security-trained agents refuse an opaque proxy string in their
 // instructions, but accept it as environment at spawn). The bearer-free local
 // endpoint (socks5h://127.0.0.1:<port>) is the ONLY value injected; the et_ bearer
@@ -41,7 +41,7 @@ func isProjectNotFound(err error) bool {
 //
 // Coverage note: env-injection catches curl, git, Node/undici, and every well-behaved
 // tool that honours *_PROXY. A tool that IGNORES *_PROXY (a raw socket dialer) is not
-// caught by env alone — a transparent TUN for those is (deliberately NOT built
+// caught by env alone - a transparent TUN for those is (deliberately NOT built
 // here; we keep lean and rootless).
 
 func newRunCmd() *cobra.Command {
@@ -50,7 +50,7 @@ func newRunCmd() *cobra.Command {
 		Use:   "run <command> [args…]",
 		Short: "Run a command with your Whisper egress wired in (no proxy string to copy)",
 		Long: "Bring your Whisper connection up and run a command through it. The proxy is\n" +
-			"injected into the command's environment at launch — you never copy or paste a\n" +
+			"injected into the command's environment at launch - you never copy or paste a\n" +
 			"proxy string, and no bearer ever touches your shell history or arguments.\n\n" +
 			"Example:  whisper run curl https://example.com\n" +
 			"          whisper run git clone https://github.com/you/repo\n" +
@@ -71,14 +71,14 @@ func newRunCmd() *cobra.Command {
 	return cmd
 }
 
-// newClaudeCmd is `whisper claude` — sugar for `whisper run claude` (the primary
+// newClaudeCmd is `whisper claude` - sugar for `whisper run claude` (the primary
 // spawned-agent path: a Claude Code child gets a real Whisper /128 with zero wiring).
 func newClaudeCmd() *cobra.Command {
 	var agent, agentFile, tier string
 	cmd := &cobra.Command{
 		Use:   "claude [args…]",
 		Short: "Run Claude Code through your Whisper egress (one step)",
-		Long: "Shorthand for `whisper run claude` — bring your Whisper connection up and launch\n" +
+		Long: "Shorthand for `whisper run claude` - bring your Whisper connection up and launch\n" +
 			"Claude Code with the egress wired into its environment at spawn (no proxy string,\n" +
 			"no bearer in the prompt). Any extra args are passed straight through to claude.\n\n" +
 			"Use --tier wireguard for a routed Whisper /128 over a userspace WireGuard tunnel.",
@@ -96,7 +96,7 @@ func newClaudeCmd() *cobra.Command {
 }
 
 // runWithEgress brings the egress up (op:connect → local proxy → fold verify), injects
-// the proxy env at spawn, and execs the child — forwarding stdio and the exit code. On
+// the proxy env at spawn, and execs the child - forwarding stdio and the exit code. On
 // any bring-up failure it returns a plain remediation (never a stack trace) and never
 // spawns the child uncovered.
 func runWithEgress(agent, agentFile, tier, name string, childArgs []string) error {
@@ -108,7 +108,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 	selTier := strings.TrimSpace(tier)
 	// Project-aware (keystone of `whisper init python`): when the user gave NO explicit
 	// --agent / --agent-file, and we're inside a `whisper init`'d project, prefer THAT project's
-	// identity + tier — so `whisper run python` egresses from the same /128 `whisper init python`
+	// identity + tier - so `whisper run python` egresses from the same /128 `whisper init python`
 	// set up (otherwise run would fall through to the global default agent and the two would
 	// disagree). Fully backward-compatible: an explicit flag still wins, and a non-init'd dir
 	// (discover returns an error) keeps today's behavior exactly.
@@ -123,19 +123,19 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 				}
 			}
 		case isProjectNotFound(derr):
-			// No project here — keep today's behavior (global default agent). Zero-config, silent.
+			// No project here - keep today's behavior (global default agent). Zero-config, silent.
 		default:
 			// A project EXISTS but its .whisper/config is unreadable/corrupt. Fail OPEN to the
-			// global agent (Postel: never block the run) but make the identity divergence VISIBLE —
+			// global agent (Postel: never block the run) but make the identity divergence VISIBLE -
 			// `whisper connect` surfaces this same case, so run must not silently disagree.
 			if !g.quiet {
-				fmt.Fprintf(os.Stderr, "whisper: project .whisper/config unreadable (%v) — using the global agent\n", derr)
+				fmt.Fprintf(os.Stderr, "whisper: project .whisper/config unreadable (%v) - using the global agent\n", derr)
 			}
 		}
 	}
 	// detect-and-reuse: when a long-lived `whisper connect` daemon on this host already
 	// serves the target /128, route the child through ITS live proxy instead of opening a
-	// competing op:connect — the server binds ONE peer per /128, so a second session would
+	// competing op:connect - the server binds ONE peer per /128, so a second session would
 	// replace (and on our exit, remove) the daemon's peer and kill its tunnel for good.
 	var sess *egressSession
 	cxr, cancelr := ctx()
@@ -144,7 +144,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 	if reuse {
 		// Reuse even when a different --tier was asked for (clobbering a live tunnel is
 		// strictly worse); one calm note makes the choice visible. A different --agent that
-		// resolves to a different /128 never lands here — it falls through to a fresh,
+		// resolves to a different /128 never lands here - it falls through to a fresh,
 		// non-clobbering op:connect for that other identity.
 		noteTierIfDifferent(reused, selTier)
 		sess = reused
@@ -170,7 +170,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 		}
 		keys := &connectKeys{wg: wgKey, identity: idKey}
 		// cx is the SHORT control-plane ctx: it bounds op:connect and the one-shot verify HTTP
-		// GET, and is cancelled the moment they return. It does NOT bound the local proxy — the
+		// GET, and is cancelled the moment they return. It does NOT bound the local proxy - the
 		// proxy keeps its own Background-rooted lifetime (see egress.StartLocalProxy) and only
 		// Stop() ends it. So cancelling cx here leaves the proxy LIVE for the child below.
 		cx, cancel := ctx()
@@ -208,7 +208,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 			os.Exit(ee.ExitCode())
 		}
 		if _, lookErr := exec.LookPath(name); lookErr != nil {
-			return usageErr("couldn't find %q to run — is it installed and on your PATH?", name)
+			return usageErr("couldn't find %q to run - is it installed and on your PATH?", name)
 		}
 		return &client.ProblemError{Status: 500, Detail: "the command exited unexpectedly"}
 	}
@@ -221,7 +221,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 // value injected.
 func proxyInjectedEnv(base []string, endpoint string) []string {
 	// curl/git and other SOCKS-aware tools use ALL_PROXY (the socks5h:// form). Node/undici
-	// (e.g. Claude Code) do NOT speak SOCKS — they need an HTTP-CONNECT proxy via the
+	// (e.g. Claude Code) do NOT speak SOCKS - they need an HTTP-CONNECT proxy via the
 	// HTTP(S)_PROXY vars + NODE_USE_ENV_PROXY. Our local proxy serves BOTH on the same port
 	// (it sniffs the first byte), so we point HTTP(S)_PROXY at the http:// (CONNECT) form of
 	// the same endpoint. Verified live: Node fetch leaks via socks5h:// but egresses as the
@@ -233,9 +233,9 @@ func proxyInjectedEnv(base []string, endpoint string) []string {
 		httpForm = "http://" + h
 	}
 	override := map[string]string{
-		"ALL_PROXY":          endpoint, // socks5h:// — curl, git, SOCKS-aware tools
+		"ALL_PROXY":          endpoint, // socks5h:// - curl, git, SOCKS-aware tools
 		"all_proxy":          endpoint,
-		"HTTPS_PROXY":        httpForm, // http:// CONNECT — Node/undici + HTTP-proxy clients
+		"HTTPS_PROXY":        httpForm, // http:// CONNECT - Node/undici + HTTP-proxy clients
 		"https_proxy":        httpForm,
 		"HTTP_PROXY":         httpForm,
 		"http_proxy":         httpForm,

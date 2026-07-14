@@ -13,7 +13,7 @@ import (
 // mcpconfig.go performs the surgical merge of a single MCP server entry into a client's
 // PLAIN-JSON config file (`whisper mcp install`). It is conservative in exactly the way the
 // Claude-settings merge is: read the existing JSON into a generic map, set ONLY our one server
-// under the given top-level key, and write everything else back unchanged — a user's other MCP
+// under the given top-level key, and write everything else back unchanged - a user's other MCP
 // servers and settings survive untouched. It is used ONLY for clients whose config is strict
 // JSON with an object-map of servers (project `.mcp.json` and `.cursor/mcp.json`, both keyed
 // `mcpServers`); JSONC clients (VS Code, Zed) and YAML clients (Goose, Continue) are handled by
@@ -42,7 +42,7 @@ func MergeJSONServer(path, topKey, name string, entry map[string]any) (MCPMergeR
 	if b, err := os.ReadFile(path); err == nil {
 		if len(strings.TrimSpace(string(b))) > 0 {
 			if uerr := json.Unmarshal(b, &root); uerr != nil {
-				return res, fmt.Errorf("%s is not valid JSON — fix or remove it, then re-run: %w", path, uerr)
+				return res, fmt.Errorf("%s is not valid JSON - fix or remove it, then re-run: %w", path, uerr)
 			}
 		}
 	} else if os.IsNotExist(err) {

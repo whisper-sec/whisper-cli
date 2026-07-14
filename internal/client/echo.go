@@ -33,7 +33,7 @@ type EchoResult struct {
 
 // ObservedEgressIP performs a KEYLESS GET of the echo endpoint THROUGH the supplied
 // local SOCKS5/HTTP proxy endpoint (socks5h://127.0.0.1:<port>) and returns the
-// source IP the server observed — i.e. the egress /128 the traffic was sourced from.
+// source IP the server observed - i.e. the egress /128 the traffic was sourced from.
 //
 // It builds a throwaway http.Client whose transport routes via proxyEndpoint, so the
 // request rides the local forward proxy → the Whisper egress → out from the /128.

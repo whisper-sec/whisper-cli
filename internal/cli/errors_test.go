@@ -13,7 +13,7 @@ import (
 )
 
 // TestFriendlyMapsKnownProblems asserts the §3.3 mapping: known server problems collapse
-// to ONE plain sentence — and never leak anything trace-shaped. We fuzz a few error shapes
+// to ONE plain sentence - and never leak anything trace-shaped. We fuzz a few error shapes
 // for each status so the mapping is robust to detail-text/type variation.
 func TestFriendlyMapsKnownProblems(t *testing.T) {
 	cases := []struct {
@@ -28,7 +28,7 @@ func TestFriendlyMapsKnownProblems(t *testing.T) {
 		{"503 egress disabled by detail", &client.ProblemError{Status: 503, Detail: "EGRESS is disabled for this agent"}, "egress isn't enabled"},
 		{"503 generic busy", &client.ProblemError{Status: 503, Detail: "temporarily unavailable"}, "try again"},
 		{"egress type at any status", &client.ProblemError{Status: 409, Type: "EGRESS_DISABLED"}, "egress isn't enabled"},
-		{"no-key keeps its own helpful detail", &client.ProblemError{Status: 401, Title: "no key", Detail: "no API key yet — set WHISPER_API_KEY or run: whisper login"}, "WHISPER_API_KEY"},
+		{"no-key keeps its own helpful detail", &client.ProblemError{Status: 401, Title: "no key", Detail: "no API key yet - set WHISPER_API_KEY or run: whisper login"}, "WHISPER_API_KEY"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -45,8 +45,8 @@ func TestFriendlyMapsKnownProblems(t *testing.T) {
 	}
 }
 
-// TestFriendlyNeverLeaksStackTrace fuzzes the error SHAPES the CLI actually returns —
-// control-plane *ProblemError*s and our own wrapped/transport errors — through friendly()
+// TestFriendlyNeverLeaksStackTrace fuzzes the error SHAPES the CLI actually returns -
+// control-plane *ProblemError*s and our own wrapped/transport errors - through friendly()
 // and asserts the result is always a single, non-empty, plain line: never multi-line, never
 // a goroutine/file:line dump (§3.3 "never a Go stack trace"). It does NOT feed a naked
 // runtime trace as an error message, because the CLI never constructs one: every returned
@@ -56,7 +56,7 @@ func TestFriendlyNeverLeaksStackTrace(t *testing.T) {
 		&client.ProblemError{Status: 500, Detail: "internal error"},
 		&client.ProblemError{Status: 502, Title: "bad gateway"},
 		&client.ProblemError{Status: 429, Type: "RATE_LIMITED"},
-		&client.ProblemError{}, // empty problem — must still produce a safe, non-empty line
+		&client.ProblemError{}, // empty problem - must still produce a safe, non-empty line
 		fmt.Errorf("control plane unreachable at %s: %w", "https://x", errors.New("dial tcp: timeout")),
 		fmt.Errorf("reading control-plane reply: %w", errors.New("unexpected EOF")),
 	}

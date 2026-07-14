@@ -10,19 +10,19 @@ import (
 )
 
 // container.go emits the wholly-owned container manifests `whisper init compose` and
-// `whisper init k8s` write under .whisper/ — a Whisper egress SIDECAR plus the app-side proxy env.
+// `whisper init k8s` write under .whisper/ - a Whisper egress SIDECAR plus the app-side proxy env.
 // The sidecar runs the official image (ghcr.io/whisper-sec/whisper) as `whisper connect`, binding
 // the local proxy on the deterministic port; the app shares the sidecar's network namespace
 // (compose `network_mode: service:whisper`; k8s same Pod) so it reaches the proxy on
 // 127.0.0.1:<port> via the standard proxy env (the same .whisper/proxy.env WriteProxyEnv writes).
 //
 // Like every init target these files live ONLY under .whisper/ (clobber-safe, never the user's own
-// docker-compose.yml / manifests) — they are overlays the user composes in, not edits to their files.
+// docker-compose.yml / manifests) - they are overlays the user composes in, not edits to their files.
 
 // ContainerImage is the official multi-arch image the sidecar runs.
 const ContainerImage = "ghcr.io/whisper-sec/whisper:latest"
 
-// WriteComposeSidecar writes .whisper/compose.yml — a Docker Compose overlay with a `whisper`
+// WriteComposeSidecar writes .whisper/compose.yml - a Docker Compose overlay with a `whisper`
 // egress sidecar bound to cfg.Port, to be merged alongside the user's compose:
 //
 //	docker compose -f docker-compose.yml -f .whisper/compose.yml up
@@ -42,7 +42,7 @@ func WriteComposeSidecar(p Paths, cfg Config, service string) (Created bool, err
 	return created, nil
 }
 
-// WriteK8sSidecar writes .whisper/whisper-sidecar.yaml — a strategic-merge patch adding a NATIVE
+// WriteK8sSidecar writes .whisper/whisper-sidecar.yaml - a strategic-merge patch adding a NATIVE
 // sidecar (an initContainer with restartPolicy: Always, k8s >= 1.29) plus the app-side proxy env,
 // to be applied over a Deployment/Pod spec. Atomic + symlink-safe.
 func WriteK8sSidecar(p Paths, cfg Config) (Created bool, err error) {
@@ -60,7 +60,7 @@ func WriteK8sSidecar(p Paths, cfg Config) (Created bool, err error) {
 func composeContent(cfg Config, service string) string {
 	port := cfg.Port
 	agent := cfg.Agent
-	s := "# whisper-managed — `whisper init compose`. A Whisper egress sidecar; merge it alongside\n" +
+	s := "# whisper-managed - `whisper init compose`. A Whisper egress sidecar; merge it alongside\n" +
 		"# your compose:  docker compose -f docker-compose.yml -f .whisper/compose.yml up\n" +
 		"# Give the app service that should egress:  network_mode: \"service:whisper\"  +  env_file: [.whisper/proxy.env]\n" +
 		"# Export WHISPER_API_KEY in your shell first (it is read from the environment, never written here).\n" +
@@ -73,7 +73,7 @@ func composeContent(cfg Config, service string) string {
 		"    restart: unless-stopped\n"
 	if service != "" {
 		s += fmt.Sprintf("  %s:\n", service) +
-			"    # your app — set its image/build; it egresses through the sidecar's /128.\n" +
+			"    # your app - set its image/build; it egresses through the sidecar's /128.\n" +
 			"    # image: your-app:latest\n" +
 			"    network_mode: \"service:whisper\"\n" +
 			"    env_file: [.whisper/proxy.env]\n" +
@@ -86,7 +86,7 @@ func k8sContent(cfg Config) string {
 	port := cfg.Port
 	ep := fmt.Sprintf("http://127.0.0.1:%d", port)
 	socks := fmt.Sprintf("socks5h://127.0.0.1:%d", port)
-	return "# whisper-managed — `whisper init k8s`. A NATIVE sidecar (initContainer restartPolicy: Always,\n" +
+	return "# whisper-managed - `whisper init k8s`. A NATIVE sidecar (initContainer restartPolicy: Always,\n" +
 		"# Kubernetes >= 1.29) that egresses the Pod through a Whisper /128. Merge into your\n" +
 		"# Deployment/Pod spec (spec.template.spec) and set the app container name + the WHISPER_API_KEY secret:\n" +
 		"#   kubectl create secret generic whisper --from-literal=api-key=whisper_live_xxx\n" +

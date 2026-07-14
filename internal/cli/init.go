@@ -18,8 +18,8 @@ import (
 )
 
 // init.go is `whisper init claude`: the ONE command that gives a Claude Code project
-// its own Whisper agent identity + connectivity tier, so a bare `claude` in the dir — and
-// every subagent it spawns — egresses from THAT project's /128 with zero further config.
+// its own Whisper agent identity + connectivity tier, so a bare `claude` in the dir - and
+// every subagent it spawns - egresses from THAT project's /128 with zero further config.
 //
 // It is the seam where everything else clicks together:
 //   - resolve/create the project agent (reuse guided.go's selection) and persist its /128 to a
@@ -58,7 +58,7 @@ func newInitCmd() *cobra.Command {
 		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// Bare `whisper init` with no subcommand: guide, don't dump help.
-			return usageErr("tell init what to set up — e.g. `whisper init claude` or `whisper init python`")
+			return usageErr("tell init what to set up - e.g. `whisper init claude` or `whisper init python`")
 		},
 	}
 	cmd.AddCommand(newInitClaudeCmd())
@@ -83,12 +83,12 @@ func newInitComposeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "compose",
 		Short: "Emit a Docker Compose egress sidecar so a container egresses from a Whisper /128",
-		Long: "Write .whisper/compose.yml — a Whisper egress sidecar (the official container image running\n" +
+		Long: "Write .whisper/compose.yml - a Whisper egress sidecar (the official container image running\n" +
 			"`whisper connect`) plus .whisper/proxy.env for the app. Merge it alongside your compose:\n" +
 			"  docker compose -f docker-compose.yml -f .whisper/compose.yml up\n" +
 			"and give the app service `network_mode: \"service:whisper\"` + `env_file: [.whisper/proxy.env]`\n" +
 			"(or pass --service <name> to emit an example app service wired to the sidecar).\n\n" +
-			"No host daemon is started — the proxy runs in the sidecar container. Export WHISPER_API_KEY first.",
+			"No host daemon is started - the proxy runs in the sidecar container. Export WHISPER_API_KEY first.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInitContainer(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force, service: service}, "compose")
@@ -110,11 +110,11 @@ func newInitK8sCmd() *cobra.Command {
 		Use:     "k8s",
 		Aliases: []string{"kubernetes", "kube"},
 		Short:   "Emit a Kubernetes native-sidecar patch so a Pod egresses from a Whisper /128",
-		Long: "Write .whisper/whisper-sidecar.yaml — a NATIVE sidecar (initContainer restartPolicy: Always,\n" +
+		Long: "Write .whisper/whisper-sidecar.yaml - a NATIVE sidecar (initContainer restartPolicy: Always,\n" +
 			"Kubernetes >= 1.29) running the official image as `whisper connect`, plus the app-container\n" +
 			"proxy env. Merge it into your Deployment/Pod spec, set your app container's name, and create\n" +
 			"the api-key secret:  kubectl create secret generic whisper --from-literal=api-key=whisper_live_xxx\n\n" +
-			"No host daemon is started — the proxy runs in the Pod's sidecar container.",
+			"No host daemon is started - the proxy runs in the Pod's sidecar container.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInitContainer(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force}, "k8s")
@@ -129,7 +129,7 @@ func newInitK8sCmd() *cobra.Command {
 }
 
 // runInitContainer wires the project (backbone + proxy.env) and emits the container sidecar
-// manifest. It deliberately does NOT start the host daemon — the proxy runs in the sidecar.
+// manifest. It deliberately does NOT start the host daemon - the proxy runs in the sidecar.
 func runInitContainer(opts initOptions, target string) error {
 	p, cfg, err := initBackbone(opts)
 	if err != nil {
@@ -206,7 +206,7 @@ func printInitContainerSummary(p projcfg.Paths, cfg projcfg.Config, target, mani
 
 // newInitNotebookCmd builds `whisper init notebook`: prints a paste-ready FIRST cell that points a
 // Colab/Kaggle/Jupyter kernel at the project's /128. Unlike the env-tools, the cell SETS os.environ
-// (it provides the env rather than consuming it), so it needs the actual port baked in — hence a
+// (it provides the env rather than consuming it), so it needs the actual port baked in - hence a
 // dedicated command rather than a static-recipe profile.
 func newInitNotebookCmd() *cobra.Command {
 	var tier, agent, name, dir string
@@ -217,7 +217,7 @@ func newInitNotebookCmd() *cobra.Command {
 		Long: "Wire the current project and print a paste-ready FIRST cell that makes a notebook\n" +
 			"kernel (Colab/Kaggle/Jupyter) egress from the project's Whisper /128.\n\n" +
 			"Local Jupyter: the cell just sets os.environ (the local daemon is already up). Hosted\n" +
-			"Colab/Kaggle: the proxy must run inside the VM — uncomment the bootstrap lines in the cell.",
+			"Colab/Kaggle: the proxy must run inside the VM - uncomment the bootstrap lines in the cell.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInitNotebook(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force})
@@ -289,7 +289,7 @@ func notebookCell(port int) []string {
 		"    os.environ.update(HTTP_PROXY=_P, HTTPS_PROXY=_P, ALL_PROXY=_S,",
 		"                      http_proxy=_P, https_proxy=_P, all_proxy=_S,",
 		"                      NO_PROXY=\"localhost,127.0.0.1,::1\", no_proxy=\"localhost,127.0.0.1,::1\")",
-		"    # Hosted Colab/Kaggle? the proxy must run INSIDE the VM — uncomment:",
+		"    # Hosted Colab/Kaggle? the proxy must run INSIDE the VM - uncomment:",
 		"    # import subprocess; key = os.environ.get(\"WHISPER_API_KEY\", \"whisper_live_xxx\")",
 		"    # subprocess.run(\"curl -fsSL https://cli.whisper.online/dl/linux-amd64/whisper -o /tmp/whisper && chmod +x /tmp/whisper\", shell=True, check=True)",
 		fmt.Sprintf("    # subprocess.Popen(f\"WHISPER_API_KEY={key} /tmp/whisper connect --port %d\", shell=True)", port),
@@ -304,13 +304,13 @@ func newInitClaudeCmd() *cobra.Command {
 		Short: "Zero-config: make Claude Code in this dir egress from a Whisper /128",
 		Long: "Set up the current project so Claude Code (and every subagent it spawns) routes all\n" +
 			"its traffic through a Whisper agent over SOCKS5 (default) or WireGuard.\n\n" +
-			"After this, just run `claude` in the dir — its API traffic, Bash, and subagents all\n" +
+			"After this, just run `claude` in the dir - its API traffic, Bash, and subagents all\n" +
 			"leave from the project's /128. It writes .whisper/config + a managed env/hook block in\n" +
 			".claude/settings.local.json (never clobbering your other settings), gitignores them,\n" +
 			"and starts the connection now.\n\n" +
 			"Pick the identity: --agent <id|/128> uses an existing one; --name <new> creates one;\n" +
 			"else the project's persisted agent, else the server's most-recent default.\n\n" +
-			"Idempotent — re-run any time to update. Use --force to overwrite an existing setup.",
+			"Idempotent - re-run any time to update. Use --force to overwrite an existing setup.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInitClaude(initOptions{
@@ -345,7 +345,7 @@ type envToolProfile struct {
 	runExample string   // the command shown after `whisper run`, e.g. "python script.py", "gemini"
 	notes      []string // honest caveats printed in the summary (silent-wrong-source traps etc.)
 	// recipe is an optional verbatim code block printed under "wire it into your code:". Some
-	// runtimes (Node bot frameworks, browser automation) do NOT auto-read the proxy env — they
+	// runtimes (Node bot frameworks, browser automation) do NOT auto-read the proxy env - they
 	// need an explicit proxy agent in source. For those, proxy.env supplies the values and this
 	// recipe shows the (small) code that consumes them. Empty for pure auto-env tools.
 	recipe []string
@@ -357,11 +357,11 @@ func envToolProfiles() []envToolProfile {
 	return []envToolProfile{
 		{
 			name: "python", short: "Zero-config: make any Python agent in this dir egress from a Whisper /128",
-			covers:     "any Python agent framework (httpx/requests/urllib — LangChain, CrewAI, LlamaIndex, OpenAI-Agents-SDK, smolagents, AutoGen, the openai/anthropic SDKs)",
+			covers:     "any Python agent framework (httpx/requests/urllib - LangChain, CrewAI, LlamaIndex, OpenAI-Agents-SDK, smolagents, AutoGen, the openai/anthropic SDKs)",
 			runExample: "python script.py",
 			notes: []string{
-				"a bare `python script.py` only egresses after you activate (above) — `whisper run` always works.",
-				"aiohttp ignores proxy env by default — pass `ClientSession(trust_env=True)`, or use `--tier wireguard` for code-free routing.",
+				"a bare `python script.py` only egresses after you activate (above) - `whisper run` always works.",
+				"aiohttp ignores proxy env by default - pass `ClientSession(trust_env=True)`, or use `--tier wireguard` for code-free routing.",
 			},
 		},
 		{
@@ -369,7 +369,7 @@ func envToolProfiles() []envToolProfile {
 			covers:     "the Google Gemini CLI (it reads HTTP_PROXY/HTTPS_PROXY from the environment)",
 			runExample: "gemini",
 			notes: []string{
-				"the Gemini CLI picks up the proxy from the environment — activate (above) or use `whisper run gemini`.",
+				"the Gemini CLI picks up the proxy from the environment - activate (above) or use `whisper run gemini`.",
 			},
 		},
 		{
@@ -377,7 +377,7 @@ func envToolProfiles() []envToolProfile {
 			covers:     "aider, the AI pair programmer (its LLM calls go through httpx, which honors the proxy env)",
 			runExample: "aider",
 			notes: []string{
-				"aider reads the proxy from the environment — activate (above) or just `whisper run aider`.",
+				"aider reads the proxy from the environment - activate (above) or just `whisper run aider`.",
 			},
 		},
 		{
@@ -391,10 +391,10 @@ func envToolProfiles() []envToolProfile {
 		{
 			name: "browser-use", aliases: []string{"browseruse"},
 			short:      "Zero-config: make browser-use (and its browser) egress from a Whisper /128",
-			covers:     "browser-use — its LLM calls (httpx) honor the proxy env; the browser itself needs the proxy passed at launch (recipe below)",
+			covers:     "browser-use - its LLM calls (httpx) honor the proxy env; the browser itself needs the proxy passed at launch (recipe below)",
 			runExample: "python agent.py",
 			notes: []string{
-				"the LLM/httpx leg uses the proxy env (activate above); the BROWSER leg needs the proxy passed at launch — see the recipe.",
+				"the LLM/httpx leg uses the proxy env (activate above); the BROWSER leg needs the proxy passed at launch - see the recipe.",
 			},
 			recipe: []string{
 				"from browser_use import Agent, BrowserSession, BrowserProfile",
@@ -415,7 +415,7 @@ func envToolProfiles() []envToolProfile {
 			covers:     "a discord.js bot (its REST + gateway calls go through an undici proxy agent)",
 			runExample: "node bot.js",
 			notes: []string{
-				"discord.js does NOT read proxy env — wire the agent below (REST), and for the gateway WebSocket use `--tier wireguard` for code-free kernel routing.",
+				"discord.js does NOT read proxy env - wire the agent below (REST), and for the gateway WebSocket use `--tier wireguard` for code-free kernel routing.",
 			},
 			recipe: []string{
 				"const { ProxyAgent } = require('undici');",
@@ -432,7 +432,7 @@ func envToolProfiles() []envToolProfile {
 			covers:     "a Telegram bot (grammY or Telegraf) via a SOCKS proxy agent",
 			runExample: "node bot.js",
 			notes: []string{
-				"grammY/Telegraf do NOT read proxy env — wire the agent below (uses ALL_PROXY from .whisper/proxy.env).",
+				"grammY/Telegraf do NOT read proxy env - wire the agent below (uses ALL_PROXY from .whisper/proxy.env).",
 			},
 			recipe: []string{
 				"// grammY:",
@@ -449,8 +449,8 @@ func envToolProfiles() []envToolProfile {
 			covers:     "the Zed editor (it honors HTTP(S)_PROXY/ALL_PROXY when launched from a shell)",
 			runExample: "zed .",
 			notes: []string{
-				"recommended: launch with `whisper run zed .` — that uses THIS project's /128 and touches nothing global.",
-				"GUI/Dock launch instead? Zed reads the proxy only from its GLOBAL ~/.config/zed/settings.json — add the ALL_PROXY value from .whisper/proxy.env as `\"proxy\": \"socks5h://127.0.0.1:<port>\"` (one shared value across projects; quit Zed fully and relaunch). We don't auto-edit that file — it's your hand-curated global config (JSONC with comments).",
+				"recommended: launch with `whisper run zed .` - that uses THIS project's /128 and touches nothing global.",
+				"GUI/Dock launch instead? Zed reads the proxy only from its GLOBAL ~/.config/zed/settings.json - add the ALL_PROXY value from .whisper/proxy.env as `\"proxy\": \"socks5h://127.0.0.1:<port>\"` (one shared value across projects; quit Zed fully and relaunch). We don't auto-edit that file - it's your hand-curated global config (JSONC with comments).",
 			},
 		},
 	}
@@ -470,12 +470,12 @@ func newInitEnvToolCmd(prof envToolProfile) *cobra.Command {
 			"It writes .whisper/config + a wholly-owned proxy env file .whisper/proxy.env (it NEVER\n" +
 			"touches your ./.env), gitignores .whisper/, and starts the connection now.\n\n" +
 			"Activation (the summary tailors this to whether direnv is installed):\n" +
-			"  • `whisper run " + prof.runExample + "`   — zero-config, all-OS (recommended)\n" +
+			"  • `whisper run " + prof.runExample + "`   - zero-config, all-OS (recommended)\n" +
 			"  • direnv: add `dotenv_if_exists .whisper/proxy.env` to .envrc, then run normally\n" +
 			"  • `set -a; . .whisper/proxy.env; set +a`  then run normally\n\n" +
 			"Pick the identity: --agent <id|/128> uses an existing one; --name <new> creates one;\n" +
 			"else the project's persisted agent, else the server's most-recent default.\n\n" +
-			"Idempotent — re-run any time to update. Use --force to overwrite an existing setup.",
+			"Idempotent - re-run any time to update. Use --force to overwrite an existing setup.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runInitEnvTool(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force}, prof)
@@ -508,12 +508,12 @@ type initOptions struct {
 // validate the tier, resolve + persist the project agent, pick the deterministic local port, and
 // write .whisper/config. It returns the resolved paths + config so each target can do its own
 // tool-specific wiring (claude → settings merge; python → proxy.env). Each step is fail-fast with
-// a clear, actionable error — never an opaque 500.
+// a clear, actionable error - never an opaque 500.
 func initBackbone(opts initOptions) (projcfg.Paths, projcfg.Config, error) {
 	// Validate the tier up front (Postel: liberal-accept the spelling, but reject a true typo
 	// with a clear message rather than silently defaulting).
 	if !projcfg.ValidTier(opts.tier) {
-		return projcfg.Paths{}, projcfg.Config{}, usageErr("unknown --tier %q — use socks5 or wireguard", opts.tier)
+		return projcfg.Paths{}, projcfg.Config{}, usageErr("unknown --tier %q - use socks5 or wireguard", opts.tier)
 	}
 	tier := projcfg.NormalizeTier(opts.tier)
 
@@ -537,7 +537,7 @@ func initBackbone(opts initOptions) (projcfg.Paths, projcfg.Config, error) {
 
 	// If an agent file override was given, honour it; otherwise the PROJECT agent file lives
 	// at <project>/.whisper/agent (per-project, not the global ~/.config one). Targets that do
-	// NOT expose --agent-file (e.g. `init python`) always land here — provably under .whisper/.
+	// NOT expose --agent-file (e.g. `init python`) always land here - provably under .whisper/.
 	projectAgentFile := opts.agentFile
 	if strings.TrimSpace(projectAgentFile) == "" {
 		projectAgentFile = filepath.Join(p.WhisperDir, "agent")
@@ -545,7 +545,7 @@ func initBackbone(opts initOptions) (projcfg.Paths, projcfg.Config, error) {
 
 	// Refuse to silently overwrite an existing setup unless --force (idempotent re-runs still
 	// UPDATE; --force is for "wipe and re-pick the agent/tier"). A re-run WITHOUT --force still
-	// proceeds — it just reuses the persisted agent — so `init` stays idempotent by default.
+	// proceeds - it just reuses the persisted agent - so `init` stays idempotent by default.
 	existing, _ := projcfg.Load(p)
 	if existing != nil && opts.force {
 		// --force: drop the old config so the agent selection below starts clean.
@@ -611,7 +611,7 @@ func runInitClaude(opts initOptions) error {
 	// (f) START the daemon now so the proxy is live before the user launches claude. Use the
 	// SAME ensure path the SessionStart hook re-runs (idempotent: a re-init reuses the live one).
 	_, alreadyLive, derr := ensureDaemon(p, cfg)
-	// A daemon that didn't come up within the budget is NOT a hard init failure — the config +
+	// A daemon that didn't come up within the budget is NOT a hard init failure - the config +
 	// settings + hook are all written, so the SessionStart hook (or a later `whisper connect
 	// --ensure`) will bring it up. We surface it as a warning in the summary, not an error.
 	daemonNote := ""
@@ -634,13 +634,13 @@ func runInitEnvTool(opts initOptions, prof envToolProfile) error {
 	}
 
 	// (d) Write the wholly-owned proxy env file. We never read/open/write a user ./.env or
-	// ./.envrc — proxy.env lives entirely inside our .whisper/ namespace (clobber-safe).
+	// ./.envrc - proxy.env lives entirely inside our .whisper/ namespace (clobber-safe).
 	pres, err := projcfg.WriteProxyEnv(p, cfg.Port)
 	if err != nil {
 		return err
 	}
 
-	// (e) gitignore ONLY .whisper/ — an env-tool init writes no tool config file, so adding any
+	// (e) gitignore ONLY .whisper/ - an env-tool init writes no tool config file, so adding any
 	// other line would be a needless, non-load-bearing emit (conservative output).
 	ignored, _ := projcfg.EnsureGitignoredEntries(p, []string{".whisper/"})
 
@@ -683,7 +683,7 @@ func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, pr
 			return "", "", cerr
 		}
 		if created.addr == "" {
-			return "", "", &client.ProblemError{Status: 502, Detail: "the new agent has no address yet — try again"}
+			return "", "", &client.ProblemError{Status: 502, Detail: "the new agent has no address yet - try again"}
 		}
 		return created.addr, "", nil
 	}
@@ -696,7 +696,7 @@ func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, pr
 		return existing.Agent, existing.FQDN, nil
 	}
 	// 5. Nothing pinned: reuse the caller's MOST-RECENT existing agent, or create a first one.
-	//    A fresh account with no agents needs a name — refuse rather than mint an unnamed /128.
+	//    A fresh account with no agents needs a name - refuse rather than mint an unnamed /128.
 	cx, cancel := ctx()
 	defer cancel()
 	choices, lerr := listAgents(c, cx)
@@ -704,7 +704,7 @@ func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, pr
 		return "", "", lerr
 	}
 	if len(choices) == 0 {
-		return "", "", usageErr("no agents yet — re-run with --name <name> to create this project's agent")
+		return "", "", usageErr("no agents yet - re-run with --name <name> to create this project's agent")
 	}
 	// Reuse the first (server order ≈ most-recent); deterministic and zero-config.
 	pick := choices[0]
@@ -765,7 +765,7 @@ func printInitHeader(w io.Writer, p projcfg.Paths, cfg projcfg.Config) {
 // for python).
 func printConnectionStatus(w io.Writer, alreadyLive bool, daemonNote, bringUpHint string) {
 	if daemonNote != "" {
-		fmt.Fprintf(w, "  note: %s — %s.\n", daemonNote, bringUpHint)
+		fmt.Fprintf(w, "  note: %s - %s.\n", daemonNote, bringUpHint)
 	} else if alreadyLive {
 		fmt.Fprintln(w, "  connection: already live")
 	} else {
@@ -829,11 +829,11 @@ func printInitEnvToolSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.P
 	}
 	printConnectionStatus(w, alreadyLive, daemonNote, "`whisper run "+prof.runExample+"` (or `whisper connect --ensure`) will bring it up")
 
-	// Activation — lead with the lowest-friction path for THIS machine.
+	// Activation - lead with the lowest-friction path for THIS machine.
 	fmt.Fprintln(w, "\nactivate egress (pick one):")
 	_, haveDirenv := exec.LookPath("direnv")
 	if haveDirenv == nil {
-		fmt.Fprintf(w, "  • direnv (recommended — then run normally on every cd):\n")
+		fmt.Fprintf(w, "  • direnv (recommended - then run normally on every cd):\n")
 		fmt.Fprintf(w, "      echo 'dotenv_if_exists %s' >> .envrc && direnv allow\n", filepath.ToSlash(rel))
 		fmt.Fprintf(w, "  • or, no setup needed:  whisper run %s\n", prof.runExample)
 	} else {
@@ -842,7 +842,7 @@ func printInitEnvToolSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.P
 		fmt.Fprintf(w, "  • (install direnv for auto-egress on cd: `dotenv_if_exists %s` in .envrc)\n", filepath.ToSlash(rel))
 	}
 
-	// Some runtimes don't auto-read proxy env — print the small code that consumes it.
+	// Some runtimes don't auto-read proxy env - print the small code that consumes it.
 	if len(prof.recipe) > 0 {
 		fmt.Fprintln(w, "\nwire it into your code (values come from .whisper/proxy.env):")
 		for _, line := range prof.recipe {
@@ -850,7 +850,7 @@ func printInitEnvToolSummary(p projcfg.Paths, cfg projcfg.Config, pres projcfg.P
 		}
 	}
 
-	// Honest caveats — the silent-wrong-source traps, surfaced loudly (conservative emit).
+	// Honest caveats - the silent-wrong-source traps, surfaced loudly (conservative emit).
 	for _, n := range prof.notes {
 		fmt.Fprintf(w, "\nnote: %s\n", n)
 	}

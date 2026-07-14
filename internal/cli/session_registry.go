@@ -18,27 +18,27 @@ import (
 // session_registry.go: a lightweight LOCAL registry of live, held-open egress sessions, so a
 // one-shot surface (`whisper ip`, `whisper run`, `whisper claude`, the guided front door) NEVER opens
 // its own competing op:connect for a /128 that a long-lived `whisper connect` daemon on this host is
-// already serving — it detects the live session and routes through the running proxy instead.
+// already serving - it detects the live session and routes through the running proxy instead.
 //
 // Why this exists: the server binds ONE WireGuard peer per /128, so a one-shot's op:connect REPLACES a
-// running daemon's peer registration, and the one-shot's `defer sess.Stop()` then REMOVES that peer —
+// running daemon's peer registration, and the one-shot's `defer sess.Stop()` then REMOVES that peer -
 // killing the daemon's tunnel for good (every later CONNECT fails with curl:(97); the monitor can
 // only re-nudge an endpoint, it cannot recreate a server-removed peer). Detect-and-reuse is the
 // non-clobbering primitive: never open a second session for an already-served /128.
 //
 // Mechanism (nothing new, per the north star): each HELD session (interactive `whisper connect`, the
-// guided TTY hold, the `--ensure` daemon) writes one small JSON record — the /128, the ACTUAL bound
-// local endpoint, the tier, the port, our pid — under ~/.config/whisper-ns/sessions/ (0700/0600), and
+// guided TTY hold, the `--ensure` daemon) writes one small JSON record - the /128, the ACTUAL bound
+// local endpoint, the tier, the port, our pid - under ~/.config/whisper-ns/sessions/ (0700/0600), and
 // removes it on teardown. A one-shot consults the registry FIRST and, before trusting a record,
 // CONFIRMS liveness with the existing probeWhisperProxy (a real SOCKS5 no-auth handshake), so a stale
-// record (crashed daemon, foreign listener) is discarded — and lazily cleaned up — never reused. No
+// record (crashed daemon, foreign listener) is discarded - and lazily cleaned up - never reused. No
 // secret is ever written: the endpoint is the bearer/key-free socks5h://127.0.0.1:<port>.
 //
 // The reused session carries local==nil, which is LOAD-BEARING: egressSession.Stop() no-ops on a nil
 // local, so a one-shot's `defer sess.Stop()` can never touch the daemon's tunnel or its server-side
 // peer.
 
-// sessionRecord is the on-disk shape of one held-open local egress (NO secrets — see above).
+// sessionRecord is the on-disk shape of one held-open local egress (NO secrets - see above).
 type sessionRecord struct {
 	Addr     string `json:"addr"`     // the agent's /128 (the session's verified identity)
 	Endpoint string `json:"endpoint"` // the bearer/key-free local endpoint, e.g. socks5h://127.0.0.1:1080
@@ -67,7 +67,7 @@ func sessionRecordPath(addr string) string {
 
 // writeSessionRecord registers a HELD session we own (sess.local != nil) in the local registry.
 // Best-effort + secret-free: a write failure only loses the reuse optimization, never the session.
-// A reused session (local == nil) is NEVER re-registered — the owning daemon's record stands.
+// A reused session (local == nil) is NEVER re-registered - the owning daemon's record stands.
 func writeSessionRecord(sess *egressSession) {
 	if sess == nil || sess.local == nil || sess.addr == "" || sess.endpoint == "" {
 		return
@@ -93,7 +93,7 @@ func writeSessionRecord(sess *egressSession) {
 }
 
 // clearSessionRecord removes a held session's record on teardown (best-effort). Only the OWNER
-// (sess.local != nil) may clear — a one-shot that merely reused the session must never unlink the
+// (sess.local != nil) may clear - a one-shot that merely reused the session must never unlink the
 // daemon's record.
 func clearSessionRecord(sess *egressSession) {
 	if sess == nil || sess.local == nil || sess.addr == "" {
@@ -112,7 +112,7 @@ func removeSessionRecord(addr string) {
 }
 
 // readSessionRecords loads every parseable record in the registry (unreadable/garbled files are
-// skipped — liberal in what we accept; the probe is the real gate anyway).
+// skipped - liberal in what we accept; the probe is the real gate anyway).
 func readSessionRecords() []sessionRecord {
 	entries, err := os.ReadDir(sessionsDirFn())
 	if err != nil {
@@ -138,7 +138,7 @@ func readSessionRecords() []sessionRecord {
 
 // findLiveSession is the one-shot's detect-and-reuse gate: given the caller's agent selector (a
 // /128, an id/name, or "" for the persisted/zero-config default), it returns a REUSABLE session
-// for a live, locally-held egress of the SAME /128 — or (nil, false) to proceed with a fresh
+// for a live, locally-held egress of the SAME /128 - or (nil, false) to proceed with a fresh
 // op:connect exactly as today. Absolutely fail-open: no registry, no match, a dead record, or a
 // selector that resolves elsewhere all fall through; a false negative only costs the pre-
 // behavior, never a broken run.
@@ -152,7 +152,7 @@ func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressS
 	}
 	// Resolve the target /128 the caller means, cheapest first: an explicit /128 selector; else the
 	// persisted default agent; a bare name/id resolves through the SAME client-side resolver connect
-	// uses (one op:list — only paid when a name selector meets a non-empty registry).
+	// uses (one op:list - only paid when a name selector meets a non-empty registry).
 	target := strings.TrimSpace(sel)
 	if target == "" {
 		target = client.ReadAgentFile("")
@@ -160,7 +160,7 @@ func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressS
 	if target != "" && !looksLikeV6(target) {
 		resolved, err := resolveConnectAgent(c, cx, target)
 		if err != nil || !looksLikeV6(resolved) {
-			return nil, false // can't prove the selector maps to a held /128 — fresh connect
+			return nil, false // can't prove the selector maps to a held /128 - fresh connect
 		}
 		target = resolved
 	}
@@ -174,7 +174,7 @@ func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressS
 		}
 	} else if len(recs) == 1 {
 		// No selector anywhere and exactly ONE held session: that IS the user's live connection.
-		// More than one with no selector is ambiguous — never guess an identity (conservative).
+		// More than one with no selector is ambiguous - never guess an identity (conservative).
 		match = &recs[0]
 	}
 	if match == nil {
@@ -192,13 +192,13 @@ func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressS
 		addr:     match.Addr,
 		tier:     match.Tier,
 		verified: false, // the caller decides whether to fold a fresh verify in (whisper ip does)
-		local:    nil,   // LOAD-BEARING: Stop() must be a no-op — we do not own this egress
+		local:    nil,   // LOAD-BEARING: Stop() must be a no-op - we do not own this egress
 	}, true
 }
 
 // noteTierIfDifferent emits ONE calm stderr note when a one-shot asked for a different --tier than
 // the live session it is reusing. Clobbering a live tunnel to honour a tier flag would be strictly
-// worse than reusing it, so we reuse and say so — silent under --quiet.
+// worse than reusing it, so we reuse and say so - silent under --quiet.
 func noteTierIfDifferent(sess *egressSession, requestedTier string) {
 	want := strings.TrimSpace(requestedTier)
 	if want == "" || g.quiet || canonTier(want) == canonTier(sess.tier) {

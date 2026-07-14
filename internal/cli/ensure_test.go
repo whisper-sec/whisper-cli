@@ -162,7 +162,7 @@ func freeEphemeralPort(t *testing.T) int {
 }
 
 // TestRunConnectDaemon_BindFirstGuard: a duplicate daemon spawned onto a port another daemon
-// already holds must fail-fast to nil (already-ensured) INSTANTLY — never doing op:connect,
+// already holds must fail-fast to nil (already-ensured) INSTANTLY - never doing op:connect,
 // never lingering. This is the hard guarantee that a raced/false-negative --ensure can never
 // leave a zombie daemon (the bug the live e2e caught). Without the guard, runConnectDaemon
 // would fall through to resolveClient/op:connect (and hang or error), so a held port that
@@ -186,6 +186,6 @@ func TestRunConnectDaemon_BindFirstGuard(t *testing.T) {
 			t.Fatalf("port held by another daemon: want nil (already ensured), got %v", err)
 		}
 	case <-time.After(3 * time.Second):
-		t.Fatal("runConnectDaemon did not fail-fast on a held port — the bind-first guard is missing or after network work")
+		t.Fatal("runConnectDaemon did not fail-fast on a held port - the bind-first guard is missing or after network work")
 	}
 }

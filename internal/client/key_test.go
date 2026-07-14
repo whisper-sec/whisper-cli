@@ -135,7 +135,7 @@ func TestSaveAgentMode600AndRemoveOnEmpty(t *testing.T) {
 	if fi, _ := os.Stat(path); fi.Mode().Perm() != 0o600 {
 		t.Fatalf("agent file mode = %v, want 0600", fi.Mode().Perm())
 	}
-	// empty id removes the pin (so the most-recent default takes over) — and is idempotent.
+	// empty id removes the pin (so the most-recent default takes over) - and is idempotent.
 	if err := SaveAgent(path, "   "); err != nil {
 		t.Fatalf("SaveAgent(empty) should clear the pin, got %v", err)
 	}

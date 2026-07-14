@@ -9,13 +9,13 @@ import (
 	"time"
 )
 
-// monitor is the tunnel health loop (robustness — a stale WG is frustrating, the
+// monitor is the tunnel health loop (robustness - a stale WG is frustrating, the
 // same philosophy as the server-side reaper). Every healthEvery it reads the device's
 // last-handshake; if the tunnel has had NO successful handshake for deadAfter (default 180s,
-// ~7× the 25s keepalive — the same black-hole threshold the box reaper uses), it forces a
+// ~7× the 25s keepalive - the same black-hole threshold the box reaper uses), it forces a
 // reconnect: re-assert the peer endpoint via the UAPI, which nudges wireguard-go to send a
 // fresh handshake initiation. Backoff is capped exponential so a box that is genuinely down
-// is retried calmly, not hammered. The local SOCKS5 endpoint NEVER changes — the tunnel heals
+// is retried calmly, not hammered. The local SOCKS5 endpoint NEVER changes - the tunnel heals
 // underneath live tools. The loop exits on Stop() (t.stop closed).
 func (t *Tunnel) monitor() {
 	tick := time.NewTicker(t.healthEvery)
@@ -58,7 +58,7 @@ func (t *Tunnel) monitor() {
 				t.reconnects++
 				n := t.reconnects
 				t.mu.Unlock()
-				t.note("whisper: WireGuard tunnel idle — re-handshaking (attempt %d)…", n)
+				t.note("whisper: WireGuard tunnel idle - re-handshaking (attempt %d)…", n)
 			}
 			nextReconnect = now.Add(backoff)
 			if backoff < maxBackoff {
@@ -73,7 +73,7 @@ func (t *Tunnel) monitor() {
 
 // readHandshake reads the peer's last-handshake time from the device's UAPI dump. It returns
 // (zero,false) when the device cannot be read; (t,true) where t is the handshake time (which
-// may be the zero time if no handshake has happened yet — the caller treats zero as unhealthy).
+// may be the zero time if no handshake has happened yet - the caller treats zero as unhealthy).
 // The dump can name the peer's public key (not a secret) but NO private material, and we parse
 // only the two handshake-time fields, so nothing sensitive is retained or logged.
 func (t *Tunnel) readHandshake() (time.Time, bool) {

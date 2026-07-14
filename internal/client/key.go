@@ -32,7 +32,7 @@ func DefaultAgentFile() string {
 }
 
 // ReadAgentFile returns the persisted CHOSEN agent id (trimmed), or "" when the file is
-// absent/empty/unreadable. Liberal + fail-soft: a missing agent file is NOT an error — it
+// absent/empty/unreadable. Liberal + fail-soft: a missing agent file is NOT an error - it
 // simply means "no pinned agent", and the caller falls back to the most-recent default.
 // When path is empty, DefaultAgentFile() is used.
 func ReadAgentFile(path string) string {
@@ -47,7 +47,7 @@ func ReadAgentFile(path string) string {
 }
 
 // SaveAgent writes the chosen agent id to the agent file with mode 0600 (directory 0700),
-// creating parents as needed — mirrors SaveKey. An empty id removes the pin (so a later
+// creating parents as needed - mirrors SaveKey. An empty id removes the pin (so a later
 // reuse-most-recent default applies) rather than persisting a blank.
 func SaveAgent(path, agent string) error {
 	if path == "" {
@@ -68,7 +68,7 @@ func SaveAgent(path, agent string) error {
 	return os.WriteFile(path, []byte(agent), 0o600)
 }
 
-// KeySource describes where a resolved credential came from — surfaced in `config`/
+// KeySource describes where a resolved credential came from - surfaced in `config`/
 // diagnostics so an operator can see WHICH key the CLI will use (zero-config clarity).
 type KeySource string
 
@@ -118,7 +118,7 @@ type KeyLadderOptions struct {
 //
 // Conservative+liberal: try every place a key could legitimately live; prompt only
 // when one is offered, never an opaque hang. Returns a SourceNone credential (not an
-// error) when nothing is found — the caller renders the helpful "no key" guidance.
+// error) when nothing is found - the caller renders the helpful "no key" guidance.
 func ResolveCredential(opts KeyLadderOptions) (Credential, error) {
 	// 1. --bearer (an explicit monitor token wins; it pins a read-only stream).
 	if v := strings.TrimSpace(opts.FlagBearer); v != "" {
@@ -163,7 +163,7 @@ func ResolveCredential(opts KeyLadderOptions) (Credential, error) {
 }
 
 // SaveKey writes key to the key file with mode 0600 (the directory mode 0700),
-// creating parents as needed — used by `whisper login`.
+// creating parents as needed - used by `whisper login`.
 func SaveKey(path, key string) error {
 	if path == "" {
 		path = DefaultKeyFile()

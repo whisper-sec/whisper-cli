@@ -16,16 +16,16 @@ import (
 type RDAPKind string
 
 const (
-	RDAPIP     RDAPKind = "ip"     // /ip/<v6>     — the /128 object
-	RDAPDomain RDAPKind = "domain" // /domain/<fqdn> — the forward-name object
+	RDAPIP     RDAPKind = "ip"     // /ip/<v6>     - the /128 object
+	RDAPDomain RDAPKind = "domain" // /domain/<fqdn> - the forward-name object
 )
 
 // RDAP fetches a public, unauthenticated RDAP object (RFC 9083) for a /128 address or a
 // forward name. It returns the verbatim JSON body (RDAP is already a stable, public
-// schema — scripts and the TUI parse it themselves) and the HTTP status.
+// schema - scripts and the TUI parse it themselves) and the HTTP status.
 //
 // query is optional and appended verbatim (e.g. "history" or "time=<instant>") so a
-// caller can ask for "?history" or "?time=...". RDAP carries NO key — it is public.
+// caller can ask for "?history" or "?time=...". RDAP carries NO key - it is public.
 func (c *Client) RDAP(ctx context.Context, kind RDAPKind, target, query string) (json.RawMessage, int, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
@@ -42,7 +42,7 @@ func (c *Client) RDAP(ctx context.Context, kind RDAPKind, target, query string) 
 	}
 	req.Header.Set("Accept", "application/rdap+json")
 	req.Header.Set("User-Agent", userAgent)
-	// RDAP is public — deliberately NO auth header.
+	// RDAP is public - deliberately NO auth header.
 
 	resp, err := c.http.Do(req)
 	if err != nil {

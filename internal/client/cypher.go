@@ -6,8 +6,8 @@
 // query builder, the {ok,status,result} envelope decoder, the SSE reader, the key
 // ladder, an embedded Mozilla CA bundle, and the RDAP client.
 //
-// Robustness Principle (RFC 761): conservative in what we EMIT — every Cypher literal
-// is escaped so a value can never break out of the map; liberal in what we ACCEPT —
+// Robustness Principle (RFC 761): conservative in what we EMIT - every Cypher literal
+// is escaped so a value can never break out of the map; liberal in what we ACCEPT -
 // the envelope decoder handles both wire shapes the control plane may return.
 package client
 
@@ -24,7 +24,7 @@ import (
 // ("'}}) RETURN 1 //") stays trapped inside the literal value.
 //
 // Conservative in what we emit: the returned string is the INNER text only (no
-// surrounding quotes) — callers wrap it in '...'.
+// surrounding quotes) - callers wrap it in '...'.
 func EscapeCypherString(s string) string {
 	// Order matters: escape backslashes first, then quotes, so we never double-escape.
 	s = strings.ReplaceAll(s, `\`, `\\`)
@@ -46,8 +46,8 @@ func QuoteCypherString(s string) string {
 //   - map[string]any    -> a brace map literal (keys sorted for determinism)
 //   - nil               -> null
 //
-// Conservative-emit: every leaf string flows through QuoteCypherString, so no value —
-// however hostile — can break out of the surrounding map/list.
+// Conservative-emit: every leaf string flows through QuoteCypherString, so no value -
+// however hostile - can break out of the surrounding map/list.
 func Lit(v any) string {
 	switch x := v.(type) {
 	case nil:

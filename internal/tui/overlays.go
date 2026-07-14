@@ -34,7 +34,7 @@ func (a *App) handleOverlayKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // updateCreate steps the create form; on completion it fires op:identity or op:register.
-// It accepts ANY tea.Msg — huh advances fields/groups via its own internal messages
+// It accepts ANY tea.Msg - huh advances fields/groups via its own internal messages
 // (delivered as commands), so a KeyMsg-only diet leaves the form frozen.
 func (a *App) updateCreate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
@@ -47,14 +47,14 @@ func (a *App) updateCreate(msg tea.Msg) (tea.Model, tea.Cmd) {
 		f.form = ff
 	}
 	if f.form.State == huh.StateAborted {
-		a.overlay = overlayNone // ctrl+c aborts the form — never a dead overlay
+		a.overlay = overlayNone // ctrl+c aborts the form - never a dead overlay
 		return a, nil
 	}
 	if f.form.State == huh.StateCompleted {
 		// Build the write through the ONE shared guard (§3.2): it re-applies the
 		// trimmed-non-blank name check at the write layer, so a blank name can NEVER create
 		// an unnamed agent here even if the field validator was bypassed (defense in depth).
-		// A blank name keeps the modal OPEN with a friendly toast — we don't fire the op.
+		// A blank name keeps the modal OPEN with a friendly toast - we don't fire the op.
 		op, args, err := buildCreateArgs(f.label, f.contact, f.register)
 		if err != nil {
 			a.setToast(err.Error(), true)
@@ -67,7 +67,7 @@ func (a *App) updateCreate(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // updateKill steps the kill form; on completion it confirms the typed name and fires
-// op:revoke or op:identity{release}. Accepts ANY tea.Msg — see updateCreate.
+// op:revoke or op:identity{release}. Accepts ANY tea.Msg - see updateCreate.
 func (a *App) updateKill(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
 		a.overlay = overlayNone
@@ -79,13 +79,13 @@ func (a *App) updateKill(msg tea.Msg) (tea.Model, tea.Cmd) {
 		f.form = ff
 	}
 	if f.form.State == huh.StateAborted {
-		a.overlay = overlayNone // ctrl+c aborts the form — never a dead overlay
+		a.overlay = overlayNone // ctrl+c aborts the form - never a dead overlay
 		return a, nil
 	}
 	if f.form.State == huh.StateCompleted {
 		a.overlay = overlayNone
 		if strings.TrimSpace(f.confirm) != f.target.Name() {
-			a.setToast("name didn't match — nothing released", true)
+			a.setToast("name didn't match - nothing released", true)
 			return a, nil
 		}
 		if f.revoke {
@@ -106,7 +106,7 @@ func (a *App) updateKill(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 // updateConnect steps the connect form; on completion it fires op:connect.
-// Accepts ANY tea.Msg — see updateCreate.
+// Accepts ANY tea.Msg - see updateCreate.
 func (a *App) updateConnect(msg tea.Msg) (tea.Model, tea.Cmd) {
 	if k, ok := msg.(tea.KeyMsg); ok && k.String() == "esc" {
 		a.overlay = overlayNone
@@ -118,7 +118,7 @@ func (a *App) updateConnect(msg tea.Msg) (tea.Model, tea.Cmd) {
 		f.form = ff
 	}
 	if f.form.State == huh.StateAborted {
-		a.overlay = overlayNone // ctrl+c aborts the form — never a dead overlay
+		a.overlay = overlayNone // ctrl+c aborts the form - never a dead overlay
 		return a, nil
 	}
 	if f.form.State == huh.StateCompleted {
@@ -177,32 +177,42 @@ func (a *App) jsonCard(title, body string) string {
 		th.ModalTitle.Render(title) + "\n\n" + th.Text.Render(body) + "\n\n" + footer)
 }
 
+// helpCard is the `?` overlay. Every line stays within the card's inner width (the box
+// is 64 wide: border 2 + padding 4 leaves 58 columns) so lipgloss never re-wraps a row
+// mid-token; renderLogo emits a uniform-width block so centering can't bend the mark.
 func (a *App) helpCard() string {
 	th := a.th
 	sec := func(s string) string { return th.Accent.Render(s) }
 	key := func(s string) string { return th.Key.Render(s) }
 	lines := []string{
 		sec("global"),
-		"  " + key("1–5") + " switch view   " + key("tab") + " cycle   " + key(":") + "/" + key("⌃P") + " palette   " + key("?") + " help",
+		"  " + key("1-6") + " switch view   " + key("tab") + " cycle   " + key(":") + "/" + key("⌃P") + " palette   " + key("?") + " help",
 		"  " + key("⌃R") + " refresh   " + key("⌃T") + " theme   " + key("q") + "/" + key("⌃C") + " quit",
 		"",
-		sec("fleet (AGENTS)"),
-		"  " + key("j/k") + " move   " + key("g/G") + " top/bottom   " + key("⌃D/⌃U") + " half-page",
-		"  " + key("/") + " filter   " + key("n/N") + " next/prev   " + key("⇧K") + " sort   " + key("z") + " density",
-		"  " + key("↵") + " details   " + key("c") + " create   " + key("x") + " kill   " + key("e") + " connect",
-		"  " + key("m") + " monitor   " + key("v") + " RDAP",
+		sec("agents + live monitor (1)"),
+		"  " + key("↵") + " watch agent (pin the monitor; click works too)",
+		"  " + key("a") + " watch all   " + key("d") + " details   " + key("space") + " pause   " + key("f") + " kind",
+		"  " + key("j/k") + " move   " + key("/") + " filter   " + key("⇧K") + " sort   " + key("z") + " density",
+		"  " + key("c") + " create   " + key("x") + " kill   " + key("e") + " connect   " + key("v") + " RDAP",
 		"",
-		sec("monitor"),
-		"  " + key("space") + " pause   " + key("f") + " kind filter   " + key("/") + " filter",
-		"  " + key("s") + " select agent   " + key("↵") + " drill",
+		sec("live agent graph (2)"),
+		"  grows on its own from your agents' traffic",
+		"  " + key("j/k") + " scroll   " + key("space") + " pause   " + key("C") + " clear",
 		"",
 		sec("logs / policy"),
 		"  LOGS: " + key("r") + " run   " + key("t") + " time   " + key("k") + " kind   " + key("↵") + " drill",
 		"  POLICY: " + key("a") + " allow   " + key("b") + " block   " + key("d") + " default   " + key("w") + " write",
+		"",
+		sec("explore (6 · manual graph navigator)"),
+		"  " + key("j/k") + " select   " + key("l/h") + " pane   " + key("[ ]") + " edge-type",
+		"  " + key("space") + " peek   " + key("↵") + " walk-in   " + key("z") + " ornament",
+		"  " + key("o") + " catalog   " + key("/") + " jump   " + key(":") + " repl",
 	}
-	head := th.ModalTitle.Render("whisper — keybindings")
-	// The brand mark tops the card when colour + height allow ( approved art).
-	if art := renderLogo(logoIcon, th.NoColor); art != "" && a.height >= 34 {
+	head := th.ModalTitle.Render("whisper · keybindings")
+	// The brand mark tops the card when colour allows AND the full card (39 rows with
+	// the mark) fits the terminal - a mark that pushes the bindings off-screen helps
+	// nobody ( approved art; graceful degrade below 40 rows).
+	if art := renderLogo(logoIcon, th.NoColor); art != "" && a.height >= 40 {
 		head = lipgloss.JoinVertical(lipgloss.Center, art, "", head)
 	}
 	return th.ModalBox.Width(min(64, a.width-4)).Render(

@@ -12,17 +12,17 @@ import (
 )
 
 // settings.go performs the SURGICAL merge of Whisper-managed keys into Claude Code's
-// per-user LOCAL settings file (`.claude/settings.local.json` — gitignored, this-machine
+// per-user LOCAL settings file (`.claude/settings.local.json` - gitignored, this-machine
 // only; NEVER the shared `.claude/settings.json`). The whole point is to be conservative
 // in what we WRITE: we read the existing JSON into a generic map, set/update ONLY the
-// keys we own, and write everything else back BYTE-for-VALUE unchanged — a user's
+// keys we own, and write everything else back BYTE-for-VALUE unchanged - a user's
 // permissions, model, other hooks, other env vars all survive untouched.
 //
 // What we own:
 //   - env.HTTP_PROXY / env.HTTPS_PROXY  = http://127.0.0.1:<port>  (Claude Code speaks
-//     HTTP-CONNECT, not SOCKS — the local proxy serves both, we point CC at the CONNECT form)
+//     HTTP-CONNECT, not SOCKS - the local proxy serves both, we point CC at the CONNECT form)
 //   - env.ALL_PROXY                     = socks5h://127.0.0.1:<port>  (for any SOCKS-aware
-//     subprocess CC spawns — git/curl/Bash tools)
+//     subprocess CC spawns - git/curl/Bash tools)
 //   - env.NO_PROXY                      = localhost,127.0.0.1,::1
 //   - hooks.SessionStart                = a best-effort `whisper connect --ensure` re-ensure
 //     (the daemon is started by init and stays up; this is the safety-net re-ensure that
@@ -51,7 +51,7 @@ func (r SettingsResult) Conflicts() []string { return r.ConflictingProxy }
 // idempotent: the managed keys are updated in place, never duplicated.
 //
 // configRel is the project-relative path to the `.whisper/config` the ensure-hook reads
-// (so the hook is location-independent — it cds to the project and points --config at it).
+// (so the hook is location-independent - it cds to the project and points --config at it).
 func MergeClaudeSettings(p Paths, port int, configRel string) (SettingsResult, error) {
 	var res SettingsResult
 
@@ -66,7 +66,7 @@ func MergeClaudeSettings(p Paths, port int, configRel string) (SettingsResult, e
 				// A corrupt settings file is the ONE place we refuse to plough on: silently
 				// overwriting it would destroy the user's other settings. Fail with a clear,
 				// actionable message (Postel: never an opaque 500).
-				return res, fmt.Errorf("%s is not valid JSON — fix or remove it, then re-run: %w", p.ClaudeLocal, uerr)
+				return res, fmt.Errorf("%s is not valid JSON - fix or remove it, then re-run: %w", p.ClaudeLocal, uerr)
 			}
 		}
 	} else if os.IsNotExist(err) {
@@ -100,7 +100,7 @@ func MergeClaudeSettings(p Paths, port int, configRel string) (SettingsResult, e
 
 // ensureHookCommand is the shell command the SessionStart hook runs: re-ensure the daemon
 // from the project dir, pointed at the project's `.whisper/config`. It is silent and
-// best-effort (a hook cannot block startup) — `connect --ensure` is idempotent, so a live
+// best-effort (a hook cannot block startup) - `connect --ensure` is idempotent, so a live
 // daemon is a fast no-op and a dead one is restarted before the first API call. We pass
 // --config so the hook works regardless of the cwd Claude Code launches it in.
 func ensureHookCommand(configRel string) string {
@@ -112,8 +112,8 @@ func ensureHookCommand(configRel string) string {
 
 // mergeEnv sets the managed proxy vars on root["env"], preserving any OTHER env vars the
 // user set. It returns the names of pre-existing managed vars whose value DIFFERED from
-// ours — those are a real conflict the caller WARNS about (we still override, because a
-// stale/hostile proxy var must never win — same rule as run.go's proxyInjectedEnv).
+// ours - those are a real conflict the caller WARNS about (we still override, because a
+// stale/hostile proxy var must never win - same rule as run.go's proxyInjectedEnv).
 func mergeEnv(root map[string]any, managed map[string]string) []string {
 	env, _ := root["env"].(map[string]any)
 	if env == nil {
@@ -139,7 +139,7 @@ func mergeEnv(root map[string]any, managed map[string]string) []string {
 //
 // We find OUR hook by the whisperHookMarker substring and update its command in place; if
 // none exists we append a new matcher group carrying just our hook. A re-init thus updates
-// (e.g. a changed port flows into the --config path? no — the command is port-independent,
+// (e.g. a changed port flows into the --config path? no - the command is port-independent,
 // but we still rewrite it to the canonical form) and never duplicates.
 func mergeSessionStartHook(root map[string]any, command string) {
 	hooks, _ := root["hooks"].(map[string]any)

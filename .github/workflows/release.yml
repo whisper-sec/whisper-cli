@@ -38,7 +38,7 @@ jobs:
       - name: Cross-compile all platforms
         run: ./build-all.sh dist "${{ steps.ver.outputs.version }}"
 
-      # PGP-sign each binary into a detached .asc — ONLY if the signing secrets are
+      # PGP-sign each binary into a detached .asc - ONLY if the signing secrets are
       # present. The key is imported into an ephemeral keyring; nothing is hardcoded.
       # If the secrets are absent the step skips cleanly (the release still ships with
       # SHA-256 checksums).

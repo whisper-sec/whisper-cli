@@ -24,7 +24,7 @@ func newLogsCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "logs",
 		Short: "Query your recent DNS/conn/alloc activity (op:logs)",
-		Long: "Query the caller's recent activity from warm storage (op:logs) — the poll\n" +
+		Long: "Query the caller's recent activity from warm storage (op:logs) - the poll\n" +
 			"counterpart of the live monitor. Omit --kind for every kind interleaved.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -100,13 +100,13 @@ func newMonitorCmd() *cobra.Command {
 	var follow bool
 	cmd := &cobra.Command{
 		Use:   "monitor [address]",
-		Short: "Watch live activity — with --follow, emit bare NDJSON for piping",
+		Short: "Watch live activity - with --follow, emit bare NDJSON for piping",
 		Long: "Tail the live monitor SSE stream. The scriptable form is --follow, which writes\n" +
-			"one compact JSON object per line (NDJSON) to stdout — pipe it to jq, a file, or\n" +
+			"one compact JSON object per line (NDJSON) to stdout - pipe it to jq, a file, or\n" +
 			"another process. Without --follow on a terminal, the full-screen monitor opens\n" +
 			"(wired in a later build step); for now --follow is the supported, scriptable mode.\n\n" +
 			"Pass a /128 address to narrow within YOUR tenant (the SSE ?agent= narrow takes the\n" +
-			"address, not the agent id — see the developer guide §6.1).",
+			"address, not the agent id - see the developer guide §6.1).",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if len(args) == 1 {
@@ -121,7 +121,7 @@ func newMonitorCmd() *cobra.Command {
 					follow = true // a pipe with no --follow still does the sensible thing: NDJSON
 				} else {
 					// On a terminal, open the full-screen TUI on the MONITOR tab, focused on
-					// the requested agent's /128 (the SSE narrow takes the address — §6.1).
+					// the requested agent's /128 (the SSE narrow takes the address - §6.1).
 					return runMonitorDashboard(agentAddr)
 				}
 			}
@@ -134,7 +134,7 @@ func newMonitorCmd() *cobra.Command {
 
 // followNDJSON tails the SSE stream and writes one compact JSON line per event to
 // stdout (heartbeats omitted). Ctrl-C (SIGINT/SIGTERM) cancels the context and ends the
-// stream cleanly — exit 0 on a clean signal stop.
+// stream cleanly - exit 0 on a clean signal stop.
 func followNDJSON(c *client.Client, agentAddr string) error {
 	cx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -148,7 +148,7 @@ func followNDJSON(c *client.Client, agentAddr string) error {
 	enc := json.NewEncoder(os.Stdout)
 	emit := func(ev client.MonitorEvent) {
 		if ev.Kind == client.KindHB || ev.Kind == "" {
-			return // a heartbeat / empty tick carries no data — don't pollute the NDJSON
+			return // a heartbeat / empty tick carries no data - don't pollute the NDJSON
 		}
 		if len(ev.Extra) > 0 {
 			// Emit the VERBATIM event JSON (no field loss), one per line.

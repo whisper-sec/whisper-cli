@@ -6,13 +6,13 @@ Every `whisper` release is published as a set of signed, checksummed artifacts o
 [Releases page](https://github.com/whisper-sec/whisper-cli/releases). For each platform
 binary you get:
 
-- `whisper-<os>-<arch>` (or `whisper-<os>-<arch>.exe` on Windows) — the binary
-- `whisper-<os>-<arch>.sha256` — its SHA-256 checksum
-- `whisper-<os>-<arch>.asc` — a detached PGP signature
-- `checksums.txt` — the SHA-256 of every asset in the release, in one file
+- `whisper-<os>-<arch>` (or `whisper-<os>-<arch>.exe` on Windows) - the binary
+- `whisper-<os>-<arch>.sha256` - its SHA-256 checksum
+- `whisper-<os>-<arch>.asc` - a detached PGP signature
+- `checksums.txt` - the SHA-256 of every asset in the release, in one file
 
 The one-line installer (`curl get.whisper.online | sh`) verifies the SHA-256 as a **hard
-gate** — a mismatch aborts the install — and additionally verifies the PGP signature when
+gate** - a mismatch aborts the install - and additionally verifies the PGP signature when
 `gpg` is available on the host.
 
 ### Manual verification
@@ -43,7 +43,7 @@ gpg --verify whisper-linux-amd64.asc whisper-linux-amd64
 
 Confirm the output reports a **good signature** from a key whose fingerprint matches the
 one above. If either the checksum or the signature does not verify, do not run the
-binary — report it (see below).
+binary - report it (see below).
 
 ## Reporting a vulnerability
 

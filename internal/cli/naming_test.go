@@ -14,10 +14,10 @@ import (
 )
 
 // TestCreateAgent_RejectsBlankNames is the negative test for the ONE mandatory-name guard
-// (§3.2). createAgent must refuse an empty/blank/whitespace name with a usage error — and
+// (§3.2). createAgent must refuse an empty/blank/whitespace name with a usage error - and
 // it must do so WITHOUT touching the control plane (a blank name never reaches the server).
 func TestCreateAgent_RejectsBlankNames(t *testing.T) {
-	// A client whose URL would fail loudly if it were ever called — proving the guard is
+	// A client whose URL would fail loudly if it were ever called - proving the guard is
 	// purely local (we never hit the server for a blank name).
 	c := client.New(client.Config{
 		ControlURL: "http://127.0.0.1:1", // unroutable on purpose

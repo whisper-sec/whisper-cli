@@ -21,10 +21,10 @@ import (
 )
 
 // pump feeds msg into App.Update, then executes every returned command and feeds the
-// produced messages back — the same round-trip the bubbletea runtime performs. This is
+// produced messages back - the same round-trip the bubbletea runtime performs. This is
 // the loop the frozen-modal defect lived in: huh advances fields via its OWN messages
 // (returned as commands), so a test that never executes commands can never catch it.
-// Timer commands (cursor blink, ticks) are abandoned after 100ms — they are real
+// Timer commands (cursor blink, ticks) are abandoned after 100ms - they are real
 // clocks and would stretch the suite into minutes; field navigation returns instantly.
 func pump(t *testing.T, a *App, msg tea.Msg) {
 	t.Helper()
@@ -72,7 +72,7 @@ func typeString(t *testing.T, a *App, s string) {
 }
 
 // TestCreateModalMessagePump drives the create modal exactly like a user: open, type a
-// name, Enter through every field — and asserts the form actually progresses to
+// name, Enter through every field - and asserts the form actually progresses to
 // completion and the overlay closes. Before the form froze on field 1 forever.
 func TestCreateModalMessagePump(t *testing.T) {
 	a := newTestApp(t, 120, 40)
@@ -90,7 +90,7 @@ func TestCreateModalMessagePump(t *testing.T) {
 	pump(t, a, enter) // confirm → submit
 
 	if a.create.form.State != huh.StateCompleted {
-		t.Fatalf("form State=%v, want StateCompleted — the Enter round-trip is dead again", a.create.form.State)
+		t.Fatalf("form State=%v, want StateCompleted - the Enter round-trip is dead again", a.create.form.State)
 	}
 	if a.overlay == overlayCreate {
 		t.Fatal("create modal still open after completion")
@@ -101,7 +101,7 @@ func TestCreateModalMessagePump(t *testing.T) {
 }
 
 // TestCreateModalBlankNameStaysOpen asserts the validator holds the form on field 1
-// when the name is blank — Enter must not advance, and nothing submits.
+// when the name is blank - Enter must not advance, and nothing submits.
 func TestCreateModalBlankNameStaysOpen(t *testing.T) {
 	a := newTestApp(t, 120, 40)
 	pump(t, a, tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
@@ -117,7 +117,7 @@ func TestCreateModalBlankNameStaysOpen(t *testing.T) {
 	}
 }
 
-// TestModalCtrlCNeverDeadOverlay: ctrl+c aborts the huh form — the overlay must close,
+// TestModalCtrlCNeverDeadOverlay: ctrl+c aborts the huh form - the overlay must close,
 // never linger as a dead, unresponsive modal.
 func TestModalCtrlCNeverDeadOverlay(t *testing.T) {
 	a := newTestApp(t, 120, 40)
@@ -176,7 +176,7 @@ func stripANSI(s string) string {
 }
 
 // TestUpsertStreamAgentNoPhantomDup: an event carrying ONLY the agent id must collapse
-// onto the roster entry keyed by its /128 — never mint a "(no /128)" duplicate.
+// onto the roster entry keyed by its /128 - never mint a "(no /128)" duplicate.
 func TestUpsertStreamAgentNoPhantomDup(t *testing.T) {
 	a := newTestApp(t, 120, 40)
 	a.agents = []model.Agent{{ID: "agent-7", Address: "2a04:2a01::7", State: "active"}}
@@ -203,7 +203,7 @@ func TestPaletteFilterNeverCorruptsCommands(t *testing.T) {
 	for i, c := range p.all {
 		before[i] = c.title
 	}
-	p.input.SetValue("c") // matches several — the appends used to clobber p.all
+	p.input.SetValue("c") // matches several - the appends used to clobber p.all
 	p.filter()
 	p.input.SetValue("")
 	p.filter()
@@ -237,7 +237,7 @@ func TestFleetColumnsFitTable(t *testing.T) {
 }
 
 // TestObserveBucketsByEventTime: a backfilled event 60s old must land 60 buckets behind
-// head — never collapse into the "now" bucket as one giant spike.
+// head - never collapse into the "now" bucket as one giant spike.
 func TestObserveBucketsByEventTime(t *testing.T) {
 	a := newTestApp(t, 120, 40)
 	v := a.monitorVw
@@ -250,7 +250,7 @@ func TestObserveBucketsByEventTime(t *testing.T) {
 		TsMicros: now.Add(-2*kbpsWindow*time.Second).UnixNano() / 1000, BytesUp: 9999}
 	v.observe(old)
 	v.observe(fresh)
-	v.observe(ancient) // outside the window — must not chart anywhere
+	v.observe(ancient) // outside the window - must not chart anywhere
 	r := v.rings["2a04:2a01::9"]
 	if r == nil {
 		t.Fatal("ring not created")
@@ -289,7 +289,7 @@ func TestTenantFromFQDN(t *testing.T) {
 	}
 }
 
-// TestFrameNeverWiderThanTerminal: the belt-and-braces clamp — every rendered line of
+// TestFrameNeverWiderThanTerminal: the belt-and-braces clamp - every rendered line of
 // every mode fits the terminal width (one over-budget line collapsed the frame).
 func TestFrameNeverWiderThanTerminal(t *testing.T) {
 	a := newTestApp(t, 97, 31) // odd sizes shake out rounding

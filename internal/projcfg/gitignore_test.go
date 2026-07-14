@@ -91,7 +91,7 @@ func TestGitignore_Idempotent(t *testing.T) {
 }
 
 // TestGitignoreEntries_PythonIgnoresOnlyWhisper: the `init python` call site passes only
-// `.whisper/` — it must NOT add the Claude-specific `.claude/settings.local.json` line (that
+// `.whisper/` - it must NOT add the Claude-specific `.claude/settings.local.json` line (that
 // would be a needless, non-load-bearing emit for a Python project).
 func TestGitignoreEntries_PythonIgnoresOnlyWhisper(t *testing.T) {
 	dir := t.TempDir()

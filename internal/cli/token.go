@@ -63,7 +63,7 @@ func renderToken(res *client.Result, revoke bool) {
 	}
 	rec := recs[0]
 	if revoke {
-		fmt.Fprintf(os.Stderr, "whisper: %s — %s\n", field(rec, "agent"), orVal(field(rec, "status"), "revoked"))
+		fmt.Fprintf(os.Stderr, "whisper: %s - %s\n", field(rec, "agent"), orVal(field(rec, "status"), "revoked"))
 		return
 	}
 	fmt.Fprintln(os.Stderr, "whisper: monitor token")
@@ -87,7 +87,7 @@ func newRDAPCmd() *cobra.Command {
 		Use:   "rdap <address|name>",
 		Short: "Public RDAP lookup for a /128 address or a forward name (no auth)",
 		Long: "Fetch the public RDAP object (RFC 9083) for a /128 address or an agent's forward\n" +
-			"name from rdap.whisper.online — unauthenticated. A colon in the target selects the\n" +
+			"name from rdap.whisper.online - unauthenticated. A colon in the target selects the\n" +
 			"IP object; otherwise the domain object. --history returns every ownership interval;\n" +
 			"--at <instant> the holder at that moment. RDAP is always JSON.",
 		Args: cobra.ExactArgs(1),
@@ -114,7 +114,7 @@ func newRDAPCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// RDAP is always JSON — emit it verbatim (it is the data, --json or not).
+			// RDAP is always JSON - emit it verbatim (it is the data, --json or not).
 			os.Stdout.Write(body)
 			if len(body) == 0 || body[len(body)-1] != '\n' {
 				fmt.Fprintln(os.Stdout)

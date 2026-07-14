@@ -7,4 +7,4 @@ distributes the following third-party material under its own license:
 
 - File: `internal/client/cabundle/mozilla-cacert.pem`
 - Description: the set of trust roots published by Mozilla (not Whisper-authored).
-- License: Mozilla Public License 2.0 (MPL-2.0) — https://www.mozilla.org/MPL/2.0/
+- License: Mozilla Public License 2.0 (MPL-2.0) - https://www.mozilla.org/MPL/2.0/

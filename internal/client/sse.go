@@ -32,7 +32,7 @@ type MonitorEvent struct {
 	Agent   string `json:"agent,omitempty"`
 	Addr128 string `json:"addr128,omitempty"`
 
-	// TsMicros is epoch MICROSECONDS — the stream's native unit (preserves ordering).
+	// TsMicros is epoch MICROSECONDS - the stream's native unit (preserves ordering).
 	TsMicros int64 `json:"ts,omitempty"`
 
 	// --- dns ---
@@ -104,12 +104,12 @@ func ParseEvent(eventName string, data []byte) (MonitorEvent, bool) {
 	}
 	var ev MonitorEvent
 	if err := json.Unmarshal([]byte(trimmed), &ev); err != nil {
-		// Malformed event: don't crash the stream — drop it (liberal-in: tolerate noise).
+		// Malformed event: don't crash the stream - drop it (liberal-in: tolerate noise).
 		return MonitorEvent{}, false
 	}
 	ev.Extra = append(json.RawMessage(nil), []byte(trimmed)...)
 	// The event: line names the kind; trust it when the JSON omitted `kind` (it never
-	// does today, but be liberal — the `event:` framing is authoritative either way).
+	// does today, but be liberal - the `event:` framing is authoritative either way).
 	if ev.Kind == "" && eventName != "" && eventName != "message" {
 		ev.Kind = eventName
 	}
@@ -135,7 +135,7 @@ func ReadSSE(ctx context.Context, r io.Reader, emit func(MonitorEvent)) error {
 	flush := func() {
 		defer func() { eventName = ""; dataLines = dataLines[:0] }()
 		if len(dataLines) == 0 {
-			// A lone `event: hb` with no data is a heartbeat — surface it.
+			// A lone `event: hb` with no data is a heartbeat - surface it.
 			if eventName == KindHB {
 				emit(MonitorEvent{Kind: KindHB})
 			}
@@ -169,7 +169,7 @@ func ReadSSE(ctx context.Context, r io.Reader, emit func(MonitorEvent)) error {
 			d = strings.TrimPrefix(d, " ")
 			dataLines = append(dataLines, d)
 		default:
-			// id:/retry:/unknown fields — ignore (liberal-in).
+			// id:/retry:/unknown fields - ignore (liberal-in).
 		}
 	}
 	// A trailing event with no terminating blank line still counts (the stream closed).

@@ -21,7 +21,7 @@ import (
 // `whisper connect`, the guided front door, `whisper ip`, and `whisper run` all call.
 // It takes the op:connect envelope, brings up the PURE-GO local forward proxy, folds
 // the egress verify in, and yields a bearer-free local endpoint plus the verified
-// /128 — so every surface behaves identically and NONE of them ever sees the bearer.
+// /128 - so every surface behaves identically and NONE of them ever sees the bearer.
 //
 // THE bearer-hygiene contract: the et_ bearer and the upstream proxy URL are pulled
 // from the envelope as INTERNAL values here and handed ONLY to egress.StartLocalProxy
@@ -50,7 +50,7 @@ var prepareWireGuard = func(tier string, args map[string]any) (*wgtun.Keypair, e
 	}
 	kp, err := wgtun.GenerateKeypair()
 	if err != nil {
-		return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare a WireGuard key — please try again"}
+		return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare a WireGuard key - please try again"}
 	}
 	// The server reads `public_key` (alias publicKey) and binds a peer to our /128. We send
 	// ONLY the public half; the private key stays in kp (in-memory) for the device bring-up.
@@ -62,15 +62,15 @@ var prepareWireGuard = func(tier string, args map[string]any) (*wgtun.Keypair, e
 
 // prepareIdentityKey is the command-layer pre-step, run ALONGSIDE prepareWireGuard: for the
 // routed (WireGuard) tier ONLY, it loads-or-mints a LOCAL EC P-256 identity keypair and injects ONLY
-// its public SPKI into the op:connect args as identity_public_key — so the server pins the agent's
+// its public SPKI into the op:connect args as identity_public_key - so the server pins the agent's
 // OWN key, verbatim; the server pins SHA-256 of exactly this SPKI and never derives or serves a
 // Whisper-minted key for a held /128. Default-ON for the
 // routed tier: this is the tier the trust-boundary claim ("we can never speak as your agent") is
-// about. For any other tier it is a no-op (nil keypair, args untouched) — a hosted identity's
+// about. For any other tier it is a no-op (nil keypair, args untouched) - a hosted identity's
 // credential stays Whisper-derived (the server rejects the arg there anyway).
 //
 // handle is the persistence key (an already-resolved agent id/address, or "" for a connect-first
-// flow — see idkey.PathFor) so a RECONNECT for the same agent reuses the SAME key rather than
+// flow - see idkey.PathFor) so a RECONNECT for the same agent reuses the SAME key rather than
 // rotating on every call (the server's idempotent re-pin then costs zero zone writes). It is a
 // package var so a command test can stub it to a deterministic keypair without real crypto.
 var prepareIdentityKey = func(tier string, args map[string]any, handle string) (*idkey.Keypair, error) {
@@ -79,9 +79,9 @@ var prepareIdentityKey = func(tier string, args map[string]any, handle string) (
 	}
 	kp, err := idkey.LoadOrGenerate(handle)
 	if err != nil {
-		return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key — please try again"}
+		return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key - please try again"}
 	}
-	// The server hashes EXACTLY this base64 DER, verbatim — never a private key, never re-encoded.
+	// The server hashes EXACTLY this base64 DER, verbatim - never a private key, never re-encoded.
 	args["identity_public_key"] = kp.MarshalSPKIBase64()
 	return kp, nil
 }
@@ -98,7 +98,7 @@ type connectKeys struct {
 // localEndpoint is the shared surface BOTH egress tiers expose: the bearer/key-free local
 // SOCKS5/HTTP endpoint a caller hands to tools, and a Stop() that tears it down. The Tier-1.5
 // egress (*egress.Proxy) and the Tier-1 WireGuard tunnel (*wgtun.Tunnel) both satisfy it, so
-// every command (connect/run/ip/guided) treats the two tiers identically — only the bring-up
+// every command (connect/run/ip/guided) treats the two tiers identically - only the bring-up
 // differs. A tier-1 *wgtun.Tunnel additionally exposes Healthy() (asserted via a type switch
 // where status needs it); the common path never has to care which tier it holds.
 type localEndpoint interface {
@@ -110,10 +110,10 @@ type localEndpoint interface {
 // egressSession is a live local egress: the bearer-free local endpoint a caller hands
 // to tools, the verified /128, the agent's display name, the tier, and the local proxy/tunnel.
 type egressSession struct {
-	endpoint string        // socks5h://127.0.0.1:<port> — THE connection string (bearer/key-free)
+	endpoint string        // socks5h://127.0.0.1:<port> - THE connection string (bearer/key-free)
 	addr     string        // the agent's verified /128 (== the egress source)
 	name     string        // the agent's human name (for the success line)
-	tier     string        // "socks5" | "anyip" | "wireguard" — the active egress tier
+	tier     string        // "socks5" | "anyip" | "wireguard" - the active egress tier
 	verified bool          // true when the egress source IP == the agent /128
 	local    localEndpoint // the running proxy (Tier-1.5) or WG tunnel (Tier-1); nil in stubs
 }
@@ -140,7 +140,7 @@ func (s *egressSession) Stop() {
 
 // connectEnvelope is the load-bearing slice of the op:connect result we consume. The
 // secret-carrying fields (http_proxy / connection_string for the egress tier; the WG keys)
-// stay INTERNAL — extracted for the bring-up, NEVER surfaced.
+// stay INTERNAL - extracted for the bring-up, NEVER surfaced.
 type connectEnvelope struct {
 	tier    string // "socks5" | "anyip" | "wireguard" (echoed by the server; default socks5)
 	address string // the agent's /128
@@ -156,7 +156,7 @@ type connectEnvelope struct {
 	wgEndpoint     string // the box UDP endpoint, host:port (e.g. <box>:51826)
 	wgDNS          string // the in-tunnel resolver (DNS64/NAT64)
 	wgQuick        string // the full wg-quick config blob (parsed as a fallback)
-	wgPrivKeyB64   string // server-minted private key, base64 — present ONLY on the zero-key path
+	wgPrivKeyB64   string // server-minted private key, base64 - present ONLY on the zero-key path
 }
 
 // isWireGuard reports whether the server selected the Tier-1 WireGuard tier for this result.
@@ -192,7 +192,7 @@ func parseConnectEnvelope(res *client.Result) (connectEnvelope, error) {
 		}
 		if out.wgEndpoint == "" {
 			// Endpoint may still be inside the wg-quick blob; FromWgQuick recovers it. Only a
-			// total absence (no field AND no blob) is fatal — caught above.
+			// total absence (no field AND no blob) is fatal - caught above.
 			_ = out.wgEndpoint
 		}
 		return out, nil
@@ -201,14 +201,14 @@ func parseConnectEnvelope(res *client.Result) (connectEnvelope, error) {
 	// --- Tier-1.5 egress (socks5/anyip): the bearer-carrying proxy form. ---
 	// Prefer the TLS-to-proxy form (http_proxy = https://w:<token>@<tls-endpoint>): the
 	// egress terminates TLS, so our local proxy wraps the upstream leg in TLS too. Fall
-	// back to socks5_endpoint / connection_string for the host (still TLS on :443 — the
+	// back to socks5_endpoint / connection_string for the host (still TLS on :443 - the
 	// port multiplexes TLS, the proven live transport).
 	httpProxy := field(rec, "http_proxy")
 	host, bearer, isTLS := extractUpstream(httpProxy)
 	if host != "" && !strings.Contains(host, ":") {
 		// http_proxy carried a bare hostname with no explicit port (seen on the live
-		// control plane). This tier always multiplexes TLS on :443 — the same port
-		// socks5_endpoint/connection_string already carry — so default it rather than
+		// control plane). This tier always multiplexes TLS on :443 - the same port
+		// socks5_endpoint/connection_string already carry - so default it rather than
 		// handing bringUpEgress an undialable "host" with no port (Postel: liberal in
 		// what we accept, never a silent half-connect).
 		host += ":443"
@@ -248,7 +248,7 @@ func extractUpstream(proxyURL string) (host, bearer string, isTLS bool) {
 	if at := strings.LastIndex(s, "@"); at >= 0 {
 		userinfo := s[:at]
 		s = s[at+1:]
-		// userinfo is user:bearer — the bearer is everything after the first ':'.
+		// userinfo is user:bearer - the bearer is everything after the first ':'.
 		if c := strings.Index(userinfo, ":"); c >= 0 {
 			bearer = userinfo[c+1:]
 		} else {
@@ -264,9 +264,9 @@ func extractUpstream(proxyURL string) (host, bearer string, isTLS bool) {
 }
 
 // bringUpEgress starts the local proxy/tunnel for the parsed envelope and returns a
-// live session (endpoint + local holder) — WITHOUT verifying yet. The caller folds verify
+// live session (endpoint + local holder) - WITHOUT verifying yet. The caller folds verify
 // in via verifyEgress. For the egress tier the bearer is handed to StartLocalProxy and never
-// kept; for the WireGuard tier keys carries OUR private keys (in-memory only) — handed to the
+// kept; for the WireGuard tier keys carries OUR private keys (in-memory only) - handed to the
 // userspace device and never surfaced. keys is nil for the egress tiers.
 //
 // port pins the LOCAL loopback port (0 ⇒ a free one). Every interactive caller passes 0
@@ -290,18 +290,18 @@ func bringUpEgress(ctx context.Context, ce connectEnvelope, keys *connectKeys, p
 }
 
 // cleanProxyError maps a local-proxy bring-up error to a plain remediation. A pinned-port
-// collision (egress reports the port is in use) is surfaced verbatim — it is already a
+// collision (egress reports the port is in use) is surfaced verbatim - it is already a
 // clear, secret-free, actionable line ("local port N is already in use…"); everything else
 // collapses to the generic retry line (never a stack trace).
 func cleanProxyError(err error) string {
 	if err != nil && strings.Contains(err.Error(), "already in use") {
 		return strings.TrimPrefix(err.Error(), "egress: ")
 	}
-	return "couldn't start the local connection — please try again"
+	return "couldn't start the local connection - please try again"
 }
 
 // identityTLSPort is the standard HTTPS port the in-tunnel identity listener binds to on the
-// agent's OWN /128 — the same port `whisper verify --trustless` / `openssl s_client` dial.
+// agent's OWN /128 - the same port `whisper verify --trustless` / `openssl s_client` dial.
 const identityTLSPort = 443
 
 // bringUpWireGuard brings up the userspace WireGuard tunnel (Tier-1) and returns a live
@@ -312,11 +312,11 @@ const identityTLSPort = 443
 //
 // when keys.identity is set (the default for this tier), it ALSO builds the self-signed
 // agent-held leaf (SANs = the /128 that was just assigned + the canonical/friendly FQDN the server
-// just returned — the pin submitted BEFORE connect still matches, since SANs never touch the SPKI)
+// just returned - the pin submitted BEFORE connect still matches, since SANs never touch the SPKI)
 // and starts a TLS listener INSIDE the tunnel's own netstack on :443, so a DANE-EE verifier dialing
-// the agent's /128 is served THIS leaf — proving the tunnel itself, not a shared/wildcard listener, answers.
+// the agent's /128 is served THIS leaf - proving the tunnel itself, not a shared/wildcard listener, answers.
 // Best-effort: a listener/leaf fault only logs (never a quiet-mode print) and never fails the connect
-// — the egress data path is unaffected either way.
+// - the egress data path is unaffected either way.
 func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressSession, error) {
 	var wgKey *wgtun.Keypair
 	if keys != nil {
@@ -349,18 +349,18 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 		return nil, &client.ProblemError{Status: 502, Detail: cleanWgError(err)}
 	}
 	// serve the agent-held identity leaf on the tunnel's own /128:443, now that the server has
-	// returned the assigned address + canonical/friendly FQDN. Best-effort — never fails bring-up.
+	// returned the assigned address + canonical/friendly FQDN. Best-effort - never fails bring-up.
 	if keys != nil && keys.identity != nil {
 		if addr, aerr := netip.ParseAddr(strings.TrimSpace(ce.address)); aerr == nil {
 			// op:connect{tier:wireguard} returns only the canonical fqdn (no separate friendly-CNAME
-			// column) — the leaf carries just that one dNSName SAN + the /128 iPAddress SAN.
+			// column) - the leaf carries just that one dNSName SAN + the /128 iPAddress SAN.
 			leaf, lerr := keys.identity.SelfSignedLeaf(ce.fqdn, "", addr)
 			if lerr == nil {
 				if serr := tun.ServeTLS(leaf, identityTLSPort); serr != nil && logf != nil {
-					logf("identity TLS listener not started (%v) — egress is unaffected", serr)
+					logf("identity TLS listener not started (%v) - egress is unaffected", serr)
 				}
 			} else if logf != nil {
-				logf("identity leaf not minted (%v) — egress is unaffected", lerr)
+				logf("identity leaf not minted (%v) - egress is unaffected", lerr)
 			}
 		}
 	}
@@ -375,7 +375,7 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 // cleanWgError maps a wgtun bring-up error to a plain, non-leaky remediation line.
 func cleanWgError(err error) string {
 	if err == nil {
-		return "couldn't start the WireGuard tunnel — please try again"
+		return "couldn't start the WireGuard tunnel - please try again"
 	}
 	return err.Error() // wgtun already returns friendly, secret-free messages
 }
@@ -396,14 +396,14 @@ func verifyEgressLive(ctx context.Context, c *client.Client, s *egressSession) e
 	}
 	if !inWhisperRange(observed) {
 		return &client.ProblemError{Status: 502,
-			Detail: "your traffic isn't going through Whisper yet — please try `whisper connect` again"}
+			Detail: "your traffic isn't going through Whisper yet - please try `whisper connect` again"}
 	}
 	// When we know the selected agent's /128, require an exact match (the egress must
 	// source from THIS identity). When the address is unknown (a rare envelope), a
 	// Whisper-range source is still a pass (we can't pin it tighter).
 	if s.addr != "" && !sameIP(observed, s.addr) {
 		return &client.ProblemError{Status: 502,
-			Detail: "connected, but the address didn't match your agent — please try `whisper connect` again"}
+			Detail: "connected, but the address didn't match your agent - please try `whisper connect` again"}
 	}
 	if s.addr == "" {
 		s.addr = observed
@@ -421,19 +421,19 @@ func verifyEgressLive(ctx context.Context, c *client.Client, s *egressSession) e
 // public halves). It is nil for the socks5/anyip tiers. The private keys never leave this process.
 //
 // It is a package var (not a plain func) so command tests can stub the live-egress tail
-// — the proxy bring-up + the network echo — while still exercising the op routing and
+// - the proxy bring-up + the network echo - while still exercising the op routing and
 // the render/exit contract. Production assigns the real implementation below.
 var connectAndVerify = connectAndVerifyLive
 
 func connectAndVerifyLive(ctx context.Context, c *client.Client, res *client.Result, name string, keys *connectKeys) (*egressSession, error) {
-	// Interactive callers (connect/run/ip/guided) use a free port — pin nothing.
+	// Interactive callers (connect/run/ip/guided) use a free port - pin nothing.
 	return connectAndVerifyOnPort(ctx, c, res, name, keys, 0)
 }
 
 // connectAndVerifyOnPort is connectAndVerifyLive with an explicit pinned local port (0 ⇒ a
 // free one). The daemon path (`connect --ensure`) calls it with the project's DETERMINISTIC
 // port so the held proxy always binds the same 127.0.0.1:<port>. It deliberately does NOT
-// route through the connectAndVerify package var — the var is the stub seam for command
+// route through the connectAndVerify package var - the var is the stub seam for command
 // tests, and the daemon binds a REAL port that those stubs must never shadow.
 func connectAndVerifyOnPort(ctx context.Context, c *client.Client, res *client.Result, name string, keys *connectKeys, port int) (*egressSession, error) {
 	ce, err := parseConnectEnvelope(res)
@@ -455,7 +455,7 @@ func connectAndVerifyOnPort(ctx context.Context, c *client.Client, res *client.R
 // writeSuccessLine emits the ONE calm, Scandinavian success line on err, and the
 // bearer-free endpoint on out only when quiet (so a script captures exactly one value).
 //
-//	default : stderr → "Connected as <name> — <addr> ✓ verified"
+//	default : stderr → "Connected as <name> - <addr> ✓ verified"
 //	--quiet : stdout → "socks5h://127.0.0.1:<port>" (nothing else, anywhere)
 func writeSuccessLine(out, errw io.Writer, s *egressSession, quiet bool) {
 	if quiet {
@@ -468,9 +468,9 @@ func writeSuccessLine(out, errw io.Writer, s *egressSession, quiet bool) {
 	}
 	switch {
 	case label != "" && s.addr != "":
-		fmt.Fprintf(errw, "Connected as %s — %s ✓ verified\n", label, s.addr)
+		fmt.Fprintf(errw, "Connected as %s - %s ✓ verified\n", label, s.addr)
 	case s.addr != "":
-		fmt.Fprintf(errw, "Connected — %s ✓ verified\n", s.addr)
+		fmt.Fprintf(errw, "Connected - %s ✓ verified\n", s.addr)
 	default:
 		fmt.Fprintln(errw, "Connected ✓ verified")
 	}

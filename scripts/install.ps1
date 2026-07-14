@@ -1,10 +1,10 @@
 # -----------------------------------------------------------------------------
-# install.ps1 — the ONE Whisper installer (Windows).
+# install.ps1 - the ONE Whisper installer (Windows).
 #
 #   irm get.whisper.online/install.ps1 | iex
 #   irm get.whisper.online | iex                 # bare form works too (UA-detected)
 #
-# This is the SAME installer that get.whisper.online serves — published here, in the
+# This is the SAME installer that get.whisper.online serves - published here, in the
 # public whisper-cli repo, so the entire install path is inspectable. By default it
 # fetches the SIGNED whisper.exe straight from this repo's GitHub Releases:
 #
@@ -13,9 +13,9 @@
 # Mirrors install.sh: get the right whisper.exe onto disk (sha256-VERIFIED, atomic,
 # and PGP-checked when gpg is present), put it on the USER PATH (no admin), then run
 # `whisper` (the guided flow owns the rest). On ANY failure it prints ONE friendly
-# sentence — never a PowerShell stack trace. Requires nothing but PowerShell 5+.
+# sentence - never a PowerShell stack trace. Requires nothing but PowerShell 5+.
 #
-# Output contract: mirror POSIX — two lines, then run whisper:
+# Output contract: mirror POSIX - two lines, then run whisper:
 #     whisper: installing…
 #     whisper: installed (run: whisper)
 #
@@ -24,7 +24,7 @@
 # -----------------------------------------------------------------------------
 $ErrorActionPreference = 'Stop'
 # Ensure TLS 1.2+ (older .NET defaults to TLS 1.0). Tls13 may be absent on .NET 4.x,
-# so OR it in only when the enum value exists — never fail the install over the enum.
+# so OR it in only when the enum value exists - never fail the install over the enum.
 try {
     $proto = [Net.SecurityProtocolType]::Tls12
     if ([enum]::IsDefined([Net.SecurityProtocolType], 'Tls13')) {
@@ -53,8 +53,8 @@ try {
     $arch = switch ($env:PROCESSOR_ARCHITECTURE) {
         'AMD64' { 'amd64' }
         'ARM64' { 'arm64' }
-        'x86'   { throw '64-bit Windows is required — this looks like 32-bit Windows.' }
-        default { throw "no Whisper binary for your CPU ($($env:PROCESSOR_ARCHITECTURE)) yet — tell us: hello@whisper.security" }
+        'x86'   { throw '64-bit Windows is required - this looks like 32-bit Windows.' }
+        default { throw "no Whisper binary for your CPU ($($env:PROCESSOR_ARCHITECTURE)) yet - tell us: hello@whisper.security" }
     }
 
     # --- download + verify + atomic install --------------------------------------
@@ -64,7 +64,7 @@ try {
     try {
         Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
     } catch {
-        throw "couldn't download the whisper binary — check your internet and try again."
+        throw "couldn't download the whisper binary - check your internet and try again."
     }
     # Fetch the checksum and verify BEFORE we trust it (conservative in what we run).
     $sumTmp = "$tmp.sha256"
@@ -72,19 +72,19 @@ try {
         Invoke-WebRequest -Uri "$url.sha256" -OutFile $sumTmp -UseBasicParsing
     } catch {
         Remove-Item -Force $tmp, $sumTmp -ErrorAction SilentlyContinue
-        throw "couldn't fetch the checksum to verify the download safely — try again."
+        throw "couldn't fetch the checksum to verify the download safely - try again."
     }
     $want = ((Get-Content -Raw $sumTmp).Trim() -split '\s+')[0].ToLower()
     $got  = (Get-FileHash -Algorithm SHA256 -Path $tmp).Hash.ToLower()
     Remove-Item -Force $sumTmp -ErrorAction SilentlyContinue
     if ($want -ne $got) {
         Remove-Item -Force $tmp -ErrorAction SilentlyContinue
-        throw "the download didn't verify (checksum mismatch) — refusing to install. Try again."
+        throw "the download didn't verify (checksum mismatch) - refusing to install. Try again."
     }
 
     # --- best-effort PGP verify of the .asc detached signature -------------------
     # sha256 is the HARD gate above. The PGP check is an EXTRA layer proving the bytes
-    # were signed by the AS219419 release key — but it is FAIL-SOFT: if gpg is absent,
+    # were signed by the AS219419 release key - but it is FAIL-SOFT: if gpg is absent,
     # or the .asc isn't published, or the key can't be fetched, we warn and continue.
     # A signature that IS present but does NOT verify is fatal (refuse).
     $gpg = Get-Command gpg -ErrorAction SilentlyContinue
@@ -106,7 +106,7 @@ try {
                 Remove-Item -Env:GNUPGHOME -ErrorAction SilentlyContinue
                 if ($status -notmatch "VALIDSIG.*$pgpFpr") {
                     Remove-Item -Force $tmp, $ascTmp -ErrorAction SilentlyContinue
-                    throw "the download's PGP signature did not verify against the AS219419 release key — refusing to install."
+                    throw "the download's PGP signature did not verify against the AS219419 release key - refusing to install."
                 }
             } else {
                 Remove-Item -Recurse -Force $gnupgHome -ErrorAction SilentlyContinue
@@ -154,7 +154,7 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
             $result = [System.UIntPtr]::Zero
             [void][Win32.NativeMethods]::SendMessageTimeout($HWND_BROADCAST, $WM_SETTINGCHANGE, [System.UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
         } catch {
-            # Broadcasting is best-effort — new terminals will still pick up the User Path.
+            # Broadcasting is best-effort - new terminals will still pick up the User Path.
         }
     }
     # Make THIS process see it now so the `whisper` call below resolves.
@@ -167,7 +167,7 @@ public static extern System.IntPtr SendMessageTimeout(System.IntPtr hWnd, uint M
     & $dest
 }
 catch {
-    # ONE friendly sentence — never a PowerShell stack / ScriptStackTrace.
+    # ONE friendly sentence - never a PowerShell stack / ScriptStackTrace.
     Say ([string]$_.Exception.Message)
     exit 1
 }

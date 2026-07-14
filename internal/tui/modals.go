@@ -17,18 +17,18 @@ import (
 
 // validateAgentName is the huh validator backing the create modal's mandatory name
 // (§3.2 hole b): it REJECTS an empty/blank/whitespace name with a friendly message so the
-// modal's "(required)" is finally true. It mirrors the CLI's createAgent guard — one rule,
+// modal's "(required)" is finally true. It mirrors the CLI's createAgent guard - one rule,
 // both surfaces. Returns nil for any non-blank name (the server polices reserved/premium).
 func validateAgentName(s string) error {
 	if strings.TrimSpace(s) == "" {
-		return errors.New("a name is required — every agent has one")
+		return errors.New("a name is required - every agent has one")
 	}
 	return nil
 }
 
 // buildCreateArgs is THE single write-layer guard for the create modal (§3.2): it builds
 // the op + args for op:identity (own /128) or op:register (new agent+key) and re-applies
-// the SAME trimmed-non-blank name check as validateAgentName — defense in depth, so a blank
+// the SAME trimmed-non-blank name check as validateAgentName - defense in depth, so a blank
 // name can NEVER reach the control plane even if the field validator is somehow bypassed
 // (a programmatically-completed form, a future refactor). The trimmed label is what we send
 // (no leading/trailing whitespace in the human name). Returns an error iff the name is blank;
@@ -107,7 +107,7 @@ func (a *App) openKill() (tea.Model, tea.Cmd) {
 			huh.NewConfirm().Title("fully revoke (admin) instead of release?").
 				Description("yes = op:revoke (withdraw /128, PTR, tokens, API key) · no = op:identity{release}").
 				Value(&f.revoke),
-			huh.NewInput().Title("type the agent name to confirm — IRREVERSIBLE").
+			huh.NewInput().Title("type the agent name to confirm - IRREVERSIBLE").
 				Description("withdraws the /128, reverse PTR, TLSA/SSHFP, and egress tokens · expected: "+confirmWord).
 				Value(&f.confirm),
 		),
@@ -158,7 +158,7 @@ func (a *App) openDrillEvent(e model.Event, ok bool) (tea.Model, tea.Cmd) {
 }
 
 // openRDAP shows the RDAP deep link for the selected agent (a copy-ready card; the
-// actual fetch is a step-C enrichment — here we surface the public URL).
+// actual fetch is a step-C enrichment - here we surface the public URL).
 func (a *App) openRDAP() (tea.Model, tea.Cmd) {
 	sel, ok := a.SelectedAgent()
 	if !ok || sel.Address == "" {
@@ -205,7 +205,7 @@ func renderWriteCard(m writeResultMsg) string {
 		b.WriteString("agent minted\n\n")
 		writeKV(&b, m.summary, "agent", "address", "fqdn", "ptr")
 		if k := str(m.summary, "api_key"); k != "" {
-			b.WriteString("\nAPI KEY — shown ONCE, store it now:\n  " + k + "\n")
+			b.WriteString("\nAPI KEY - shown ONCE, store it now:\n  " + k + "\n")
 		}
 	case "identity":
 		b.WriteString("identity ready\n\n")

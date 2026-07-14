@@ -14,7 +14,7 @@ import (
 )
 
 // status.go gives the chosen identity visibility (§3.5): `whisper use <agent>` pins the
-// agent the rest of the CLI binds to, and `whisper status` shows — in plain language — the
+// agent the rest of the CLI binds to, and `whisper status` shows - in plain language - the
 // key state, the selected agent, and the connection state. The selected identity stops
 // being an invisible file only the installer ever wrote.
 
@@ -26,7 +26,7 @@ func newUseCmd() *cobra.Command {
 		Use:   "use <agent|address>",
 		Short: "Choose the agent the rest of whisper binds to (saved to ~/.config/whisper-ns/agent)",
 		Long: "Pin the agent (by name or /128) that `whisper`, `connect`, and `status` use by\n" +
-			"default — written to ~/.config/whisper-ns/agent (mode 600).",
+			"default - written to ~/.config/whisper-ns/agent (mode 600).",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var sel string
@@ -36,7 +36,7 @@ func newUseCmd() *cobra.Command {
 			if sel == "" {
 				return usageErr("use needs an <agent|address> (the name or /128 of one of your agents)")
 			}
-			// A /128 is already the canonical form — save it directly. A friendly NAME/id
+			// A /128 is already the canonical form - save it directly. A friendly NAME/id
 			// must be resolved to its /128 (Postel: accept a name, store the address) so
 			// `connect`/`ip`/`status` bind correctly; without this, `whisper use <name>`
 			// saved the name and a later `whisper connect` failed with "no egress". We only
@@ -97,13 +97,13 @@ func newStatusCmd() *cobra.Command {
 				emitJSONValue(st)
 				return nil
 			}
-			keyCell := "not set — run: whisper login"
+			keyCell := "not set - run: whisper login"
 			if st.KeyPresent {
 				keyCell = "set (" + st.KeySource + ")"
 			}
 			rows := [][]string{
 				{"key", keyCell},
-				{"agent", orVal(selected, "none — run: whisper use <agent>")},
+				{"agent", orVal(selected, "none - run: whisper use <agent>")},
 				{"connection", st.Connection},
 			}
 			printTable([]string{"SETTING", "VALUE"}, rows)

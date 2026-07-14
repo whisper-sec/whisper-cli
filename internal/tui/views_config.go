@@ -14,7 +14,7 @@ import (
 
 // configView is the CONFIG tab: the resolved endpoints, the MASKED key + which ladder
 // rung supplied it, the active theme, and an about block. The key value is NEVER shown
-// in full (the privacy contract — §8: never display a full key after creation).
+// in full (the privacy contract - §8: never display a full key after creation).
 type configView struct {
 	app  *App
 	w, h int
@@ -80,7 +80,7 @@ func (v *configView) view(w, h int) string {
 
 	b.WriteString(th.Accent.Render("about") + "\n")
 	row("whisper-cli", v.app.opts.Version)
-	b.WriteString("  " + th.Dim.Render("identity-on-the-wire DNS — an agent IS a routable IPv6 /128.") + "\n")
+	b.WriteString("  " + th.Dim.Render("identity-on-the-wire DNS - an agent IS a routable IPv6 /128.") + "\n")
 	b.WriteString("  " + th.Dim.Render("built by the Whisper Security Team · viaGraph B.V.") + "\n")
 
 	panel := th.Panel.Width(w - 2).Height(h - 2).Render(clampLines(b.String(), h-2))
@@ -91,7 +91,7 @@ func (v *configView) view(w, h int) string {
 func maskKey(k string) string {
 	k = strings.TrimSpace(k)
 	if k == "" {
-		return "(none — run: whisper login)"
+		return "(none - run: whisper login)"
 	}
 	// Keep a recognisable prefix (whisper_/et_) and the last 4; mask the middle.
 	if len(k) <= 10 {

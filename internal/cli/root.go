@@ -44,7 +44,7 @@ var Version = versionFallback
 // before any command reads Version. No-op for the ldflag-stamped release builds.
 func init() {
 	if Version != versionFallback {
-		return // ldflag-stamped (release build) — honour it verbatim
+		return // ldflag-stamped (release build) - honour it verbatim
 	}
 	if bi, ok := debug.ReadBuildInfo(); ok {
 		if mv := strings.TrimPrefix(bi.Main.Version, "v"); mv != "" && mv != "(devel)" {
@@ -81,10 +81,10 @@ var g globalFlags
 func NewRootCommand() *cobra.Command {
 	root := &cobra.Command{
 		Use:   "whisper",
-		Short: "Connect your Whisper agent — one guided step",
-		Long: "whisper — your agent's front door.\n\n" +
+		Short: "Connect your Whisper agent - one guided step",
+		Long: "whisper - your agent's front door.\n\n" +
 			"An agent IS a routable IPv6 /128: the address is the identity and the auth.\n" +
-			"Run `whisper` with no subcommand and it walks you through the whole thing —\n" +
+			"Run `whisper` with no subcommand and it walks you through the whole thing -\n" +
 			"sign in, pick or name an agent, and connect. Run a subcommand to script any\n" +
 			"single step. Open the full dashboard with `whisper dash`. Every command is\n" +
 			"confined to YOUR tenant.",
@@ -94,7 +94,7 @@ func NewRootCommand() *cobra.Command {
 		Args:          cobra.NoArgs,
 		// Bare `whisper` is THE guided front door (§3.1): resolve a key (login if none on
 		// a TTY), list the agents, branch 0/1/N, then connect+verify. The dashboard moved
-		// to `whisper dash` / `whisper monitor` — bare `whisper` never dumps cobra help as
+		// to `whisper dash` / `whisper monitor` - bare `whisper` never dumps cobra help as
 		// the "answer" (no-TTY with too few flags returns a friendly usage error instead).
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return runGuided(guidedOptions{
@@ -105,7 +105,7 @@ func NewRootCommand() *cobra.Command {
 				// A run is interactive ONLY when it's a REAL terminal on BOTH ends
 				// (mirror the dashboard gate at newDashCmd). `whisper </dev/null` has a
 				// char-device stdin but is NOT a TTY pair, so it must take the headless
-				// path — never the menu (which would EOF and silently pick agent #1).
+				// path - never the menu (which would EOF and silently pick agent #1).
 				tty: isInteractive() && stdoutIsTTY(),
 			}, stdGuidedIO())
 		},
@@ -134,6 +134,7 @@ func NewRootCommand() *cobra.Command {
 		newListCmd(),
 		newAgentCmd(),
 		newCreateCmd(),
+		newDeviceCmd(),
 		newKillCmd(),
 		newConnectCmd(),
 		newConnectDaemonCmd(),
@@ -145,10 +146,14 @@ func NewRootCommand() *cobra.Command {
 		newUseCmd(),
 		newStatusCmd(),
 		newLogsCmd(),
+		newQueryCmd(),
+		newGraphCmd(),
 		newPolicyCmd(),
+		newDomainCmd(),
 		newTokenCmd(),
 		newMonitorCmd(),
 		newDashCmd(),
+		newExploreCmd(),
 		newRDAPCmd(),
 		newVerifyCmd(),
 		newLedgerCmd(),
@@ -166,13 +171,50 @@ func newDashCmd() *cobra.Command {
 		Use:     "dash",
 		Aliases: []string{"dashboard"},
 		Short:   "Open the full-screen dashboard (operator view)",
-		Long:    "Open the full-screen Bubble Tea dashboard — the operator view of your fleet.",
+		Long:    "Open the full-screen Bubble Tea dashboard - the operator view of your fleet.",
 		Args:    cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if !isInteractive() || !stdoutIsTTY() {
-				return usageErr("the dashboard needs a terminal — run `whisper dash` in an interactive shell")
+				return usageErr("the dashboard needs a terminal - run `whisper dash` in an interactive shell")
 			}
 			return runDashboard()
+		},
+	}
+}
+
+// newExploreCmd opens the full-screen dashboard on the EXPLORE tab: the graph-explorer
+// DECK, optionally landed straight on a node (host / IPv4 / IPv6 / email / AS#, parsed
+// liberally). Keyed runs walk the live whisper.security graph; keyless runs show the
+// fixture demo and say so.
+func newExploreCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "explore [node]",
+		Short: "Explore the whisper.security graph from a node (TUI)",
+		Long: "Open the graph explorer: stand on a node and walk the whisper.security graph\n" +
+			"around it (TRAIL | FOCUS | EDGES | NEIGHBORS), with the intelligence catalog one\n" +
+			"keystroke away. With an API key the deck is live; without one it is a demo.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !isInteractive() || !stdoutIsTTY() {
+				return usageErr("the explorer needs a terminal: run `whisper explore` in an interactive shell")
+			}
+			c, _ := resolveClient(false, true)
+			node := ""
+			if len(args) == 1 {
+				node = args[0]
+			}
+			opts := tui.Options{
+				Client:         c,
+				Tenant:         bestEffortTenant(c),
+				Node:           "ns",
+				ThemeName:      theme.ParseName(g.themeName),
+				NoColor:        theme.ColorDisabled(g.noColor),
+				Light:          theme.LightBackground(),
+				StartOnExplore: true,
+				StartNode:      node,
+				Version:        Version,
+			}
+			return tui.Run(opts)
 		},
 	}
 }
@@ -181,7 +223,7 @@ func newDashCmd() *cobra.Command {
 //
 //	0  success
 //	1  a control-plane / runtime failure (ok:false, transport, bad args we surfaced)
-//	2  a usage error (unknown flag/subcommand — Cobra's own)
+//	2  a usage error (unknown flag/subcommand - Cobra's own)
 func Execute() int {
 	root := NewRootCommand()
 	err := root.Execute()
@@ -218,7 +260,7 @@ func resolveClient(needKey, promptOK bool) (*client.Client, error) {
 	}
 	if needKey && cred.IsZero() {
 		return nil, &client.ProblemError{Status: 401, Title: "no key",
-			Detail: "no API key — run 'whisper login', set WHISPER_API_KEY, or pass --key " +
+			Detail: "no API key - run 'whisper login', set WHISPER_API_KEY, or pass --key " +
 				"(get one at https://console.whisper.security/settings)"}
 	}
 	return client.New(client.Config{
@@ -243,7 +285,7 @@ func ctx() (context.Context, context.CancelFunc) {
 
 // runDashboard resolves the credential (prompting as the last rung, since this only
 // runs on a terminal) and launches the full-screen TUI. A missing key is NOT a hard
-// error here — the dashboard opens and shows a clear "no key" state with guidance,
+// error here - the dashboard opens and shows a clear "no key" state with guidance,
 // matching the motto (min resistance, never an opaque failure).
 func runDashboard() error {
 	c, _ := resolveClient(false, true) // promptOK: the last ladder rung on a TTY
@@ -260,9 +302,9 @@ func runDashboard() error {
 	return tui.Run(opts)
 }
 
-// runMonitorDashboard opens the full-screen TUI on the MONITOR tab, optionally focused
-// on one agent's /128 (the SSE narrow is by address — §6.1). Used by `whisper monitor`
-// on a terminal with no --follow.
+// runMonitorDashboard opens the full-screen TUI on the merged AGENTS dashboard,
+// optionally with the live monitor already pinned to one agent's /128 (the SSE narrow
+// is by address). Used by `whisper monitor` on a terminal with no --follow.
 func runMonitorDashboard(agentAddr string) error {
 	c, _ := resolveClient(false, true)
 	opts := tui.Options{
@@ -281,7 +323,7 @@ func runMonitorDashboard(agentAddr string) error {
 
 // bestEffortTenant tries to surface the opaque tenant handle for the header via a quick
 // op:list (the rows can carry a tenant on enriched items). It is purely cosmetic: any
-// error yields an empty handle and the header shows "—" (fail-open, never blocks the
+// error yields an empty handle and the header shows "-" (fail-open, never blocks the
 // dashboard from opening).
 func bestEffortTenant(c *client.Client) string {
 	if c == nil || c.Credential().IsZero() {
@@ -302,7 +344,7 @@ func bestEffortTenant(c *client.Client) string {
 			return v
 		}
 		// No explicit tenant field: the agent fqdn carries the handle as its second
-		// label (<agent>.<t-handle>.agents.<zone>) — derive it.
+		// label (<agent>.<t-handle>.agents.<zone>) - derive it.
 		if v := model.TenantFromFQDN(field(item, "fqdn")); v != "" {
 			return v
 		}

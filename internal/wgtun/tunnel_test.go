@@ -21,7 +21,7 @@ import (
 )
 
 // These tests stand up a REAL second wireguard-go device on loopback (the "box" side) and run
-// the client Tunnel against it — a genuine end-to-end userspace handshake + encrypted byte
+// the client Tunnel against it - a genuine end-to-end userspace handshake + encrypted byte
 // flow over loopback UDP, with NO root, NO kernel wg, NO /dev/net/tun. This is the same shape
 // the live box uses, just both ends in-process, so it proves the client path for real.
 
@@ -49,7 +49,7 @@ type serverSide struct {
 }
 
 // startServerSide builds the box-side device, registers the client's public key as its peer
-// (with the client's tunnel /128 as the peer allowed-ip — cryptokey routing), and starts an
+// (with the client's tunnel /128 as the peer allowed-ip - cryptokey routing), and starts an
 // echo server inside the netstack at serverIP:echoPort.
 func startServerSide(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr, echoPort int) *serverSide {
 	t.Helper()
@@ -121,7 +121,7 @@ func freeUDPPort(t *testing.T) int {
 
 // TestTunnel_EndToEndEgress is the headline test: a REAL userspace WireGuard handshake on
 // loopback, then bytes flow from a SOCKS5 client through the client Tunnel, over the encrypted
-// tunnel, to the echo backend inside the server netstack — and back. It also asserts Healthy()
+// tunnel, to the echo backend inside the server netstack - and back. It also asserts Healthy()
 // flips true once the handshake completes (the live tunnel-health signal `whisper status` uses).
 func TestTunnel_EndToEndEgress(t *testing.T) {
 	if testing.Short() {
@@ -222,7 +222,7 @@ func TestTunnel_StopIsCleanAndIdempotent(t *testing.T) {
 	}
 	addr := tun.Addr()
 	tun.Stop()
-	tun.Stop() // idempotent — must not panic
+	tun.Stop() // idempotent - must not panic
 	if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
 		c.Close()
 		t.Fatal("after Stop the local SOCKS5 endpoint must no longer accept connections")
@@ -231,7 +231,7 @@ func TestTunnel_StopIsCleanAndIdempotent(t *testing.T) {
 
 // TestTunnel_ReconnectOnDeadHandshake drives the robustness path: with a tiny DeadAfter
 // and a server that we take DOWN, the monitor must observe the tunnel go unhealthy and DRIVE at
-// least one reconnect (re-handshake) attempt — proving a stale tunnel self-heals rather than
+// least one reconnect (re-handshake) attempt - proving a stale tunnel self-heals rather than
 // silently black-holing. The local endpoint is unchanged throughout.
 func TestTunnel_ReconnectOnDeadHandshake(t *testing.T) {
 	if testing.Short() {
@@ -267,7 +267,7 @@ func tunEndpointForReconnect(t *testing.T, cfg Config, srv *serverSide) string {
 	t.Cleanup(tun.Stop)
 	endpoint := tun.Endpoint()
 
-	// Let the first handshake land (best-effort — even if it doesn't, an all-dead tunnel still
+	// Let the first handshake land (best-effort - even if it doesn't, an all-dead tunnel still
 	// exercises the reconnect path, which is the point).
 	waitHealthy(tun, 3*time.Second)
 
@@ -285,7 +285,7 @@ func tunEndpointForReconnect(t *testing.T, cfg Config, srv *serverSide) string {
 		}
 		time.Sleep(150 * time.Millisecond)
 	}
-	t.Fatalf("monitor never drove a reconnect on a dead tunnel (reconnects=%d) — stale tunnels would black-hole", tun.Reconnects())
+	t.Fatalf("monitor never drove a reconnect on a dead tunnel (reconnects=%d) - stale tunnels would black-hole", tun.Reconnects())
 	return endpoint
 }
 
@@ -301,7 +301,7 @@ func waitHealthy(tun *Tunnel, within time.Duration) bool {
 }
 
 // TestNetDialer_HonoursContextCancel: the netstack dialer respects a cancelled ctx (so a Stop()
-// unblocks an in-flight dial) — proven without a live peer: an unreachable target + a cancelled
+// unblocks an in-flight dial) - proven without a live peer: an unreachable target + a cancelled
 // ctx returns promptly with a clean (non-leaky) error.
 func TestNetDialer_HonoursContextCancel(t *testing.T) {
 	// A standalone client device with no peer: any dial has nowhere to go, so a cancelled ctx
@@ -322,7 +322,7 @@ func TestNetDialer_HonoursContextCancel(t *testing.T) {
 		t.Fatal("dial on a cancelled ctx must error, not connect")
 	}
 	if time.Since(start) > 1*time.Second {
-		t.Fatalf("dial on a cancelled ctx took %v — it must return promptly", time.Since(start))
+		t.Fatalf("dial on a cancelled ctx took %v - it must return promptly", time.Since(start))
 	}
 }
 

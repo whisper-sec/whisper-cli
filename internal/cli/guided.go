@@ -50,8 +50,8 @@ type guidedOptions struct {
 // supply a scripted reader + buffers; production wires os.Stdin/Stdout/Stderr.
 type guidedIO struct {
 	in  *bufio.Reader
-	out io.Writer // stdout — machine-load-bearing value only
-	err io.Writer // stderr — human chrome
+	out io.Writer // stdout - machine-load-bearing value only
+	err io.Writer // stderr - human chrome
 }
 
 func stdGuidedIO() guidedIO {
@@ -59,7 +59,7 @@ func stdGuidedIO() guidedIO {
 }
 
 // agentChoice is one selectable agent distilled from op:list: a display name, its /128,
-// and the domain (zone) its FQDN sits under — so a BYOD-domain identity is distinguishable
+// and the domain (zone) its FQDN sits under - so a BYOD-domain identity is distinguishable
 // from a hosted agents.whisper.online one in the picker.
 type agentChoice struct {
 	name   string
@@ -68,7 +68,7 @@ type agentChoice struct {
 }
 
 // runGuided is the entry point for bare `whisper`. It resolves the credential (guiding
-// the user to login when missing — the door never fails except on no-key-no-TTY), lists
+// the user to login when missing - the door never fails except on no-key-no-TTY), lists
 // the agents, branches 0/1/N, and hands off to the shared connect+verify step.
 func runGuided(opts guidedOptions, gio guidedIO) error {
 	c, err := guidedClient(opts, gio)
@@ -119,7 +119,7 @@ func runGuided(opts guidedOptions, gio guidedIO) error {
 
 // guidedClient resolves the credential for the guided flow. A missing key on a TTY runs
 // the login flow (device-flow or paste) inline, then re-resolves; a missing key with no
-// TTY is the ONE hard exit (§3.1) — a friendly usage error, never a hang or a help dump.
+// TTY is the ONE hard exit (§3.1) - a friendly usage error, never a hang or a help dump.
 func guidedClient(opts guidedOptions, gio guidedIO) (*client.Client, error) {
 	c, err := resolveClient(false, false)
 	if err != nil {
@@ -131,7 +131,7 @@ func guidedClient(opts guidedOptions, gio guidedIO) (*client.Client, error) {
 	// No key.
 	if !opts.tty {
 		return nil, &client.ProblemError{Status: 401, Title: "no key",
-			Detail: "no API key yet — set WHISPER_API_KEY or run: whisper login"}
+			Detail: "no API key yet - set WHISPER_API_KEY or run: whisper login"}
 	}
 	// TTY: run the real login flow (browser device-flow or paste), then re-resolve.
 	fmt.Fprintln(gio.err, "whisper: let's sign you in first.")
@@ -144,7 +144,7 @@ func guidedClient(opts guidedOptions, gio guidedIO) (*client.Client, error) {
 	}
 	if c2 == nil || c2.Credential().IsZero() {
 		return nil, &client.ProblemError{Status: 401, Title: "no key",
-			Detail: "still no API key — run: whisper login"}
+			Detail: "still no API key - run: whisper login"}
 	}
 	return c2, nil
 }
@@ -197,7 +197,7 @@ func choicesFromResult(res *client.Result) []agentChoice {
 // --name (a clear usage error, never a silent unnamed agent).
 func guidedZero(c *client.Client, opts guidedOptions, gio guidedIO) error {
 	if !opts.tty && strings.TrimSpace(opts.name) == "" {
-		return usageErr("no agents yet — pass --create --name <name> to create your first one")
+		return usageErr("no agents yet - pass --create --name <name> to create your first one")
 	}
 	if opts.tty {
 		fmt.Fprintln(gio.err, "Welcome. Let's name your first agent.")
@@ -244,14 +244,14 @@ func guidedOne(opts guidedOptions, gio guidedIO, only agentChoice) error {
 // list lives in the TUI surface; here (and for dumb terminals) we use a plain numbered
 // prompt that is byte-identical to script. Entry 0 = "create a new agent".
 func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []agentChoice) error {
-	// Headless with multiple agents and no --agent: we can't guess — ask the caller to
+	// Headless with multiple agents and no --agent: we can't guess - ask the caller to
 	// pick one explicitly (§3.4 decision table). A clear usage error, never a silent default.
 	if !opts.tty {
-		return usageErr("you have multiple agents — pass --agent <id|name> to choose one")
+		return usageErr("you have multiple agents - pass --agent <id|name> to choose one")
 	}
 	fmt.Fprintln(gio.err, "Which agent?")
 	fmt.Fprintln(gio.err, "  0) + create a new agent")
-	// Align the name+addr block so the trailing domain (BYOD vs hosted) lines up — a user
+	// Align the name+addr block so the trailing domain (BYOD vs hosted) lines up - a user
 	// must be able to tell a BYOD-domain identity from a hosted agents.whisper.online one.
 	nameW, addrW := 0, 0
 	for _, ch := range choices {
@@ -272,7 +272,7 @@ func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []ag
 	// Re-prompt on garbage (out-of-range / non-numeric / blank) exactly like requireName
 	// loops on a blank name: a fat-fingered '9' or 'xyz' must NEVER silently connect to the
 	// wrong agent. ONLY a valid number in [0, n] proceeds. On EOF (closed stdin / non-TTY
-	// piped in), drop to the SAME headless path a no-TTY run takes — never a silent #1.
+	// piped in), drop to the SAME headless path a no-TTY run takes - never a silent #1.
 	idx := -1
 	for {
 		fmt.Fprintf(gio.err, "Pick a number 0-%d: ", len(choices))
@@ -284,7 +284,7 @@ func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []ag
 		if rerr != nil {
 			// EOF with no valid pick: this run isn't really a person at a keyboard. Take the
 			// documented headless error (the §3.4 decision-table path), not a silent default.
-			return usageErr("you have multiple agents — pass --agent <id|name> to choose one")
+			return usageErr("you have multiple agents - pass --agent <id|name> to choose one")
 		}
 		fmt.Fprintf(gio.err, "whisper: pick a number between 0 and %d.\n", len(choices))
 	}
@@ -310,7 +310,7 @@ func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []ag
 //
 // A persistent guided connect (bare `whisper` on a TTY) holds the terminal open as the
 // egress until the user interrupts; a headless run prints the line and exits 0 (the
-// local proxy is torn down — a headless caller that wants a held egress uses `whisper
+// local proxy is torn down - a headless caller that wants a held egress uses `whisper
 // run`/`whisper connect`, which keep it alive for the child / the session).
 //
 // connectVia is a package var so a test drives the flow with a stub control plane.
@@ -333,7 +333,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 		return err
 	}
 	// detect-and-reuse: a live `whisper connect` daemon already serving this agent's /128
-	// means the front door is ALREADY connected — report/hold through the running proxy instead
+	// means the front door is ALREADY connected - report/hold through the running proxy instead
 	// of opening a competing op:connect that would clobber (and on exit, kill) the daemon's
 	// server-side peer. The reused session's Stop() is a no-op (local==nil), so neither the
 	// quiet/headless teardown below nor a TTY hold can touch the daemon's tunnel.
@@ -347,7 +347,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 		}
 		if opts.quiet {
 			fmt.Fprintln(gio.out, reused.endpoint)
-			reused.Stop() // no-op by design — the daemon owns the proxy
+			reused.Stop() // no-op by design - the daemon owns the proxy
 			return nil
 		}
 		writeSuccessLine(gio.out, gio.err, reused, false)
@@ -364,7 +364,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 		args["agent"] = sel
 	}
 	// cx bounds ONLY the control call + the one-shot verify; it is NOT the proxy's lifetime
-	// (the proxy is Background-rooted and ends only on Stop() — see egress.StartLocalProxy).
+	// (the proxy is Background-rooted and ends only on Stop() - see egress.StartLocalProxy).
 	// So we can cancel cx right after verify and the proxy stays LIVE for the hold below.
 	cx, cancel := ctx()
 	env, err := c.Agents(cx, "connect", args)
@@ -380,7 +380,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 	if name == "" {
 		name = displayName(env.Result)
 	}
-	// The guided front door uses the default (socks5) tier — nil wgKey.
+	// The guided front door uses the default (socks5) tier - nil wgKey.
 	sess, cerr := connectAndVerify(cx, c, env.Result, name, nil)
 	cancel() // ends ONLY the control ctx; the proxy lives on until sess.Stop()
 	if cerr != nil {
@@ -394,7 +394,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 	}
 	writeSuccessLine(gio.out, gio.err, sess, false)
 	// A real terminal: hold the egress open until the user interrupts (the "front door"
-	// stays connected). Headless: we already printed the verified line — tear down + exit
+	// stays connected). Headless: we already printed the verified line - tear down + exit
 	// 0 (a script gates on the exit code; a held egress is `whisper run`/`connect`).
 	if opts.tty {
 		holdUntilSignal(sess)
@@ -408,7 +408,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 
 // requireName resolves the MANDATORY agent name for a create. --name wins; otherwise on a
 // TTY we re-prompt until the user types a non-blank name; headless with no --name is a
-// clear usage error (never a silent unnamed agent — §1.2/§3.2). All name validation lives
+// clear usage error (never a silent unnamed agent - §1.2/§3.2). All name validation lives
 // in createAgent; this only secures a non-empty candidate to pass to it.
 func requireName(opts guidedOptions, gio guidedIO) (string, error) {
 	if n := strings.TrimSpace(opts.name); n != "" {
@@ -428,7 +428,7 @@ func requireName(opts guidedOptions, gio guidedIO) (string, error) {
 			// EOF with nothing typed: don't loop forever on a closed stdin.
 			return "", usageErr("--name is required to create an agent")
 		}
-		fmt.Fprintln(gio.err, "whisper: a name is required — every agent has one.")
+		fmt.Fprintln(gio.err, "whisper: a name is required - every agent has one.")
 	}
 }
 
@@ -448,7 +448,7 @@ func pickBySelector(choices []agentChoice, sel string) (agentChoice, error) {
 
 // parseMenuChoice maps a typed menu line to a menu index in [0, n], or -1 meaning
 // "re-prompt" (the caller loops). 0 ⇒ create a new agent; 1..n ⇒ that agent. We are
-// liberal in only one safe way — stray whitespace is trimmed — but a blank line, a
+// liberal in only one safe way - stray whitespace is trimmed - but a blank line, a
 // non-number, a negative, or an out-of-range value all return -1 so the caller re-asks
 // (never a silent default to agent #1, which would connect to the WRONG agent on a typo).
 func parseMenuChoice(line string, n int) int {

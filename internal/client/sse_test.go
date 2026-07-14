@@ -158,7 +158,7 @@ func TestReadSSECtxCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	// A never-ending reader: a slow pipe. With ctx already cancelled, ReadSSE must not
-	// block — the scanner sees data but the ctx check short-circuits.
+	// block - the scanner sees data but the ctx check short-circuits.
 	r := strings.NewReader(strings.Repeat("event: dns\ndata: {\"kind\":\"dns\"}\n\n", 1000))
 	done := make(chan error, 1)
 	go func() { done <- ReadSSE(ctx, r, func(MonitorEvent) {}) }()

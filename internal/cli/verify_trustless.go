@@ -14,7 +14,7 @@ import (
 
 // runTrustless proves an agent's identity with ZERO trust in Whisper's API: it
 // validates the DNSSEC chain from the IANA root IN-PROCESS, matches the served DANE-EE cert
-// against the DNSSEC pin, and verifies the transparency log + identity document — then prints
+// against the DNSSEC pin, and verifies the transparency log + identity document - then prints
 // a structured verdict. Unlike the default `verify` (which trusts Whisper's /verify-identity
 // endpoint to run the chain), every leg here is checked locally against public trust anchors.
 //
@@ -85,10 +85,10 @@ func renderTrustlessVerdict(rep *trustverify.Report, target string) {
 	printTable([]string{"CHECK", "RESULT", "TRUST", "DETAIL"}, rows)
 
 	if rep.Verdict {
-		fmt.Fprintf(os.Stderr, "whisper: %s is CRYPTOGRAPHICALLY PROVEN — trust anchor: %s\n",
+		fmt.Fprintf(os.Stderr, "whisper: %s is CRYPTOGRAPHICALLY PROVEN - trust anchor: %s\n",
 			rep.FQDN, rep.TrustAnchor)
 	} else {
-		fmt.Fprintf(os.Stderr, "whisper: %s — %s\n", rep.TrustAnchor, notTrustlesslyProven(rep, target))
+		fmt.Fprintf(os.Stderr, "whisper: %s - %s\n", rep.TrustAnchor, notTrustlesslyProven(rep, target))
 	}
 }
 

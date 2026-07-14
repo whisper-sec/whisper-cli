@@ -18,26 +18,10 @@ import (
 // §6.4). 2s is responsive without hammering warm storage; the live tail pre-empts it.
 const pollInterval = 2 * time.Second
 
-// renderLiveStrip is the always-on bottom panel on the AGENTS dashboard: a compact,
-// colour-coded rolling feed of the live activity chain (client_src → qname → peer). It
-// shares the feed ring with the full MONITOR view. h is the panel height (incl. border).
-func (a *App) renderLiveStrip(w, h int) string {
-	title := a.liveTitle()
-	inner := h - 2 // minus the top+bottom border
-	if inner < 1 {
-		inner = 1
-	}
-	lines := a.renderFeedLines(a.feed.recent(inner), w-4, inner)
-	body := strings.Join(lines, "\n")
-	panel := a.th.Panel.Width(w - 2).Height(inner).Render(body)
-	// Overlay the title onto the top border (k9s/btop style).
-	return a.titledPanel(panel, title, w)
-}
-
-// liveTitle is the live-strip header: a pulsing heartbeat dot + the source/state badge +
-// the event count, and a "⏸ PAUSED · N buffered" marker when paused. The heartbeat
-// animates ●→◉→● on the tick (only while connected) so the panel visibly breathes even
-// when idle — proof the stream is alive.
+// liveTitle is the live monitor panel's header: a pulsing heartbeat dot + the source/
+// state badge + the event count, and a "⏸ PAUSED · N buffered" marker when paused. The
+// heartbeat animates the dot on the tick (only while connected) so the panel visibly
+// breathes even when idle - proof the stream is alive.
 func (a *App) liveTitle() string {
 	state := "connecting…"
 	badge := a.th.Dim
@@ -46,7 +30,7 @@ func (a *App) liveTitle() string {
 		state, badge = "connected", a.th.OK
 	case streamPoll:
 		// Distinguish "the stream dropped, polling while it reconnects" from "the
-		// stream has NEVER answered" (a deterministic 404/401 —): a permanently
+		// stream has NEVER answered" (a deterministic 404/401 -): a permanently
 		// dead endpoint must not read as a transient blip.
 		if a.hbSeen {
 			state, badge = "poll fallback", a.th.Warn
@@ -124,11 +108,14 @@ func (a *App) onStreamEvent(e model.Event) {
 }
 
 // foldEvent is the shared fold for a live, backfill, or poll event: join cache, fleet
-// union, per-agent rings, dedup watermark, and the feed ring (with the flash flag for a
-// freshly-arrived live row). live=false (backfill/poll) does not flash and respects pause
-// only for the live tail.
+// union, per-agent rings, dedup watermark, the live agent graph, and the feed ring
+// (with the flash flag for a freshly-arrived live row). live=false (backfill/poll)
+// does not flash, does not bump the session counters (a focus-change re-seed must
+// never double-count), and respects pause only for the live tail.
 func (a *App) foldEvent(e model.Event, live bool) {
-	if e.Kind == "dns" {
+	if e.Kind == "dns" && !isBlock(e.Decision) {
+		// A BLOCKED lookup returned no usable address, so a later conn can never be
+		// "for" that name: keep it out of the join cache (never a wrong stitch).
 		a.join.observeDNS(e.Addr128, e.QName, e.TsMicros)
 	}
 	a.upsertStreamAgent(e.Addr128, e.Agent)
@@ -142,7 +129,23 @@ func (a *App) foldEvent(e model.Event, live bool) {
 	}
 	if live {
 		e.SetFlashTick(a.tickCount) // stamp for the ~400ms flash-in (motion)
+		switch e.Kind {
+		case "dns":
+			a.liveDNS++
+			if isBlock(e.Decision) {
+				a.liveBlocked++
+			}
+		case "conn":
+			a.liveConn++
+		}
 	}
+	// The live graph grows from the same fold: stitch a nameless conn's hostname from
+	// the join cache (same TTL discipline as the chain rows - never a wrong stitch).
+	stitched := ""
+	if e.Kind == "conn" && e.QName == "" {
+		stitched = a.join.qnameAt(e.Addr128, e.TsMicros)
+	}
+	a.lgraph.observe(e, stitched)
 	a.feed.push(e)
 }
 
@@ -177,7 +180,7 @@ func (a *App) onMonitorBackfill(m monitorBackfillMsg) {
 func (a *App) onMonitorPoll(m monitorPollMsg) tea.Cmd {
 	if a.stream == streamConn {
 		a.pollArmed = false
-		return nil // the live tail is back — stop polling
+		return nil // the live tail is back - stop polling
 	}
 	if m.err == nil {
 		// fold newest-last so the freshest row ends on top of the ring (dedup by ts).
@@ -198,8 +201,8 @@ func (a *App) onMonitorPoll(m monitorPollMsg) tea.Cmd {
 // --- titled panel helper ---------------------------------------------------------
 
 // titledPanel overlays a title onto the top border line of an already-bordered panel,
-// the k9s/btop look. The original top line is STYLED text — slicing it by runes cuts
-// ANSI escape sequences mid-way (the "LEET"/"38;5m" corruption class) — so we
+// the k9s/btop look. The original top line is STYLED text - slicing it by runes cuts
+// ANSI escape sequences mid-way (the "LEET"/"38;5m" corruption class) - so we
 // never splice into it: we rebuild the whole top border line from scratch at exactly
 // the panel's real width: ╭─ TITLE ───────╮.
 func (a *App) titledPanel(panel, title string, w int) string {
@@ -221,7 +224,7 @@ func (a *App) titledPanelStyled(panel, title string, w int, borderFg lipgloss.St
 		}
 	}
 	if w < 4 {
-		return panel // too narrow for a title — keep the plain border
+		return panel // too narrow for a title - keep the plain border
 	}
 	titleStr := " " + title + " "
 	if tw := lipgloss.Width(titleStr); tw > w-3 {

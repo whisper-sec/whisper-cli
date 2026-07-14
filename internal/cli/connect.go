@@ -21,6 +21,7 @@ import (
 
 func newConnectCmd() *cobra.Command {
 	var tier, label, email, name, agent, agentFile, configFile string
+	var vin, ecuSerial string
 	var verbose, ensure bool
 	var port int
 	cmd := &cobra.Command{
@@ -28,18 +29,18 @@ func newConnectCmd() *cobra.Command {
 		Short: "Connect egress bound to your /128 (Tier-1.5 SOCKS5 proxy, or Tier-1 WireGuard)",
 		Long: "Bring up a local, no-config egress bound to an existing agent's /128 and hold it\n" +
 			"open. It prints ONE bearer/key-free local proxy string (socks5h://127.0.0.1:<port>)\n" +
-			"— point ALL_PROXY / http_proxy at it and every connection leaves from your /128.\n\n" +
+			"- point ALL_PROXY / http_proxy at it and every connection leaves from your /128.\n\n" +
 			"Tiers (--tier):\n" +
 			"  socks5  (default)  Tier-1.5: a userspace SOCKS5/HTTPS egress, source-bound to your\n" +
-			"                     /128 — no root, works everywhere.\n" +
+			"                     /128 - no root, works everywhere.\n" +
 			"  wireguard          Tier-1: a ROUTED Whisper /128 over a userspace WireGuard tunnel\n" +
-			"                     (wireguard-go netstack — still no root, no kernel wg, no TUN).\n" +
+			"                     (wireguard-go netstack - still no root, no kernel wg, no TUN).\n" +
 			"                     Your key is generated locally and never leaves this host; the\n" +
 			"                     same local SOCKS5 endpoint fronts it, so tools need no change.\n\n" +
 			"Which identity it binds: --agent <id|/128> pins a specific one; else the\n" +
 			"agent persisted in ~/.config/whisper-ns/agent (written when you pick/create one);\n" +
 			"else, if you already have an agent, the server's reuse-most-recent default.\n\n" +
-			"If you have NO agent yet, connect creates one first — and every agent has a human\n" +
+			"If you have NO agent yet, connect creates one first - and every agent has a human\n" +
 			"name (§3.2), so it asks for --name (a terminal prompts; headless --name is\n" +
 			"required). connect never mints an unnamed agent.",
 		Args: cobraNoArgs,
@@ -47,7 +48,7 @@ func newConnectCmd() *cobra.Command {
 			// --ensure: the IDEMPOTENT daemon path (used by `whisper init claude` + the
 			// SessionStart hook). Reuse a live proxy on the project's pinned port, else spawn
 			// the tunnel DETACHED and wait (bounded) until it's live. It does NOT hold this
-			// process open — the daemon does. Reads .whisper/config (via --config or discovery).
+			// process open - the daemon does. Reads .whisper/config (via --config or discovery).
 			if ensure {
 				return runEnsure(configFile, port)
 			}
@@ -58,7 +59,7 @@ func newConnectCmd() *cobra.Command {
 			}
 			// --name / --label both mean the agent's human name → the server LABEL,
 			// consistent with `whisper create` (§3.2). --name wins; --label is the legacy
-			// spelling. (It is NOT a separate friendly_name field — that left the agent
+			// spelling. (It is NOT a separate friendly_name field - that left the agent
 			// unnamed.)
 			chosenName := firstNonBlank(name, label)
 			if v := strings.TrimSpace(chosenName); v != "" {
@@ -66,6 +67,18 @@ func newConnectCmd() *cobra.Command {
 			}
 			if email != "" {
 				args["contact_email"] = email
+			}
+			// Automotive vehicle/ECU identity: bind this routed /128 to the vehicle's
+			// own VIN (+ optional ECU serial) as NAMED op:connect args, so the car derives the
+			// SAME identity every time it connects. --ecu-serial needs --vin (the ECU is scoped
+			// within its vehicle). No-op for the non-vehicle common case.
+			if v := strings.TrimSpace(vin); v != "" {
+				args["vin"] = v
+				if s := strings.TrimSpace(ecuSerial); s != "" {
+					args["ecu_serial"] = s
+				}
+			} else if strings.TrimSpace(ecuSerial) != "" {
+				return usageErr("--ecu-serial needs --vin (the ECU is identified within its vehicle)")
 			}
 			// agent selection, in precedence order (highest first):
 			//   1. --agent <id|/128>   explicit flag (overrides everything)
@@ -79,7 +92,7 @@ func newConnectCmd() *cobra.Command {
 				return err
 			}
 
-			// op:connect only understands an agent by /128 or id — a bare human display
+			// op:connect only understands an agent by /128 or id - a bare human display
 			// name (what `whisper list` shows, and what a caller naturally reaches for,
 			// e.g. --agent scout) needs resolving client-side first (Postel: liberal in
 			// what we accept). A /128 selector, an id, or "" (no selector) pass straight
@@ -95,7 +108,7 @@ func newConnectCmd() *cobra.Command {
 			}
 
 			// When connect has NO selector it would otherwise let the server auto-allocate
-			// a /128 — and on a fresh account that /128 would be UNNAMED, bypassing the
+			// a /128 - and on a fresh account that /128 would be UNNAMED, bypassing the
 			// mandatory-name rule (§3.2). Guard it: if the caller has no agent yet, mint a
 			// NAMED one through the SAME requireName/createAgent path as create, then bind
 			// egress to it. Existing agents are untouched (zero-config reuse stays).
@@ -138,7 +151,7 @@ func newConnectCmd() *cobra.Command {
 				return werr
 			}
 			// alongside the WG keypair, load-or-mint the agent-held IDENTITY keypair (routed
-			// tier only) and inject its public SPKI as identity_public_key — the server pins THIS
+			// tier only) and inject its public SPKI as identity_public_key - the server pins THIS
 			// key, verbatim, and never derives one for this /128. `sel` (already resolved above) is
 			// the persistence handle so a reconnect for the SAME agent reuses the SAME key.
 			idKey, ierr := prepareIdentityKey(tier, args, sel)
@@ -147,7 +160,7 @@ func newConnectCmd() *cobra.Command {
 			}
 			keys := &connectKeys{wg: wgKey, identity: idKey}
 
-			// cx is the SHORT control ctx — it bounds op:connect + the one-shot verify and
+			// cx is the SHORT control ctx - it bounds op:connect + the one-shot verify and
 			// is cancelled on return. It is NOT the proxy's lifetime: the proxy is
 			// Background-rooted and ends ONLY on Stop() (see egress.StartLocalProxy), so the
 			// 30s timeout firing here can never tear down a held-open connect.
@@ -157,7 +170,7 @@ func newConnectCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// Check ONLY for a control-plane error here — do NOT fall through to the shared
+			// Check ONLY for a control-plane error here - do NOT fall through to the shared
 			// renderEnvelope --json dump: the raw op:connect envelope carries the et_ bearer
 			// (egress tier) or the minted WG private key, so dumping it would LEAK a credential
 			// (and skip actually connecting). connect's own --json (renderConnect) emits a
@@ -186,7 +199,7 @@ func newConnectCmd() *cobra.Command {
 			}
 			// A persistent `whisper connect` keeps the proxy alive for the WHOLE session:
 			// print the success line, then hold until the user interrupts. The proxy stays
-			// LIVE through the hold (its lifetime is Stop(), not cx) — holdUntilSignal calls
+			// LIVE through the hold (its lifetime is Stop(), not cx) - holdUntilSignal calls
 			// sess.Stop() on SIGINT/SIGTERM. `--quiet` prints ONLY socks5h://127.0.0.1:<port>
 			// and holds silently. For one-shot scripted use prefer `whisper run`/`whisper ip`.
 			renderConnect(sess, verbose)
@@ -199,6 +212,8 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in)")
 	cmd.Flags().StringVar(&name, "name", "", "the agent's human name (required to create one; maps to the server label)")
 	cmd.Flags().StringVar(&agent, "agent", "", "bind egress to this agent (id or /128); overrides the persisted agent")
+	cmd.Flags().StringVar(&vin, "vin", "", "bind this routed /128 to a vehicle VIN (automotive; op:connect)")
+	cmd.Flags().StringVar(&ecuSerial, "ecu-serial", "", "an ECU serial to combine with --vin (automotive)")
 	_ = cmd.Flags().MarkHidden("label") // --name is the documented spelling
 	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show the full egress detail block (default: one line)")
@@ -209,7 +224,7 @@ func newConnectCmd() *cobra.Command {
 }
 
 // runEnsure is the body of `whisper connect --ensure`: resolve the project config (a pinned
-// --port overrides the config's port — used by `init` before the config exists / to re-pin),
+// --port overrides the config's port - used by `init` before the config exists / to re-pin),
 // then idempotently reuse-or-spawn the detached daemon and print a calm one-liner. It returns
 // 0 when the proxy is live (reused OR freshly started), so a SessionStart hook gates on the
 // exit code.
@@ -238,7 +253,7 @@ func runEnsure(configFile string, portOverride int) error {
 // resolveAgentSelector picks the agent selector for op:connect in precedence order:
 // the explicit --agent flag wins; else the persisted agent file (written by install.sh);
 // else "" (no selector ⇒ the server's reuse-most-recent default). Trimmed; an empty flag
-// AND an absent/blank file yield "" so the arg is omitted entirely — zero-config by default.
+// AND an absent/blank file yield "" so the arg is omitted entirely - zero-config by default.
 func resolveAgentSelector(flagAgent, agentFile string) string {
 	if v := strings.TrimSpace(flagAgent); v != "" {
 		return v
@@ -247,13 +262,13 @@ func resolveAgentSelector(flagAgent, agentFile string) string {
 }
 
 // resolveConnectAgent turns a raw connect selector into what op:connect actually
-// understands — a /128 or an agent id — by resolving a bare human display name
+// understands - a /128 or an agent id - by resolving a bare human display name
 // client-side. A /128 (has a colon, per looksLikeV6) passes straight through with no
 // extra round-trip: the common persisted-default/--agent <addr> paths pay nothing.
 // Anything else (an id or a display name like "scout") is checked against the
 // account's agents (op:list): an EXACT id/label/address match passes through unchanged
 // (so an id keeps working exactly as before), and a CASE-INSENSITIVE label match
-// resolves to that agent's /128 — so `--agent scout` and `--agent Scout` both work, the
+// resolves to that agent's /128 - so `--agent scout` and `--agent Scout` both work, the
 // same way `whisper list` displays it. No match at all is a clear, actionable error
 // naming the real candidates, never the control plane's opaque "not found".
 func resolveConnectAgent(c *client.Client, cx context.Context, sel string) (string, error) {
@@ -270,7 +285,7 @@ func resolveConnectAgent(c *client.Client, cx context.Context, sel string) (stri
 	for i := range choices {
 		ch := &choices[i]
 		if ch.name == sel || ch.addr == sel {
-			// Exact id/label/address match — unchanged behaviour, prefer the /128.
+			// Exact id/label/address match - unchanged behaviour, prefer the /128.
 			return firstNonBlank(ch.addr, ch.name), nil
 		}
 		if ch.name != "" {
@@ -288,20 +303,20 @@ func resolveConnectAgent(c *client.Client, cx context.Context, sel string) (stri
 			Detail: fmt.Sprintf("no agent named %q; run 'whisper list' or pass --agent <id|/128>", sel)}
 	}
 	return "", &client.ProblemError{Status: 404,
-		Detail: fmt.Sprintf("no agent named %q — you have: %s (run 'whisper list' or pass --agent <id|/128>)",
+		Detail: fmt.Sprintf("no agent named %q - you have: %s (run 'whisper list' or pass --agent <id|/128>)",
 			sel, strings.Join(candidates, ", "))}
 }
 
 // renderConnect prints the lean, Scandinavian result of a verified connect (§3.3/§4.4):
-// by default ONE human line on stderr — `Connected as <name> — <addr>  ✓ verified` —
+// by default ONE human line on stderr - `Connected as <name> - <addr>  ✓ verified` -
 // and NOTHING on stdout. --quiet prints ONLY the bearer-free local endpoint
 // (socks5h://127.0.0.1:<port>) on stdout. --verbose adds the local-endpoint detail
-// (NO server proxy strings — they carry the bearer, so they are NEVER rendered: the
+// (NO server proxy strings - they carry the bearer, so they are NEVER rendered: the
 // connection_string/http_proxy/socks5_endpoint fields are deliberately dropped, §4.4
 // bearer hygiene).
 func renderConnect(sess *egressSession, verbose bool) {
 	if g.jsonOut {
-		// Scriptable, SANITIZED shape — the bearer/key-free local endpoint + the verified /128
+		// Scriptable, SANITIZED shape - the bearer/key-free local endpoint + the verified /128
 		// + the active tier (and, for WireGuard, tunnel health). NEVER the raw control-plane
 		// envelope (it carries the et_ bearer / minted WG private key in its fields).
 		out := map[string]any{
@@ -323,7 +338,7 @@ func renderConnect(sess *egressSession, verbose bool) {
 	}
 	writeSuccessLine(io.Discard, os.Stderr, sess, false)
 	if verbose {
-		// The local connection detail ONLY — never a server proxy string / WG key (secret-free).
+		// The local connection detail ONLY - never a server proxy string / WG key (secret-free).
 		if sess.tier != "" {
 			fmt.Fprintf(os.Stderr, "  %-12s %s\n", "tier", connectTierLabel(sess.tier))
 		}
@@ -345,7 +360,7 @@ func renderConnect(sess *egressSession, verbose bool) {
 
 // connectTierLabel renders an honest, human label for the active tier (§5 framing):
 // WireGuard is a routed Whisper /128 over a userspace tunnel; socks5/anyip is the source-bound
-// egress. Never overclaims — the label matches what the transport actually is.
+// egress. Never overclaims - the label matches what the transport actually is.
 func connectTierLabel(tier string) string {
 	switch strings.ToLower(strings.TrimSpace(tier)) {
 	case "wireguard", "wg":
@@ -359,7 +374,7 @@ func connectTierLabel(tier string) string {
 
 // displayName pulls a friendly agent name from the op:connect result for the success
 // line (the canonical FQDN's first label, e.g. "scout" from "scout.agents.…"). Empty
-// when unknown — writeSuccessLine then falls back to the /128.
+// when unknown - writeSuccessLine then falls back to the /128.
 func displayName(res *client.Result) string {
 	recs := res.Records()
 	if len(recs) == 0 {

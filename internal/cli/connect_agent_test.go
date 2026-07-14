@@ -20,7 +20,7 @@ import (
 
 // TestResolveConnectAgent_NameResolvesToAddr covers the happy path: a bare display name
 // (case-insensitively, matching what `whisper list` shows) resolves to the agent's /128
-// via op:list, so op:connect — which only understands a /128 or an id — gets something
+// via op:list, so op:connect - which only understands a /128 or an id - gets something
 // it can actually use.
 func TestResolveConnectAgent_NameResolvesToAddr(t *testing.T) {
 	var seen []recordedCall
@@ -46,7 +46,7 @@ func TestResolveConnectAgent_NameResolvesToAddr(t *testing.T) {
 }
 
 // TestResolveConnectAgent_NoMatchClearError proves an unknown display name fails with a
-// CLEAR, actionable error naming the real candidates — never the control plane's opaque
+// CLEAR, actionable error naming the real candidates - never the control plane's opaque
 // "not found", and never a silent connect to the wrong (or a freshly-created) agent.
 func TestResolveConnectAgent_NoMatchClearError(t *testing.T) {
 	var seen []recordedCall
@@ -77,7 +77,7 @@ func TestResolveConnectAgent_NoMatchClearError(t *testing.T) {
 }
 
 // TestResolveConnectAgent_AddressPassesThroughNoRoundTrip proves a /128 selector is
-// never sent through op:list — the common persisted-default / --agent <addr> path pays
+// never sent through op:list - the common persisted-default / --agent <addr> path pays
 // NO extra round-trip. An unroutable control URL proves it: if resolveConnectAgent ever
 // called the control plane, this would error/hang instead of returning instantly.
 func TestResolveConnectAgent_AddressPassesThroughNoRoundTrip(t *testing.T) {
@@ -96,7 +96,7 @@ func TestResolveConnectAgent_AddressPassesThroughNoRoundTrip(t *testing.T) {
 }
 
 // TestResolveConnectAgent_EmptyPassesThrough covers the "no selector" case (the server's
-// reuse-most-recent default) — resolveConnectAgent must not touch the control plane.
+// reuse-most-recent default) - resolveConnectAgent must not touch the control plane.
 func TestResolveConnectAgent_EmptyPassesThrough(t *testing.T) {
 	c := client.New(client.Config{
 		ControlURL: "http://127.0.0.1:1",
@@ -110,7 +110,7 @@ func TestResolveConnectAgent_EmptyPassesThrough(t *testing.T) {
 }
 
 // TestResolveConnectAgent_ExactIDPassesThrough proves an agent id (not a display name)
-// still resolves correctly — the id/label/address exact-match rung keeps `--agent <id>`
+// still resolves correctly - the id/label/address exact-match rung keeps `--agent <id>`
 // working exactly as before, even for an agent that ALSO has a human label.
 func TestResolveConnectAgent_ExactIDPassesThrough(t *testing.T) {
 	srv := recordingServer(t, []agentChoice{{name: "scout", addr: "2a04:2a01:9::abcd"}}, nil)
@@ -128,7 +128,7 @@ func TestResolveConnectAgent_ExactIDPassesThrough(t *testing.T) {
 // --- Full command: `whisper connect --agent <display-name>` end-to-end ----------------
 
 // TestConnect_FullCommand_AgentDisplayName proves the full `whisper connect --agent
-// scout` path resolves the human name to the /128 and connects — the live symptom this
+// scout` path resolves the human name to the /128 and connects - the live symptom this
 // closes ("connect --agent scout" failing opaquely because the backend only understands
 // /128 or id).
 func TestConnect_FullCommand_AgentDisplayName(t *testing.T) {
@@ -164,7 +164,7 @@ func TestConnect_FullCommand_AgentDisplayName(t *testing.T) {
 
 // TestConnect_FullCommand_AgentDisplayNameNoMatch proves an unknown --agent name fails
 // with a clear, actionable error and NEVER reaches op:connect (no auto-create, no
-// fallback to the server default either — an explicit --agent that doesn't resolve must
+// fallback to the server default either - an explicit --agent that doesn't resolve must
 // not silently connect to some OTHER agent).
 func TestConnect_FullCommand_AgentDisplayNameNoMatch(t *testing.T) {
 	var seen []recordedCall
@@ -181,7 +181,7 @@ func TestConnect_FullCommand_AgentDisplayNameNoMatch(t *testing.T) {
 	cmd.SetArgs([]string{"--agent", "nope", "--agent-file", af})
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("connect --agent nope must error — no such agent")
+		t.Fatal("connect --agent nope must error - no such agent")
 	}
 	if !strings.Contains(err.Error(), "nope") || !strings.Contains(err.Error(), "scout") {
 		t.Fatalf("error must name the bad selector and the real candidate, got: %v", err)
@@ -195,8 +195,8 @@ func TestConnect_FullCommand_AgentDisplayNameNoMatch(t *testing.T) {
 
 // TestConnect_FullCommand_RowLevelFailureSurfacesRealDetail is the headline case: a
 // STALE persisted agent (op:connect's row-level failure) must surface the control
-// plane's SPECIFIC reason — even when that reason arrives as a bare string, the shape a
-// thin control-plane proxy can legitimately send — never the generic "control plane
+// plane's SPECIFIC reason - even when that reason arrives as a bare string, the shape a
+// thin control-plane proxy can legitimately send - never the generic "control plane
 // reported failure".
 func TestConnect_FullCommand_RowLevelFailureSurfacesRealDetail(t *testing.T) {
 	const staleAddr = "2a04:2a01:9::dead"
@@ -210,7 +210,7 @@ func TestConnect_FullCommand_RowLevelFailureSurfacesRealDetail(t *testing.T) {
 			// reason as a BARE STRING (not an RFC-7807 object).
 			_, _ = w.Write([]byte(`{"columns":["op","ok","status","result","error","retry_after"],
  "rows":[{"op":"connect","ok":false,"status":404,"result":null,"error":"agent ` + staleAddr + ` not found","retry_after":null}]}`))
-		default: // op:list — an existing fleet so connect skips the create-first path
+		default: // op:list - an existing fleet so connect skips the create-first path
 			_, _ = w.Write([]byte(listJSON([]agentChoice{{name: "scout", addr: "2a04:2a01:9::abcd"}})))
 		}
 	}))

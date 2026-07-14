@@ -1,11 +1,11 @@
 # whisper
 
-**Give your agent a real, routable Whisper IPv6 identity — one command.**
+**Give your agent a real, routable Whisper IPv6 identity - one command.**
 
 `whisper` is the command-line client for [Whisper](https://whisper.online): a single
 static binary that gives an agent a real, routable IPv6 `/128` on **AS219419**, wires
 egress so the agent's traffic sources *from* that address, and verifies it end-to-end.
-The address *is* the identity — DNSSEC-signed, DANE-pinned, and resolvable in public
+The address *is* the identity - DNSSEC-signed, DANE-pinned, and resolvable in public
 [RDAP](https://rdap.whisper.online). One binary, standard ports, no config to get
 started.
 
@@ -59,7 +59,7 @@ mise use -g "github:whisper-sec/whisper-cli[exe=whisper]"
 (asdf has no built-in GitHub-release backend, so on asdf use mise, or a community
 `ubi`-style plugin.)
 
-On Debian/Ubuntu (apt) — signed repo:
+On Debian/Ubuntu (apt) - signed repo:
 
 ```sh
 curl -fsSL https://get.whisper.online/whisper.gpg | sudo tee /usr/share/keyrings/whisper.gpg >/dev/null
@@ -67,7 +67,7 @@ echo "deb [signed-by=/usr/share/keyrings/whisper.gpg] https://get.whisper.online
 sudo apt update && sudo apt install whisper
 ```
 
-On Fedora/RHEL (dnf) — signed repo:
+On Fedora/RHEL (dnf) - signed repo:
 
 ```sh
 sudo tee /etc/yum.repos.d/whisper.repo >/dev/null <<'EOF'
@@ -81,7 +81,7 @@ EOF
 sudo dnf install whisper
 ```
 
-On Alpine (apk) — signed repo:
+On Alpine (apk) - signed repo:
 
 ```sh
 wget -qO /etc/apk/keys/whisper-apk.rsa.pub https://get.whisper.online/apk/whisper-apk.rsa.pub
@@ -98,7 +98,7 @@ Or download the binary for your platform from the
 executable, and put it on your `PATH`.
 
 > The installers (`scripts/install.sh`, `scripts/install.ps1`) are the exact scripts
-> `get.whisper.online` serves — published here so the whole install path is inspectable.
+> `get.whisper.online` serves - published here so the whole install path is inspectable.
 > They download `whisper-<os>-<arch>` (plus `.sha256` and `.asc`) from this repo's
 > releases; SHA-256 is a hard gate (a mismatch aborts the install), and the PGP check is
 > an extra layer. Point `WHISPER_CLI_BASE` at any mirror to override the source.
@@ -115,10 +115,10 @@ The public key is published at <https://as219419.net/>. To verify a binary you
 downloaded manually:
 
 ```sh
-# 1. SHA-256 — compare against the asset's .sha256 (and the release checksums.txt)
+# 1. SHA-256 - compare against the asset's .sha256 (and the release checksums.txt)
 sha256sum -c whisper-linux-amd64.sha256
 
-# 2. PGP — import the AS219419 key, then verify the detached signature
+# 2. PGP - import the AS219419 key, then verify the detached signature
 curl -fsSL https://as219419.net/whisper-release.asc | gpg --import
 gpg --verify whisper-linux-amd64.asc whisper-linux-amd64
 ```
@@ -143,7 +143,7 @@ whisper: connecting…
 Connected ✓
 ```
 
-Naming is mandatory — an agent's name is part of its identity, so the flow asks before
+Naming is mandatory - an agent's name is part of its identity, so the flow asks before
 it creates one. The same steps are scriptable:
 
 ```sh
@@ -158,14 +158,14 @@ whisper status             # key state, selected agent, connection state
 ```
 
 `whisper ip` is exit-code-first: `0` when the observed egress address is inside
-`2a04:2a01::/32` *and* equals your selected agent's `/128`, `1` otherwise — so scripts
+`2a04:2a01::/32` *and* equals your selected agent's `/128`, `1` otherwise - so scripts
 and agents can gate on it. Add `--json` to any command for the raw, scriptable envelope.
 
 **Per-project agent identity for Claude Code.** `whisper init claude` makes a project
-zero-config: run it once in a directory and Claude Code there — and every subagent it
-spawns — egresses from that project's own `/128`, over SOCKS5 (default) or `--tier
+zero-config: run it once in a directory and Claude Code there - and every subagent it
+spawns - egresses from that project's own `/128`, over SOCKS5 (default) or `--tier
 wireguard`. It pins the project's agent + tier in `.whisper/config`, wires a local proxy
-into `.claude/settings.local.json` (merge-safe — it never clobbers your settings), and
+into `.claude/settings.local.json` (merge-safe - it never clobbers your settings), and
 keeps the connection up via a small auto-reconnecting daemon. Different projects, different
 identities, nothing to remember. Pass `--agent <name|/128>` to reuse an existing agent or
 `--name <new>` to mint one.
@@ -178,7 +178,7 @@ dashboard), `whisper config`. Run `whisper <command> --help` for details.
 
 ## What you get
 
-- **A real, routable `/128`** out of `2a04:2a01::/32`, announced by **AS219419** — your
+- **A real, routable `/128`** out of `2a04:2a01::/32`, announced by **AS219419** - your
   own internet address, not a shared NAT pool.
 - **Identity that's verifiable from the outside.** Forward DNS is DNSSEC-signed and
   DANE-pinned; reverse DNS (`ip6.arpa` PTR) resolves to the agent; the assignment is
@@ -186,19 +186,19 @@ dashboard), `whisper config`. Run `whisper <command> --help` for details.
 - **Egress that binds your identity.** `whisper connect` provisions a local proxy whose
   traffic sources *from* your `/128`; `whisper ip` proves the source address is yours,
   node-free and with no third party in the loop. `--tier wireguard` brings the `/128` up
-  as a **routed** address over a userspace WireGuard tunnel (wireguard-go netstack — still
+  as a **routed** address over a userspace WireGuard tunnel (wireguard-go netstack - still
   no root, no kernel `wg`, no TUN device), fronted by the same local proxy so tools need
   no change.
-- **One binary, zero config.** Static, CGO-free, with an embedded CA bundle — it runs on
+- **One binary, zero config.** Static, CGO-free, with an embedded CA bundle - it runs on
   a bare host or a stripped container and just works.
 
 ---
 
 ## Use it from your code
 
-Same identity + egress from your language of choice — thin wrappers over this CLI:
+Same identity + egress from your language of choice - thin wrappers over this CLI:
 
-**Python** — `pip install whisper-id`
+**Python** - `pip install whisper-id`
 
 ```python
 from whisper_id import register, egress
@@ -207,7 +207,7 @@ with egress():                        # this block leaves from your /128
     requests.get("https://api64.ipify.org")
 ```
 
-**Node** — `npm i whisper-id`
+**Node** - `npm i whisper-id`
 
 ```js
 import { register, withEgress } from "whisper-id";
@@ -247,7 +247,7 @@ as the release assets):
 ./build-all.sh dist v1.0.0     # stamp a version into `whisper --version`
 ```
 
-`platforms.txt` is the single source of truth for the target matrix — shared by
+`platforms.txt` is the single source of truth for the target matrix - shared by
 `build-all.sh`, the release workflow, and the installers.
 
 ### Platforms
@@ -262,16 +262,16 @@ as the release assets):
 
 ## Links
 
-- **Whisper** — [whisper.online](https://whisper.online)
-- **Registry / NIC** — [nic.whisper.online](https://nic.whisper.online)
-- **RDAP** — [rdap.whisper.online](https://rdap.whisper.online)
-- **AS219419** (release-signing key, network info) — [as219419.net](https://as219419.net)
+- **Whisper** - [whisper.online](https://whisper.online)
+- **Registry / NIC** - [nic.whisper.online](https://nic.whisper.online)
+- **RDAP** - [rdap.whisper.online](https://rdap.whisper.online)
+- **AS219419** (release-signing key, network info) - [as219419.net](https://as219419.net)
 
 ---
 
 ## Contributing
 
-Issues and pull requests are welcome — see [CONTRIBUTING.md](CONTRIBUTING.md). Run
+Issues and pull requests are welcome - see [CONTRIBUTING.md](CONTRIBUTING.md). Run
 `go build ./...`, `go vet ./...`, `go test ./...`, and `gofmt -l .` before opening a PR.
 
 To report a security issue, see [SECURITY.md](SECURITY.md).

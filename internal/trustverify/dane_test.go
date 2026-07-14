@@ -128,11 +128,11 @@ func TestCheckDANEEE_MultiPin_PassesRegardlessOfRRSetOrder(t *testing.T) {
 	other := TLSAPin{SHA256: otherDigest[:]}
 	servedPin := TLSAPin{SHA256: served[:]}
 
-	// Order 1: [old, new] — the served leaf matches the SECOND pin.
+	// Order 1: [old, new] - the served leaf matches the SECOND pin.
 	if err := CheckDANEEE(cert, []TLSAPin{other, servedPin}, addr, testFQDN); err != nil {
 		t.Fatalf("expected PASS matching the second pin, got %v", err)
 	}
-	// Order 2: [new, old] — the served leaf matches the FIRST pin. RRset order must not matter.
+	// Order 2: [new, old] - the served leaf matches the FIRST pin. RRset order must not matter.
 	if err := CheckDANEEE(cert, []TLSAPin{servedPin, other}, addr, testFQDN); err != nil {
 		t.Fatalf("expected PASS matching the first pin (order-independent), got %v", err)
 	}
