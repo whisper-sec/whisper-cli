@@ -4,6 +4,7 @@
 package client
 
 import (
+	"bytes"
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
@@ -29,7 +30,88 @@ type LedgerCheckpoint struct {
 	Root     []byte // 32-byte Merkle root
 	KeyID    uint32 // the signed-note key-id from the signature line (0 if unsigned)
 	Sig      []byte // the 64-byte Ed25519 signature (nil if unsigned)
-	body     []byte // the exact note-body bytes the signature is over
+	// Cosigs are the C2SP cosignature/v1 witness lines appended to the note: each is a
+	// "- <name> <b64(keyId[4]||time[8]||sig[64])>" line - 76-byte blobs, distinct from the
+	// 68-byte log-signature blob, so the two can never be confused.
+	Cosigs []LedgerCosignature
+	body   []byte // the exact note-body bytes the signature is over
+}
+
+// LedgerCosignature is one parsed C2SP cosignature/v1 line: the witness name, its 4-byte
+// cosignature key-id, the unix-seconds timestamp, and the 64-byte Ed25519 signature over
+// "cosignature/v1\ntime <ts>\n" + note body.
+type LedgerCosignature struct {
+	Name      string
+	KeyID     uint32
+	Timestamp uint64 // unix seconds (the "time" line of the signed message)
+	Sig       []byte // 64-byte Ed25519 signature
+}
+
+// WitnessPolicy is the published witness-key set from GET /witness/keys: the
+// verifier-pinnable trusted witnesses, the k-of-n threshold, the freshness bound, and the
+// server's own claim (a CROSS-CHECK only - the CLI always recomputes the verification).
+type WitnessPolicy struct {
+	Object             string         `json:"object"`
+	Threshold          int            `json:"threshold"`
+	Claim              string         `json:"claim"`
+	PubliclyVerifiable bool           `json:"publicly_verifiable"` // server's view - never trusted blindly
+	MaxAgeSeconds      int64          `json:"publicly_verifiable_max_age_seconds"`
+	Witnesses          []WitnessEntry `json:"witnesses"`
+}
+
+// WitnessEntry is one published witness: name, cosignature key-id (hex), raw Ed25519 public
+// key (base64), and whether it is genuinely independent (vs the availability cross-check).
+type WitnessEntry struct {
+	Name        string `json:"name"`
+	KeyID       string `json:"key_id"`     // 8 hex chars (the 0x04 cosignature flavour)
+	PublicKey   string `json:"public_key"` // base64 of the raw 32-byte Ed25519 key
+	SPKI        string `json:"public_key_spki"`
+	Independent bool   `json:"independent"`
+	Role        string `json:"role"`
+}
+
+// ed25519SPKIPrefix is the 12-byte DER prefix of an Ed25519 X.509 SubjectPublicKeyInfo -
+// accepting the /witness/keys public_key_spki form as a pin too (liberal accept).
+var ed25519SPKIPrefix = []byte{0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00}
+
+// ParseWitnessKeyPin decodes an OUT-OF-BAND pinned witness public key: the raw
+// 32-byte Ed25519 key as base64 (the /witness/keys public_key form), the 44-byte X.509
+// SubjectPublicKeyInfo as base64 (the public_key_spki form), or 64 hex chars - whichever
+// the operator was handed (Postel: liberal accept). Returns the raw 32-byte key.
+func ParseWitnessKeyPin(s string) ([]byte, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return nil, fmt.Errorf("empty witness key pin")
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		if len(b) == ed25519.PublicKeySize {
+			return b, nil
+		}
+		if len(b) == len(ed25519SPKIPrefix)+ed25519.PublicKeySize && bytes.HasPrefix(b, ed25519SPKIPrefix) {
+			return b[len(ed25519SPKIPrefix):], nil // the SPKI form - strip the DER prefix
+		}
+	}
+	if b, err := hex.DecodeString(strings.TrimPrefix(s, "0x")); err == nil && len(b) == ed25519.PublicKeySize {
+		return b, nil
+	}
+	return nil, fmt.Errorf("witness key pin %q is not a 32-byte Ed25519 public key (base64 raw, base64 SPKI, or hex)", s)
+}
+
+// PinnedWitnessPolicy builds a WitnessPolicy from OUT-OF-BAND pinned witness keys:
+// each pin is independent BY THE VERIFIER'S OWN DECISION - the server-published policy is
+// not consulted at all, so the "publicly verifiable" verdict no longer trusts the origin
+// for the key set. maxAgeSeconds <= 0 falls back to the 24h default.
+func PinnedWitnessPolicy(pins [][]byte, maxAgeSeconds int64) *WitnessPolicy {
+	p := &WitnessPolicy{Object: "pinned-witness-policy", Threshold: 1, MaxAgeSeconds: maxAgeSeconds}
+	for i, pin := range pins {
+		p.Witnesses = append(p.Witnesses, WitnessEntry{
+			Name:        fmt.Sprintf("pinned-key-%d", i+1),
+			PublicKey:   base64.StdEncoding.EncodeToString(pin),
+			Independent: true, // pinned out-of-band = independent by the verifier's own choice
+			Role:        "pinned",
+		})
+	}
+	return p
 }
 
 // LedgerKey is the published log verification key from GET /checkpoint/key.
@@ -78,6 +160,26 @@ func (c *Client) FetchLedgerKey(ctx context.Context) (*LedgerKey, error) {
 		return nil, fmt.Errorf("the ledger key reply was not JSON: %w", err)
 	}
 	return &k, nil
+}
+
+// FetchWitnessKeys downloads the published witness policy from <gateway>/witness/keys
+// A 404 means witnessing is simply not enabled on the node - callers treat that as
+// "no witness policy" (the honest tamper-evident posture), never an error to surface.
+func (c *Client) FetchWitnessKeys(ctx context.Context) (*WitnessPolicy, error) {
+	base := strings.TrimRight(c.rdapURL, "/")
+	body, status, err := c.ledgerGet(ctx, base+"/witness/keys")
+	if err != nil {
+		return nil, err
+	}
+	if status != 200 {
+		return nil, &ProblemError{Status: status, Title: "no witness policy",
+			Detail: fmt.Sprintf("the witness policy is not available at %s/witness/keys (HTTP %d)", base, status)}
+	}
+	var p WitnessPolicy
+	if err := json.Unmarshal(body, &p); err != nil {
+		return nil, fmt.Errorf("the witness policy reply was not JSON: %w", err)
+	}
+	return &p, nil
 }
 
 // FetchInclusion downloads the inclusion data for addr from /ip/<addr>/transparency and
@@ -183,26 +285,111 @@ func ParseCheckpointNote(note string) (*LedgerCheckpoint, error) {
 		return nil, fmt.Errorf("checkpoint root is not a 32-byte base64 hash")
 	}
 	cp := &LedgerCheckpoint{Note: note, Origin: lines[0], TreeSize: size, Root: root, body: []byte(body)}
-	// Parse the signature line if present.
+	// Parse the signature lines if present: the log's own 68-byte (keyId[4]||sig[64]) line plus,
+	// any 76-byte (keyId[4]||time[8]||sig[64]) C2SP cosignature/v1 witness lines. The blob
+	// width discriminates the two - a malformed line is simply skipped (Postel).
 	if sep >= 0 {
-		rest := note[sep+2:] // skip the "\n\n"
-		nl := strings.IndexByte(rest, '\n')
-		sigLine := rest
-		if nl >= 0 {
-			sigLine = rest[:nl]
-		}
-		if strings.HasPrefix(sigLine, sigPrefix) {
+		for _, sigLine := range strings.Split(note[sep+2:], "\n") { // skip the "\n\n"
+			if !strings.HasPrefix(sigLine, sigPrefix) {
+				continue
+			}
 			after := sigLine[len(sigPrefix):]
-			if sp := strings.IndexByte(after, ' '); sp >= 0 {
-				blob, err := base64.StdEncoding.DecodeString(strings.TrimSpace(after[sp+1:]))
-				if err == nil && len(blob) == 4+ed25519.SignatureSize {
-					cp.KeyID = uint32(blob[0])<<24 | uint32(blob[1])<<16 | uint32(blob[2])<<8 | uint32(blob[3])
+			sp := strings.IndexByte(after, ' ')
+			if sp < 0 {
+				continue
+			}
+			name := after[:sp]
+			blob, err := base64.StdEncoding.DecodeString(strings.TrimSpace(after[sp+1:]))
+			if err != nil {
+				continue
+			}
+			switch len(blob) {
+			case 4 + ed25519.SignatureSize: // the log's own signature (the FIRST one wins)
+				if cp.Sig == nil {
+					cp.KeyID = binaryBigEndianUint32(blob[:4])
 					cp.Sig = blob[4:]
 				}
+			case 4 + 8 + ed25519.SignatureSize: // a witness cosignature
+				cp.Cosigs = append(cp.Cosigs, LedgerCosignature{
+					Name:      name,
+					KeyID:     binaryBigEndianUint32(blob[:4]),
+					Timestamp: binaryBigEndianUint64(blob[4:12]),
+					Sig:       blob[12:],
+				})
 			}
 		}
 	}
 	return cp, nil
+}
+
+func binaryBigEndianUint32(b []byte) uint32 {
+	return uint32(b[0])<<24 | uint32(b[1])<<16 | uint32(b[2])<<8 | uint32(b[3])
+}
+
+func binaryBigEndianUint64(b []byte) uint64 {
+	var v uint64
+	for _, x := range b {
+		v = v<<8 | uint64(x)
+	}
+	return v
+}
+
+// CosignatureMessage recomputes the EXACT C2SP cosignature/v1 byte string a witness signed
+// over this checkpoint at ts: "cosignature/v1\ntime <ts>\n" + the note body (which already
+// includes its trailing '\n'). A verifier re-derives this and checks Ed25519 over it.
+func (cp *LedgerCheckpoint) CosignatureMessage(ts uint64) []byte {
+	msg := []byte("cosignature/v1\ntime " + strconv.FormatUint(ts, 10) + "\n")
+	return append(msg, cp.body...)
+}
+
+// maxForwardSkewSeconds bounds the FORWARD clock skew tolerated on a cosignature timestamp:
+// up to 5 minutes in the future still counts as fresh (a slightly-slow local clock must never
+// over-revoke), anything further ahead does not - an unbounded future timestamp would keep
+// the publicly-verifiable verdict alive indefinitely on a frozen tree, defeating the
+// self-revocation guarantee. Mirrors the server's forward-skew bound exactly, so the served
+// claim and the CLI verdict stay in lockstep.
+const maxForwardSkewSeconds = 300
+
+// VerifyIndependentCosignatures counts the DISTINCT independent witnesses from the published
+// policy whose cosignature on THIS checkpoint cryptographically verifies AND is fresh
+// (-maxForwardSkew <= now-ts <= maxAge). This is the cryptographic publicly-verifiable check
+// the CLI recomputes everything with stock crypto - the endpoint's own
+// publicly_verifiable bool is never trusted, only cross-checked. Availability-only
+// (independent=false) witnesses never count; a stale, far-future-dated, tampered, or
+// wrong-key cosignature never counts.
+func (cp *LedgerCheckpoint) VerifyIndependentCosignatures(policy *WitnessPolicy, now int64) int {
+	if policy == nil || len(cp.Cosigs) == 0 {
+		return 0
+	}
+	maxAge := policy.MaxAgeSeconds
+	if maxAge <= 0 {
+		maxAge = 86400 // liberal accept: an absent/zero bound falls back to the 24h default
+	}
+	count := 0
+	for _, w := range policy.Witnesses {
+		if !w.Independent {
+			continue // the ns1<->ns2 availability cross-check can NEVER make it publicly verifiable
+		}
+		raw, err := base64.StdEncoding.DecodeString(w.PublicKey)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			continue
+		}
+		pub := ed25519.PublicKey(raw)
+		for _, c := range cp.Cosigs {
+			if !ed25519.Verify(pub, cp.CosignatureMessage(c.Timestamp), c.Sig) {
+				continue // not this witness's cosignature (or tampered)
+			}
+			// FRESH: within the policy's freshness bound, and at most a small tolerance in the
+			// future (a slow local clock never over-revokes; an unbounded future timestamp must
+			// never defeat self-revocation).
+			age := now - int64(c.Timestamp)
+			if age <= maxAge && age >= -maxForwardSkewSeconds {
+				count++
+				break // distinct witnesses only - one cosignature per witness counts
+			}
+		}
+	}
+	return count
 }
 
 // VerifySignature checks the checkpoint's Ed25519 signature over the note body against the

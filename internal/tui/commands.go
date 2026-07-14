@@ -157,6 +157,30 @@ func loadMonitorPoll(c *client.Client, agent, from string) tea.Cmd {
 	}
 }
 
+// lgASNCypher resolves a peer IP's origin network in one anchored round-trip:
+// ip -[]-> announced/registered prefix -[]- ASN, plus the ASN's organisation name.
+// Validated against the live graph (AS13335 / "Cloudflare, Inc." for 162.159.140.245).
+// $-parameter bound server-side; a value never touches the query text.
+const lgASNCypher = "MATCH (n {name:$v})-[]->(p)-[]-(m:ASN) " +
+	"WHERE p:ANNOUNCED_PREFIX OR p:PREFIX OR p:REGISTERED_PREFIX " +
+	"WITH m LIMIT 1 OPTIONAL MATCH (m)-[]-(o:ORGANIZATION) " +
+	"RETURN m.name AS asn, o.name AS org LIMIT 1"
+
+// lgEnrichASN looks up one peer IP's origin ASN for the live agent graph. Fail-open:
+// any error or empty result folds as an honest miss (cached, never re-asked) so the
+// graph keeps growing regardless of the enrichment path's health.
+func lgEnrichASN(c *client.Client, ip string) tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+		defer cancel()
+		rows, _, err := c.GraphQueryRows(ctx, lgASNCypher, map[string]any{"v": ip})
+		if err != nil || len(rows) == 0 {
+			return lgAsnMsg{ip: ip}
+		}
+		return lgAsnMsg{ip: ip, asn: asStr(rows[0]["asn"]), org: asStr(rows[0]["org"])}
+	}
+}
+
 // loadPolicy reads the current policy back (op:policy with no args).
 func loadPolicy(c *client.Client) tea.Cmd {
 	return func() tea.Msg {

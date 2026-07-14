@@ -30,6 +30,11 @@ func (a *App) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q":
 		return a.quit()
 	case ":", "ctrl+p", "ctrl+k":
+		// In EXPLORE, ':' opens the raw-Cypher REPL (spec keymap); the palette stays
+		// reachable via ⌃P / ⌃K everywhere, so nothing is lost.
+		if a.mode == modeExplore && k.String() == ":" {
+			return a.exploreVw.handleKey(k)
+		}
 		a.openPalette()
 		return a, nil
 	case "?":
@@ -43,7 +48,7 @@ func (a *App) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		a.mode = mode((int(a.mode) - 1 + len(modeNames)) % len(modeNames))
 		a.layout()
 		return a, a.onEnterMode()
-	case "1", "2", "3", "4", "5":
+	case "1", "2", "3", "4", "5", "6":
 		a.mode = mode(int(k.String()[0] - '1'))
 		a.layout()
 		return a, a.onEnterMode()
@@ -72,14 +77,16 @@ func (a *App) routeToView(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch a.mode {
 	case modeAgents:
 		return a.agentsView.handleKey(k)
-	case modeMonitor:
-		return a.monitorVw.handleKey(k)
+	case modeGraph:
+		return a.graphVw.handleKey(k)
 	case modeLogs:
 		return a.logsView.handleKey(k)
 	case modePolicy:
 		return a.policyView.handleKey(k)
 	case modeConfig:
 		return a.configView.handleKey(k)
+	case modeExplore:
+		return a.exploreVw.handleKey(k)
 	}
 	return a, nil
 }
@@ -94,6 +101,10 @@ func (a *App) viewCapturesInput() bool {
 		return a.logsView.capturing()
 	case modePolicy:
 		return a.policyView.capturing()
+	case modeExplore:
+		// A JUMP / CATALOG / REPL overlay is open: keys are text/list input, so the
+		// single-letter global shortcuts must not steal them (same as the LOGS filter).
+		return a.exploreVw.ov != ovNone
 	}
 	return false
 }
@@ -101,14 +112,16 @@ func (a *App) viewCapturesInput() bool {
 // onEnterMode lazily loads data for the view we just switched to.
 func (a *App) onEnterMode() tea.Cmd {
 	switch a.mode {
+	case modeAgents:
+		return a.monitorVw.onEnter() // the merged dashboard: (re-)seed the monitor backfill
 	case modeLogs:
 		return a.logsView.onEnter()
 	case modePolicy:
 		if !a.policyView.loaded {
 			return loadPolicy(a.client)
 		}
-	case modeMonitor:
-		return a.monitorVw.onEnter()
+	case modeExplore:
+		return a.exploreVw.onEnter()
 	}
 	return nil
 }
@@ -120,6 +133,9 @@ func (a *App) viewReloadCmd() tea.Cmd {
 		return a.logsView.runQuery()
 	case modePolicy:
 		return loadPolicy(a.client)
+	case modeExplore:
+		// Re-land the focus live: the outage banner's "Ctrl-R to retry".
+		return a.exploreVw.reload()
 	}
 	return nil
 }
@@ -130,6 +146,7 @@ func (a *App) cycleTheme() {
 	a.th = theme.New(next, a.opts.NoColor, a.opts.Light)
 	a.opts.ThemeName = next
 	a.agentsView.retheme()
+	a.exploreVw.retheme()
 	a.setToast("theme: "+string(next), false)
 }
 
@@ -140,8 +157,9 @@ func (a *App) quit() (tea.Model, tea.Cmd) {
 	return a, tea.Quit
 }
 
-// handleMouse supports click-to-select (rows), click-tabs, and wheel scroll. Keyboard
-// is always fully sufficient; the mouse is a convenience (accessibility).
+// handleMouse supports click-to-select (a fleet-row click pins the monitor, same verb
+// as ENTER), click-tabs, and wheel scroll. Keyboard is always fully sufficient; the
+// mouse is a convenience (accessibility).
 func (a *App) handleMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if a.overlay != overlayNone {
 		return a, nil
@@ -162,6 +180,12 @@ func (a *App) handleMouse(m tea.MouseMsg) (tea.Model, tea.Cmd) {
 					return a, a.onEnterMode()
 				}
 			}
+			// A click on a fleet row selects the agent AND pins the monitor to it.
+			if a.mode == modeAgents {
+				if cmd, ok := a.agentsView.click(m.X, m.Y); ok {
+					return a, cmd
+				}
+			}
 		}
 	}
 	return a, nil
@@ -172,10 +196,10 @@ func (a *App) routeWheel(delta int) (tea.Model, tea.Cmd) {
 	case modeAgents:
 		a.agentsView.move(delta)
 		return a, a.refreshSelectedDetail()
+	case modeGraph:
+		a.graphVw.scroll(delta)
 	case modeLogs:
 		a.logsView.move(delta)
-	case modeMonitor:
-		a.monitorVw.scroll(delta)
 	}
 	return a, nil
 }

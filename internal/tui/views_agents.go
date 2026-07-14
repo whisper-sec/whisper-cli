@@ -30,11 +30,18 @@ const (
 
 var sortKeyNames = []string{"created", "name", "state", "traffic"}
 
-// agentsView is the AGENTS dashboard's left fleet table + the right detail panel.
+// agentsView is the merged primary dashboard: the fleet table on the left, the
+// SELECTED agent's live monitor (aggregate counters, throughput, activity feed) on the
+// right. ENTER (or a click) on an agent pins the monitor to it; `d` opens details.
+//
+// The table is WINDOWED by this view, not scrolled inside bubbles: the table always
+// holds exactly the visible slice of rows (v.top..v.top+visRows), so a mouse click on
+// row r maps to index v.top+r with no hidden viewport offset to guess at.
 type agentsView struct {
 	app   *App
 	tbl   table.Model
 	w, h  int
+	top   int  // first visible position into orderedIndices()
 	dense bool // z toggles a denser (no-created-column) layout
 
 	// filter (/) state
@@ -73,11 +80,26 @@ func (v *agentsView) styleTable() {
 
 func (v *agentsView) retheme() { v.styleTable() }
 
-// leftW/rightW split the view width into the fleet panel and the detail panel - the
-// ONE width budget every layer below derives from (panel → padding → table → columns),
-// so no inner layer can render wider than its box and push the detail panel off-screen
-// the old table width exceeded the panel content area by 3 columns).
-func (v *agentsView) leftW() int  { return v.w/2 - 1 }
+// leftW/rightW split the view width: the fleet panel takes ~40% (clamped so the dense
+// table still fits and the monitor keeps usable chain lanes) and the monitor the rest.
+// This is the ONE width budget every layer below derives from (panel -> padding ->
+// table -> columns), so no inner layer can render wider than its box.
+func (v *agentsView) leftW() int {
+	lw := v.w * 2 / 5
+	if lw < 30 {
+		lw = 30
+	}
+	if lw > 56 {
+		lw = 56
+	}
+	if lw > v.w-24 { // a very narrow terminal: keep SOME monitor
+		lw = v.w - 24
+	}
+	if lw < 20 {
+		lw = 20
+	}
+	return lw
+}
 func (v *agentsView) rightW() int { return v.w - v.leftW() - 1 }
 
 // tableW is the fleet table's exact render width: the left panel minus its border (2)
@@ -88,6 +110,16 @@ func (v *agentsView) tableW() int {
 		tw = 26
 	}
 	return tw
+}
+
+// visRows is how many fleet rows fit the table: the view height minus the panel border
+// (2), the table header (1), and the header's bottom border baked into table height.
+func (v *agentsView) visRows() int {
+	vr := v.h - 4
+	if vr < 1 {
+		vr = 1
+	}
+	return vr
 }
 
 // autoDense reports whether the table is too narrow for the 4-column layout - the
@@ -129,27 +161,61 @@ func (v *agentsView) resize(w, h int) {
 	// rebuild them to the new shape.
 	v.tbl.SetRows(nil)
 	v.tbl.SetColumns(v.columns(v.tableW()))
-	// table height: minus header + borders.
+	// table height: header + the visible row window.
 	th := h - 3
-	if th < 1 {
-		th = 1
+	if th < 2 {
+		th = 2
 	}
 	v.tbl.SetHeight(th)
 	v.tbl.SetWidth(v.tableW())
 	v.syncRows()
 }
 
-// syncRows rebuilds the table rows from the app fleet (after a load/merge/sort/filter).
+// syncRows rebuilds the visible table window from the app fleet (after a load/merge/
+// sort/filter/selection move). It clamps v.top so the selection is always in view and
+// hands bubbles exactly the visible slice, cursor-aligned - never a scrolled viewport.
 func (v *agentsView) syncRows() {
 	order := v.orderedIndices()
-	rows := make([]table.Row, 0, len(order))
-	for _, idx := range order {
-		a := v.app.agents[idx]
-		rows = append(rows, v.row(a))
+	pos := v.selectedPos(order)
+	vr := v.visRows()
+	// Clamp the window to keep pos visible and the window inside the list.
+	if pos >= 0 && pos < v.top {
+		v.top = pos
+	}
+	if pos >= v.top+vr {
+		v.top = pos - vr + 1
+	}
+	if v.top > len(order)-vr {
+		v.top = len(order) - vr
+	}
+	if v.top < 0 {
+		v.top = 0
+	}
+	end := v.top + vr
+	if end > len(order) {
+		end = len(order)
+	}
+	rows := make([]table.Row, 0, end-v.top)
+	for _, idx := range order[v.top:end] {
+		rows = append(rows, v.row(v.app.agents[idx]))
 	}
 	v.tbl.SetRows(rows)
-	// Keep the table cursor aligned with app.selected.
-	v.alignCursor(order)
+	if pos >= v.top && pos < end {
+		v.tbl.SetCursor(pos - v.top)
+	} else if len(rows) > 0 {
+		v.tbl.SetCursor(0)
+		v.app.selected = order[v.top]
+	}
+}
+
+// selectedPos finds app.selected's position in the current order (-1 when absent).
+func (v *agentsView) selectedPos(order []int) int {
+	for pos, idx := range order {
+		if idx == v.app.selected {
+			return pos
+		}
+	}
+	return -1
 }
 
 func (v *agentsView) row(a model.Agent) table.Row {
@@ -195,20 +261,8 @@ func (v *agentsView) orderedIndices() []int {
 	return idxs
 }
 
-func (v *agentsView) alignCursor(order []int) {
-	for pos, idx := range order {
-		if idx == v.app.selected {
-			v.tbl.SetCursor(pos)
-			return
-		}
-	}
-	if len(order) > 0 {
-		v.tbl.SetCursor(0)
-		v.app.selected = order[0]
-	}
-}
-
-// handleKey drives the fleet: vim motion, sort, density, filter, and the action keys.
+// handleKey drives the merged dashboard: vim motion, sort, density, filter, the write
+// actions, and THE key - ENTER pins the live monitor to the selected agent.
 func (v *agentsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	app := v.app
 	if v.filtering {
@@ -222,18 +276,16 @@ func (v *agentsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.move(-1)
 		return app, app.refreshSelectedDetail()
 	case "g", "home":
-		v.tbl.GotoTop()
-		v.syncSelectionFromCursor()
+		v.moveTo(0)
 		return app, app.refreshSelectedDetail()
 	case "G", "end":
-		v.tbl.GotoBottom()
-		v.syncSelectionFromCursor()
+		v.moveTo(len(v.orderedIndices()) - 1)
 		return app, app.refreshSelectedDetail()
 	case "ctrl+d":
-		v.move(v.h / 2)
+		v.move(v.visRows() / 2)
 		return app, app.refreshSelectedDetail()
 	case "ctrl+u":
-		v.move(-v.h / 2)
+		v.move(-v.visRows() / 2)
 		return app, app.refreshSelectedDetail()
 	case "/":
 		v.filtering = true
@@ -257,20 +309,32 @@ func (v *agentsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.tbl.SetColumns(v.columns(v.tableW()))
 		v.syncRows()
 		return app, nil
-	case "enter":
+	case "enter", "m":
+		// ENTER is THE key: select the agent and pin the live monitor to it (narrows
+		// the SSE + backfills for that one /128). `m` stays as the muscle-memory alias.
+		return v.watchSelected()
+	case "a":
+		// back to the whole tenant (un-narrow the stream).
+		if cmd := app.monitorVw.unfocus(); cmd != nil {
+			app.setToast("watching the whole tenant", false)
+			return app, cmd
+		}
+		return app, nil
+	case "d":
+		// details moved here: ENTER now selects-and-monitors, d drills.
 		return app.openDrill()
+	case " ", "space":
+		app.paused = !app.paused
+		if !app.paused {
+			app.bufferedPause = 0
+		}
+		app.setToast(map[bool]string{true: "feed paused", false: "feed resumed"}[app.paused], false)
+		return app, nil
+	case "f":
+		app.setToast("kind filter: "+app.monitorVw.cycleKind(), false)
+		return app, nil
 	case "x":
 		return app.openKill()
-	case "m":
-		// monitor the selected agent: jump to MONITOR focused on it (narrows the SSE +
-		// backfills for that one /128).
-		var focusCmd tea.Cmd
-		if sel, ok := app.SelectedAgent(); ok {
-			focusCmd = app.monitorVw.focus(sel)
-		}
-		app.mode = modeMonitor
-		app.layout()
-		return app, tea.Batch(app.onEnterMode(), focusCmd)
 	case "v":
 		return app.openRDAP()
 	case "y":
@@ -282,6 +346,45 @@ func (v *agentsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return app, nil
 	}
 	return app, nil
+}
+
+// watchSelected pins the live monitor to the selected agent (the ENTER / click action).
+func (v *agentsView) watchSelected() (tea.Model, tea.Cmd) {
+	app := v.app
+	sel, ok := app.SelectedAgent()
+	if !ok {
+		app.setToast("no agent selected", true)
+		return app, nil
+	}
+	cmd := app.monitorVw.focus(sel)
+	if cmd != nil {
+		app.setToast("watching "+sel.Name(), false)
+	}
+	return app, cmd
+}
+
+// click maps a terminal-cell click to a fleet row: selects it AND pins the monitor to
+// it (the mouse is the same verb as ENTER). Returns ok=false when the click was not on
+// a fleet row. Geometry: header(1) + tabs(1) + panel border(1) + table header(1) = the
+// first row sits at y=4; the visible row r maps EXACTLY to position v.top+r because
+// the table holds only the visible window (never an internal scroll offset).
+func (v *agentsView) click(x, y int) (tea.Cmd, bool) {
+	if x >= v.leftW() {
+		return nil, false
+	}
+	row := y - (headerRows + tabRows + 2)
+	if row < 0 || row >= v.visRows() {
+		return nil, false
+	}
+	order := v.orderedIndices()
+	pos := v.top + row
+	if pos < 0 || pos >= len(order) {
+		return nil, false
+	}
+	v.app.selected = order[pos]
+	v.syncRows()
+	_, cmd := v.watchSelected()
+	return tea.Batch(cmd, v.app.refreshSelectedDetail()), true
 }
 
 func (v *agentsView) handleFilterKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -332,38 +435,38 @@ func (v *agentsView) clearFilter() {
 	v.syncRows()
 }
 
+// move shifts the selection by delta within the current order (clamped).
 func (v *agentsView) move(delta int) {
-	switch {
-	case delta > 0:
-		for i := 0; i < delta; i++ {
-			v.tbl.MoveDown(1)
-		}
-	case delta < 0:
-		for i := 0; i < -delta; i++ {
-			v.tbl.MoveUp(1)
-		}
-	}
-	v.syncSelectionFromCursor()
-}
-
-// syncSelectionFromCursor maps the table cursor back to an app.agents index.
-func (v *agentsView) syncSelectionFromCursor() {
 	order := v.orderedIndices()
-	c := v.tbl.Cursor()
-	if c >= 0 && c < len(order) {
-		v.app.selected = order[c]
+	if len(order) == 0 {
+		return
 	}
+	pos := v.selectedPos(order)
+	if pos < 0 {
+		pos = 0
+	}
+	v.moveTo(pos + delta)
 }
 
-// view renders the fleet table (left) + the selected-agent detail (right).
+// moveTo selects the row at a position in the current order (clamped) and re-windows.
+func (v *agentsView) moveTo(pos int) {
+	order := v.orderedIndices()
+	if len(order) == 0 {
+		return
+	}
+	pos = clamp(pos, 0, len(order)-1)
+	v.app.selected = order[pos]
+	v.syncRows()
+}
+
+// view renders the merged dashboard: the fleet table (left) + the live monitor for the
+// selected agent (right) - one panel, one picture.
 func (v *agentsView) view(w, h int) string {
 	leftW, rightW := v.leftW(), v.rightW()
 	left := v.app.titledPanelStyled(
 		v.app.th.PanelHi.Width(leftW-2).Height(h-2).Render(v.tbl.View()),
 		v.fleetTitle(), leftW, v.app.th.BorderHiFg)
-	right := v.app.titledPanel(
-		v.app.th.Panel.Width(rightW-2).Height(h-2).Render(v.detail(rightW-4, h-2)),
-		"DETAIL", rightW)
+	right := v.app.monitorVw.panel(rightW, h)
 	return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
 }
 
@@ -379,67 +482,6 @@ func (v *agentsView) fleetTitle() string {
 		t += "  /" + v.filter
 	}
 	return t
-}
-
-// detail renders the selected agent's full panel (op:agent counters + sparklines).
-func (v *agentsView) detail(w, h int) string {
-	a, ok := v.app.SelectedAgent()
-	if !ok {
-		return v.app.th.Dim.Render("no agent selected")
-	}
-	th := v.app.th
-	var b strings.Builder
-	addr := a.Address
-	if addr == "" {
-		addr = "(no /128 yet)"
-	}
-	// Head line: name + /128 + state. Shorten the address rather than let the line
-	// wrap and shove the whole panel down a row.
-	head := th.Accent.Render(a.Name()) + "  " + th.Addr.Render(addr) + "  " + stateBadge(th, a.State)
-	if lipgloss.Width(head) > w {
-		head = th.Accent.Render(a.Name()) + "  " + th.Addr.Render(components.ShortAddr(addr, 16, 9)) + "  " + stateBadge(th, a.State)
-	}
-	b.WriteString(head + "\n")
-	b.WriteString(th.Dim.Render(strings.Repeat("─", min(w, 50))) + "\n")
-
-	if a.Detailed {
-		blk := fmt.Sprintf("%d (%.1f%%)", a.DNSBlocked, a.BlockedPct())
-		spark := components.Sparkline(v.app.monitorVw.kbpsSeries(a.Key(), 20), 20, th.NoColor)
-		b.WriteString(fmt.Sprintf("%s  %s  %s %s\n",
-			th.DNS.Render("dns "), th.Text.Render(components.Count(a.DNSQueries)),
-			th.Dim.Render("blocked"), th.Error.Render(blk)))
-		b.WriteString(fmt.Sprintf("%s %s active · %s total  %s\n",
-			th.Conn.Render("conn"), th.Text.Render(components.Count(a.ConnectionsActive)),
-			th.Text.Render(components.Count(a.ConnectionsTotal)), th.Conn.Render(spark)))
-		b.WriteString(fmt.Sprintf("%s ↑%s  ↓%s   %s %s\n",
-			th.Dim.Render("bw  "), components.Bytes(a.BytesUp), components.Bytes(a.BytesDown),
-			th.Dim.Render("pkts"), components.Count(a.Packets)))
-	} else {
-		b.WriteString(th.Dim.Render("loading counters…") + "\n")
-	}
-	if a.FQDN != "" {
-		b.WriteString(th.Dim.Render("fqdn ") + th.Text.Render(components.TrimDot(a.FQDN)) + "\n")
-	}
-	ptr := "-"
-	if a.PTR != "" {
-		ptr = "✓"
-	}
-	contact := a.Contact
-	if contact == "" {
-		contact = th.Dim.Render("(none)")
-	}
-	b.WriteString(fmt.Sprintf("%s %s   %s %s   %s\n",
-		th.Dim.Render("ptr"), ptr, th.Dim.Render("contact"), contact, th.Accent.Render("RDAP ↗")))
-	if a.Created != 0 {
-		b.WriteString(th.Dim.Render("allocated ") + th.Text.Render(components.Uptime(a.Created)+" ago") + "\n")
-	}
-	// Every line fits the panel width - a long fqdn/contact must truncate (ANSI-safe),
-	// never wrap and shove the panel taller than its box. ↵ drill has the full value.
-	lines := strings.Split(b.String(), "\n")
-	for i := range lines {
-		lines[i] = truncate(lines[i], w)
-	}
-	return clampLines(strings.Join(lines, "\n"), h)
 }
 
 // --- small helpers ---------------------------------------------------------------

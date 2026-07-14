@@ -95,3 +95,11 @@ type pollFireMsg struct {
 // streamRestartMsg re-arms the SSE goroutine after a narrow change (restartStreamNarrowed
 // cancels the old one, waits briefly for the token to free, then this re-starts it).
 type streamRestartMsg struct{}
+
+// lgAsnMsg carries one peer IP's ASN enrichment for the live agent graph (empty asn =
+// the graph does not know the IP; the miss is cached so it is asked exactly once).
+type lgAsnMsg struct {
+	ip  string
+	asn string // "AS13335"
+	org string // "Cloudflare, Inc."
+}

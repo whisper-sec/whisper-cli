@@ -177,32 +177,42 @@ func (a *App) jsonCard(title, body string) string {
 		th.ModalTitle.Render(title) + "\n\n" + th.Text.Render(body) + "\n\n" + footer)
 }
 
+// helpCard is the `?` overlay. Every line stays within the card's inner width (the box
+// is 64 wide: border 2 + padding 4 leaves 58 columns) so lipgloss never re-wraps a row
+// mid-token; renderLogo emits a uniform-width block so centering can't bend the mark.
 func (a *App) helpCard() string {
 	th := a.th
 	sec := func(s string) string { return th.Accent.Render(s) }
 	key := func(s string) string { return th.Key.Render(s) }
 	lines := []string{
 		sec("global"),
-		"  " + key("1–5") + " switch view   " + key("tab") + " cycle   " + key(":") + "/" + key("⌃P") + " palette   " + key("?") + " help",
+		"  " + key("1-6") + " switch view   " + key("tab") + " cycle   " + key(":") + "/" + key("⌃P") + " palette   " + key("?") + " help",
 		"  " + key("⌃R") + " refresh   " + key("⌃T") + " theme   " + key("q") + "/" + key("⌃C") + " quit",
 		"",
-		sec("fleet (AGENTS)"),
-		"  " + key("j/k") + " move   " + key("g/G") + " top/bottom   " + key("⌃D/⌃U") + " half-page",
-		"  " + key("/") + " filter   " + key("n/N") + " next/prev   " + key("⇧K") + " sort   " + key("z") + " density",
-		"  " + key("↵") + " details   " + key("c") + " create   " + key("x") + " kill   " + key("e") + " connect",
-		"  " + key("m") + " monitor   " + key("v") + " RDAP",
+		sec("agents + live monitor (1)"),
+		"  " + key("↵") + " watch agent (pin the monitor; click works too)",
+		"  " + key("a") + " watch all   " + key("d") + " details   " + key("space") + " pause   " + key("f") + " kind",
+		"  " + key("j/k") + " move   " + key("/") + " filter   " + key("⇧K") + " sort   " + key("z") + " density",
+		"  " + key("c") + " create   " + key("x") + " kill   " + key("e") + " connect   " + key("v") + " RDAP",
 		"",
-		sec("monitor"),
-		"  " + key("space") + " pause   " + key("f") + " kind filter   " + key("/") + " filter",
-		"  " + key("s") + " select agent   " + key("↵") + " drill",
+		sec("live agent graph (2)"),
+		"  grows on its own from your agents' traffic",
+		"  " + key("j/k") + " scroll   " + key("space") + " pause   " + key("C") + " clear",
 		"",
 		sec("logs / policy"),
 		"  LOGS: " + key("r") + " run   " + key("t") + " time   " + key("k") + " kind   " + key("↵") + " drill",
 		"  POLICY: " + key("a") + " allow   " + key("b") + " block   " + key("d") + " default   " + key("w") + " write",
+		"",
+		sec("explore (6 · manual graph navigator)"),
+		"  " + key("j/k") + " select   " + key("l/h") + " pane   " + key("[ ]") + " edge-type",
+		"  " + key("space") + " peek   " + key("↵") + " walk-in   " + key("z") + " ornament",
+		"  " + key("o") + " catalog   " + key("/") + " jump   " + key(":") + " repl",
 	}
-	head := th.ModalTitle.Render("whisper - keybindings")
-	// The brand mark tops the card when colour + height allow (approved art).
-	if art := renderLogo(logoIcon, th.NoColor); art != "" && a.height >= 34 {
+	head := th.ModalTitle.Render("whisper · keybindings")
+	// The brand mark tops the card when colour allows AND the full card (39 rows with
+	// the mark) fits the terminal - a mark that pushes the bindings off-screen helps
+	// nobody (approved art; graceful degrade below 40 rows).
+	if art := renderLogo(logoIcon, th.NoColor); art != "" && a.height >= 40 {
 		head = lipgloss.JoinVertical(lipgloss.Center, art, "", head)
 	}
 	return th.ModalBox.Width(min(64, a.width-4)).Render(

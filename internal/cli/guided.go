@@ -408,7 +408,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 
 // requireName resolves the MANDATORY agent name for a create. --name wins; otherwise on a
 // TTY we re-prompt until the user types a non-blank name; headless with no --name is a
-// clear usage error (never a silent unnamed agent - ). All name validation lives
+// clear usage error (never a silent unnamed agent). All name validation lives
 // in createAgent; this only secures a non-empty candidate to pass to it.
 func requireName(opts guidedOptions, gio guidedIO) (string, error) {
 	if n := strings.TrimSpace(opts.name); n != "" {

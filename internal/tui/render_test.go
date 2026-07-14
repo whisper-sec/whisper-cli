@@ -124,7 +124,7 @@ func TestResizeFuzz(t *testing.T) {
 		{20, 8}, {40, 10}, {59, 17}, {60, 18}, {80, 24}, {100, 30},
 		{200, 60}, {1, 1}, {300, 12}, {61, 19}, {120, 16}, {120, 23},
 	}
-	for _, mdN := range []mode{modeAgents, modeMonitor, modeLogs, modePolicy, modeConfig} {
+	for _, mdN := range []mode{modeAgents, modeGraph, modeLogs, modePolicy, modeConfig} {
 		a.mode = mdN
 		for _, s := range sizes {
 			a.Update(tea.WindowSizeMsg{Width: s[0], Height: s[1]})
@@ -137,9 +137,10 @@ func TestResizeFuzz(t *testing.T) {
 }
 
 // TestStreamEventFold folds a synthetic live event and asserts it lands in the feed,
-// the join cache, and the fleet union - then renders on the AGENTS live strip.
+// the join cache, and the fleet union - then renders in the merged dashboard's live
+// monitor panel (wide enough here for the full qname lane).
 func TestStreamEventFold(t *testing.T) {
-	a := newTestApp(t, 120, 40)
+	a := newTestApp(t, 160, 40)
 	// A dns then a conn for the same /128: the conn's chain should stitch the qname.
 	a.onStreamEvent(model.Event{
 		TsMicros: 1_700_000_000_000_000, Kind: "dns", Addr128: "2a04:2a01::7",
@@ -166,12 +167,16 @@ func TestStreamEventFold(t *testing.T) {
 	if !found {
 		t.Error("stream-discovered agent not unioned into the fleet")
 	}
-	// The AGENTS dashboard live strip must render the activity.
+	// The merged dashboard's monitor panel must render the activity.
 	a.mode = modeAgents
 	a.layout()
 	out := renderOf(a)
 	if !strings.Contains(out, "example.com") {
-		t.Errorf("live strip did not render the stitched chain; frame:\n%s", out)
+		t.Errorf("the monitor panel did not render the stitched chain; frame:\n%s", out)
+	}
+	// The same fold must have grown the live agent graph (agent -> hostname -> peer).
+	if n, e := a.lgraph.stats(); n < 3 || e < 2 {
+		t.Errorf("the live graph should hold agent+host+ip after the fold; nodes=%d edges=%d", n, e)
 	}
 }
 

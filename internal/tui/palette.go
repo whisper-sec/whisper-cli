@@ -47,11 +47,19 @@ func (p *palette) commands() []command {
 		{"connect (egress)", "op:connect {tier:socks5}", func(a *App) (tea.Model, tea.Cmd) { return a.openConnect() }},
 		{"kill / revoke agent", "op:identity{release} / op:revoke", func(a *App) (tea.Model, tea.Cmd) { return a.openKill() }},
 		{"RDAP lookup", "rdap.whisper.online/ip", func(a *App) (tea.Model, tea.Cmd) { return a.openRDAP() }},
-		{"go to AGENTS", "view", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeAgents; a.layout(); return a, nil }},
-		{"go to MONITOR", "view · /monitor/stream", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeMonitor; a.layout(); return a, a.onEnterMode() }},
+		{"watch selected agent", "narrow SSE + backfill", func(a *App) (tea.Model, tea.Cmd) {
+			a.mode = modeAgents
+			a.layout()
+			return a.agentsView.watchSelected()
+		}},
+		{"watch whole tenant", "un-narrow the stream", func(a *App) (tea.Model, tea.Cmd) { return a, a.monitorVw.unfocus() }},
+		{"agent details", "op:agent", func(a *App) (tea.Model, tea.Cmd) { return a.openDrill() }},
+		{"go to AGENTS", "view · fleet + live monitor", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeAgents; a.layout(); return a, a.onEnterMode() }},
+		{"go to GRAPH", "view · live agent graph", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeGraph; a.layout(); return a, a.onEnterMode() }},
 		{"go to LOGS", "view · op:logs", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeLogs; a.layout(); return a, a.onEnterMode() }},
 		{"go to POLICY", "view · op:policy", func(a *App) (tea.Model, tea.Cmd) { a.mode = modePolicy; a.layout(); return a, a.onEnterMode() }},
 		{"go to CONFIG", "view", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeConfig; a.layout(); return a, nil }},
+		{"explore graph", "view · graph.whisper.security", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeExplore; a.layout(); return a, a.onEnterMode() }},
 		{"refresh fleet", "op:list {kind:'agents'}", func(a *App) (tea.Model, tea.Cmd) { a.loading = true; return a, loadFleet(a.client) }},
 		{"cycle theme", "local", func(a *App) (tea.Model, tea.Cmd) { a.cycleTheme(); return a, nil }},
 		{"help", "local", func(a *App) (tea.Model, tea.Cmd) { a.overlay = overlayHelp; return a, nil }},

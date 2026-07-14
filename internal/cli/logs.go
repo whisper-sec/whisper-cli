@@ -121,7 +121,7 @@ func newMonitorCmd() *cobra.Command {
 					follow = true // a pipe with no --follow still does the sensible thing: NDJSON
 				} else {
 					// On a terminal, open the full-screen TUI on the MONITOR tab, focused on
-					// the requested agent's /128 (the SSE narrow takes the address - ).
+					// the requested agent's /128 (the SSE narrow takes the address).
 					return runMonitorDashboard(agentAddr)
 				}
 			}

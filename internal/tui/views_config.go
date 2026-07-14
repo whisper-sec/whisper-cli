@@ -14,7 +14,7 @@ import (
 
 // configView is the CONFIG tab: the resolved endpoints, the MASKED key + which ladder
 // rung supplied it, the active theme, and an about block. The key value is NEVER shown
-// in full (the privacy contract -: never display a full key after creation).
+// in full (the privacy contract: never display a full key after creation).
 type configView struct {
 	app  *App
 	w, h int

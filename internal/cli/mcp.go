@@ -29,7 +29,10 @@ import (
 //   - KEY-GATED (when the standard key ladder resolves a credential - WHISPER_API_KEY /
 //     WHISPER_KEY env, or the `whisper login` key file): the FULL control plane -
 //     register / list / policy / logs / revoke / egress-config - every one a thin shell over
-//     the SAME internal/client op paths the CLI subcommands use (no new protocol code).
+//     the SAME internal/client op paths the CLI subcommands use (no new protocol code);
+//     plus the GRAPH surface (mcp_graph.go): whisper_graph_query (raw Cypher) and one
+//     whisper_<camelId> tool per embedded catalog recipe, mirroring `whisper query` /
+//     `whisper graph`.
 //
 // Without a key, only the two keyless tools are listed (graceful degradation, zero friction);
 // with a key, the control half unlocks - auth is optional, never demanded. The MCP server
@@ -56,7 +59,20 @@ func newMCPCmd() *cobra.Command {
 			"  • whisper_policy          - read or set your DNS resolver policy\n" +
 			"  • whisper_logs            - recent per-agent DNS/conn/alloc activity\n" +
 			"  • whisper_revoke          - tear an agent down (irreversible)\n" +
-			"  • whisper_egress_config   - the ready-to-use proxy/env config for agent egress\n\n" +
+			"  • whisper_egress_config   - the ready-to-use proxy/env config for agent egress\n" +
+			"  the whisper.security graph (same surface as the reference MCP server):\n" +
+			"  • query                   - execute Cypher against WhisperGraph\n" +
+			"  • explain_indicator       - one-call threat verdict for an IP / host / ASN / CIDR\n" +
+			"  • explain_schema          - the label catalog, or one label's entity card\n" +
+			"  • read_docs               - fetch the whisper.security docs on demand\n" +
+			"  • list_workflows          - search the gallery of ready-made investigations\n" +
+			"  • run_workflow            - run a gallery workflow / recipe by slug\n" +
+			"  • text2cypher             - translate an English question into Cypher\n" +
+			"  • whisper_graph_query     - raw Cypher (the whisper.security graph)\n" +
+			"  • whisper_<recipe>        - every embedded graph recipe (identify, assess, typosquat,\n" +
+			"                              attack-surface, ...; `whisper graph list` shows them all)\n\n" +
+			"It also serves MCP resources (whisper://schema/full · stats · quota · server) and\n" +
+			"gallery-driven investigation prompts, mirroring the whisper.security MCP server.\n\n" +
 			"Bare `whisper mcp` runs the server (point your client's stdio config at it). Use\n" +
 			"`whisper mcp install` to write the client config for you.",
 		Args: cobraNoArgs,
@@ -258,6 +274,19 @@ func dispatchMCP(req jsonrpcRequest) (jsonrpcResponse, bool) {
 		resp.Result = map[string]any{"tools": mcpTools()}
 	case "tools/call":
 		resp.Result = mcpCallTool(req.Params)
+	case "resources/list":
+		resp.Result = map[string]any{"resources": mcpResourcesList()}
+	case "resources/read":
+		resp.Result = mcpReadResource(req.Params)
+	case "prompts/list":
+		resp.Result = map[string]any{"prompts": mcpPromptsList()}
+	case "prompts/get":
+		result, err := mcpGetPrompt(req.Params)
+		if err != nil {
+			resp.Error = err
+		} else {
+			resp.Result = result
+		}
 	default:
 		if isNotification {
 			return resp, true // unknown notification - ignore
@@ -279,8 +308,12 @@ func mcpInitializeResult(params json.RawMessage) map[string]any {
 	}
 	return map[string]any{
 		"protocolVersion": version,
-		"capabilities":    map[string]any{"tools": map[string]any{}},
-		"serverInfo":      map[string]any{"name": "whisper", "version": Version},
+		"capabilities": map[string]any{
+			"tools":     map[string]any{},
+			"resources": map[string]any{},
+			"prompts":   map[string]any{},
+		},
+		"serverInfo": map[string]any{"name": "whisper", "version": Version},
 	}
 }
 
@@ -331,8 +364,37 @@ func mcpTools() []map[string]any {
 	}
 	if mcpHasKey() {
 		tools = append(tools, mcpControlTools()...)
+		tools = append(tools, mcpReferenceTools()...)
+		tools = append(tools, mcpGraphTools()...)
 	}
 	return tools
+}
+
+// mcpReadResource handles resources/read: dispatch the URI to its reader, else a
+// resource-not-found result (an empty contents list keeps the client happy).
+func mcpReadResource(params json.RawMessage) map[string]any {
+	var p struct {
+		URI string `json:"uri"`
+	}
+	_ = json.Unmarshal(params, &p)
+	if res, ok := mcpResourceRead(strings.TrimSpace(p.URI)); ok {
+		return res
+	}
+	return map[string]any{"contents": []map[string]any{}}
+}
+
+// mcpGetPrompt handles prompts/get: fill the named prompt with its arguments, or a
+// JSON-RPC error when the prompt name is unknown (per the MCP prompts contract).
+func mcpGetPrompt(params json.RawMessage) (map[string]any, *jsonrpcError) {
+	var p struct {
+		Name      string         `json:"name"`
+		Arguments map[string]any `json:"arguments"`
+	}
+	_ = json.Unmarshal(params, &p)
+	if res, ok := mcpPromptGet(strings.TrimSpace(p.Name), p.Arguments); ok {
+		return res, nil
+	}
+	return nil, &jsonrpcError{Code: -32602, Message: "unknown prompt: " + p.Name}
 }
 
 // mcpControlTools is the key-gated half of the catalogue: the full control plane
@@ -349,9 +411,10 @@ func mcpControlTools() []map[string]any {
 				"required":             []string{"name"},
 				"additionalProperties": false,
 				"properties": map[string]any{
-					"name":     map[string]any{"type": "string", "description": "the agent's human name (required - every agent has one), e.g. \"scout\""},
-					"email":    map[string]any{"type": "string", "description": "optional public contact email (surfaced in RDAP)"},
-					"with_key": map[string]any{"type": "boolean", "description": "mint the agent its OWN API key (shown once in the result). Default false: the agent lives under your key."},
+					"name":      map[string]any{"type": "string", "description": "the agent's human name (required - every agent has one), e.g. \"scout\""},
+					"email":     map[string]any{"type": "string", "description": "optional public contact email (surfaced in RDAP)"},
+					"with_key":  map[string]any{"type": "boolean", "description": "mint the agent its OWN API key (shown once in the result). Default false: the agent lives under your key."},
+					"device_id": map[string]any{"type": "string", "description": "OPTIONAL: derive the /128 DETERMINISTICALLY from a domain-specific identifier the object already carries (a vehicle VIN, a 5G NF Instance ID, an IEEE 2030.5 LFDI, a medical-device UDI, an OPC-UA ApplicationUri, a C2PA signer serial, or an A2A/x402 agent id). The same identifier always yields the same address."},
 				},
 			},
 		},
@@ -396,7 +459,7 @@ func mcpControlTools() []map[string]any {
 		},
 		{
 			"name":        "whisper_revoke",
-			"description": "IRREVERSIBLY revoke an agent: withdraw its /128 address, reverse-DNS, tokens, and (if it had one) its API key. The identity stops verifying immediately. Use whisper_list first to confirm the exact agent; there is no undo. Requires the agent id or its /128 address.",
+			"description": "IRREVERSIBLY revoke an agent: withdraw its /128 address, reverse-DNS and tokens, and refuse its control-plane access (the API key is a Whisper API key managed by Whisper auth and is not deleted). The identity stops verifying immediately. Use whisper_list first to confirm the exact agent; there is no undo. Requires the agent id or its /128 address.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
 				"required":             []string{"agent"},
@@ -449,6 +512,15 @@ func mcpCallTool(params json.RawMessage) mcpToolResult {
 	case "whisper_egress_config":
 		return mcpToolEgressConfig(call.Arguments)
 	default:
+		// The whisper-ai reference surface: query / explain_indicator / explain_schema /
+		// read_docs / list_workflows / run_workflow / text2cypher.
+		if res, ok := mcpReferenceCall(call.Name, call.Arguments); ok {
+			return res
+		}
+		// The graph half: whisper_graph_query + one tool per embedded catalog recipe.
+		if res, ok := mcpGraphCall(call.Name, call.Arguments); ok {
+			return res
+		}
 		return mcpErr("unknown tool: " + call.Name)
 	}
 }
@@ -552,9 +624,10 @@ func mcpRecords(env *client.Envelope) mcpToolResult {
 // `whisper create --register`).
 func mcpToolRegister(args json.RawMessage) mcpToolResult {
 	var a struct {
-		Name    string `json:"name"`
-		Email   string `json:"email"`
-		WithKey bool   `json:"with_key"`
+		Name     string `json:"name"`
+		Email    string `json:"email"`
+		WithKey  bool   `json:"with_key"`
+		DeviceID string `json:"device_id"`
 	}
 	_ = json.Unmarshal(args, &a)
 	name := strings.TrimSpace(a.Name)
@@ -568,6 +641,9 @@ func mcpToolRegister(args json.RawMessage) mcpToolResult {
 	wire := map[string]any{"label": name}
 	if e := strings.TrimSpace(a.Email); e != "" {
 		wire["contact_email"] = e
+	}
+	if d := strings.TrimSpace(a.DeviceID); d != "" {
+		wire["device_id"] = d
 	}
 	return mcpAgents(op, wire)
 }

@@ -18,7 +18,7 @@ import (
 
 // Canonical endpoints. graph.whisper.security is the ONE control endpoint; the live
 // monitor SSE is served directly by the active/active ns nodes (the gateway does not
-// proxy /monitor/stream -); rdap.whisper.online is the public RDAP service. All
+// proxy /monitor/stream); rdap.whisper.online is the public RDAP service. All
 // overridable by env for pre-prod (Postel: liberal in, but a sane zero-config default).
 const (
 	DefaultControlURL = "https://graph.whisper.security/api/query"

@@ -56,11 +56,15 @@ func recordingServer(t *testing.T, agents []agentChoice, seen *[]recordedCall) *
 		w.WriteHeader(200)
 		switch op {
 		case "identity":
-			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["label","address"],"rows":[["created-name","2a04:2a01:9::abcd"]]}}`))
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["label","address","fqdn"],"rows":[["created-name","2a04:2a01:9::abcd","created-name.agents.whisper.online."]]}}`))
 		case "register":
-			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["agent","address","api_key"],"rows":[["ag_1","2a04:2a01:9::beef","whisper_live_oncekey"]]}}`))
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["agent","address","api_key","fqdn"],"rows":[["ag_1","2a04:2a01:9::beef","whisper_live_oncekey","ag1beef.agents.whisper.online."]]}}`))
 		case "connect":
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["tier","address","http_proxy","socks5_endpoint","connection_string"],"rows":[["socks5","2a04:2a01:9::abcd","https://w:et_testbearer@egress.whisper.online:443","egress.whisper.online:443","socks5h://w:et_testbearer@egress.whisper.online:443"]]}}`))
+		case "host":
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["record_id","fqdn","type","value","ttl","status"],"rows":[["rec-1","_x402.created-name","TXT","x402-wallet=0xabc",300,"upserted"]]}}`))
+		case "domain":
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["domain",{"label":"example.com","fqdn":"example.com.","state":"pending"}]]}}`))
 		default: // list
 			_, _ = w.Write([]byte(listJSON(agents)))
 		}

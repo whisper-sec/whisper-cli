@@ -1,0 +1,343 @@
+{
+  "_generated": "Seeded from https://www.whisper.security/sitemap.xml (docs pages). Each path has a .md variant. Freshness-checked in CI.",
+  "baseUrl": "https://www.whisper.security/docs/",
+  "count": 56,
+  "docs": [
+    {
+      "path": "ai/agent-signup",
+      "title": "Agent Signup",
+      "section": "AI",
+      "summary": "How an AI agent obtains credentials/API access to WhisperGraph."
+    },
+    {
+      "path": "ai/mcp/overview",
+      "title": "Overview",
+      "section": "AI Context (MCP)",
+      "summary": "Overview of the WhisperGraph MCP server: tools, resources, prompts, and how AI agents query the graph."
+    },
+    {
+      "path": "ai/mcp/reference",
+      "title": "Reference",
+      "section": "AI Context (MCP)",
+      "summary": "Complete MCP tool reference: input/output schemas, the query error envelope, and validator rules."
+    },
+    {
+      "path": "ai/mcp/setup",
+      "title": "Setup",
+      "section": "AI Context (MCP)",
+      "summary": "Connect an MCP client to the WhisperGraph endpoint (Claude, Cursor, etc.) over Streamable HTTP, with auth."
+    },
+    {
+      "path": "ai/mcp/skills",
+      "title": "Skills",
+      "section": "AI Context (MCP)",
+      "summary": "Pre-built agent skills and investigation workflows runnable against WhisperGraph."
+    },
+    {
+      "path": "ai/mcp/workflow-gallery",
+      "title": "Workflow & Recipe Gallery",
+      "section": "AI Context (MCP)",
+      "summary": "The MCP workflow gallery: the 28 consolidated workflows, the list_workflows and run_workflow contracts, the featured workflows, and a worked example with its evidence trail."
+    },
+    {
+      "path": "changelog",
+      "title": "Changelog",
+      "section": "Guides",
+      "summary": "WhisperGraph and API changelog."
+    },
+    {
+      "path": "cheat-sheet",
+      "title": "Cheat Sheet",
+      "section": "Guides",
+      "summary": "One-page WhisperGraph Cypher + schema cheat sheet."
+    },
+    {
+      "path": "cypher-api-reference",
+      "title": "Cypher API Reference",
+      "section": "Guides",
+      "summary": "REST API for executing Cypher: POST /api/query, parameters, response shape."
+    },
+    {
+      "path": "cypher-best-practices",
+      "title": "Cypher Best Practices",
+      "section": "Guides",
+      "summary": "Performance and safety best practices for Cypher (anchor on .name, bound paths, LIMIT)."
+    },
+    {
+      "path": "cypher-functions",
+      "title": "Cypher Functions",
+      "section": "Guides",
+      "summary": "Cypher functions available in the engine (string, math, list, aggregation, point.distance)."
+    },
+    {
+      "path": "cypher-query-cookbook",
+      "title": "Cypher Query Cookbook",
+      "section": "Guides",
+      "summary": "Copy-paste Cypher recipes by use case: DNS, BGP, WHOIS, threat-intel, attack surface."
+    },
+    {
+      "path": "cypher-query-guide",
+      "title": "Cypher Query Guide",
+      "section": "Guides",
+      "summary": "How to write effective Cypher against WhisperGraph: anchoring, traversal, aggregation."
+    },
+    {
+      "path": "cypher-syntax",
+      "title": "Cypher Syntax",
+      "section": "Guides",
+      "summary": "Supported Cypher syntax subset of the WhisperGraph engine."
+    },
+    {
+      "path": "faq",
+      "title": "Faq",
+      "section": "Guides",
+      "summary": "Frequently asked questions about WhisperGraph."
+    },
+    {
+      "path": "getting-started",
+      "title": "Getting Started",
+      "section": "Guides",
+      "summary": "Getting started with WhisperGraph: first queries and core concepts."
+    },
+    {
+      "path": "integrations/splunk/cim-mapping",
+      "title": "CIM Mapping",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: cim mapping."
+    },
+    {
+      "path": "integrations/splunk/configuration",
+      "title": "Configuration",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: configuration."
+    },
+    {
+      "path": "integrations/splunk/cypher-reference",
+      "title": "Cypher Reference",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: cypher reference."
+    },
+    {
+      "path": "integrations/splunk/dashboards",
+      "title": "Dashboards",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: dashboards."
+    },
+    {
+      "path": "integrations/splunk/deployment-architecture",
+      "title": "Deployment Architecture",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: deployment architecture."
+    },
+    {
+      "path": "integrations/splunk/enrichment",
+      "title": "Enrichment",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: enrichment."
+    },
+    {
+      "path": "integrations/splunk/es-integration",
+      "title": "ES Integration",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: es integration."
+    },
+    {
+      "path": "integrations/splunk/installation",
+      "title": "Installation",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: installation."
+    },
+    {
+      "path": "integrations/splunk/lookups",
+      "title": "Lookups",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: lookups."
+    },
+    {
+      "path": "integrations/splunk/macros",
+      "title": "Macros",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: macros."
+    },
+    {
+      "path": "integrations/splunk/modular-inputs",
+      "title": "Modular Inputs",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: modular inputs."
+    },
+    {
+      "path": "integrations/splunk/overview",
+      "title": "Overview",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: overview."
+    },
+    {
+      "path": "integrations/splunk/requirements",
+      "title": "Requirements",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: requirements."
+    },
+    {
+      "path": "integrations/splunk/saved-searches",
+      "title": "Saved Searches",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: saved searches."
+    },
+    {
+      "path": "integrations/splunk/search-commands",
+      "title": "Search Commands",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: search commands."
+    },
+    {
+      "path": "integrations/splunk/source-types",
+      "title": "Source Types",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: source types."
+    },
+    {
+      "path": "integrations/splunk/troubleshooting",
+      "title": "Troubleshooting",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: troubleshooting."
+    },
+    {
+      "path": "integrations/splunk/use-cases",
+      "title": "Use Cases",
+      "section": "Splunk Integration",
+      "summary": "Splunk integration: use cases."
+    },
+    {
+      "path": "known-limitations",
+      "title": "Known Limitations",
+      "section": "Guides",
+      "summary": "Current known limitations and gated/not-yet-live graph layers."
+    },
+    {
+      "path": "recipes/attack-path",
+      "title": "Attack Path",
+      "section": "Recipes",
+      "summary": "Attack Path investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/bgp-routing",
+      "title": "BGP Routing",
+      "section": "Recipes",
+      "summary": "BGP Routing investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/brand-protection",
+      "title": "Brand Protection",
+      "section": "Recipes",
+      "summary": "Brand Protection investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/compliance",
+      "title": "Compliance",
+      "section": "Recipes",
+      "summary": "Compliance investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/cross-cutting",
+      "title": "Cross Cutting",
+      "section": "Recipes",
+      "summary": "Cross Cutting investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/dns-email",
+      "title": "DNS Email",
+      "section": "Recipes",
+      "summary": "DNS Email investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/insurance-risk",
+      "title": "Insurance Risk",
+      "section": "Recipes",
+      "summary": "Insurance Risk investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/law-enforcement",
+      "title": "Law Enforcement",
+      "section": "Recipes",
+      "summary": "Law Enforcement investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/pentest-recon",
+      "title": "Pentest Recon",
+      "section": "Recipes",
+      "summary": "Pentest Recon investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/research",
+      "title": "Research",
+      "section": "Recipes",
+      "summary": "Research investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/soc",
+      "title": "SOC",
+      "section": "Recipes",
+      "summary": "SOC investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "recipes/threat-intel",
+      "title": "Threat Intel",
+      "section": "Recipes",
+      "summary": "Threat Intel investigation recipes and worked Cypher examples."
+    },
+    {
+      "path": "reference/error-codes",
+      "title": "Error Codes",
+      "section": "Reference",
+      "summary": "Typed query error codes and what each means (schema, syntax, timeout, too-expensive, etc.)."
+    },
+    {
+      "path": "reference/feed-catalog",
+      "title": "Feed Catalog",
+      "section": "Reference",
+      "summary": "Threat-intelligence feed sources ingested into the graph."
+    },
+    {
+      "path": "reference/feed-categories",
+      "title": "Feed Categories",
+      "section": "Reference",
+      "summary": "Categories used to classify threat-intel feed listings."
+    },
+    {
+      "path": "reference/glossary",
+      "title": "Glossary",
+      "section": "Reference",
+      "summary": "Definitions of WhisperGraph and internet-infrastructure terms."
+    },
+    {
+      "path": "reference/graph-schema",
+      "title": "Graph Schema",
+      "section": "Reference",
+      "summary": "Authoritative node labels, edge types, counts, and traversal directions of WhisperGraph."
+    },
+    {
+      "path": "reference/procedures",
+      "title": "Procedures",
+      "section": "Reference",
+      "summary": "Stored procedures exposed by the engine (explain, whisper.history, whisper.variants, identify/assess/walk, origins, etc.)."
+    },
+    {
+      "path": "roadmap",
+      "title": "Roadmap",
+      "section": "Guides",
+      "summary": "Upcoming WhisperGraph capabilities."
+    },
+    {
+      "path": "support",
+      "title": "Support",
+      "section": "Guides",
+      "summary": "How to get support for WhisperGraph."
+    },
+    {
+      "path": "whisper-graph-intro",
+      "title": "Whisper Graph Intro",
+      "section": "Guides",
+      "summary": "Introduction to WhisperGraph: 7.4B nodes, 39B edges mapping internet infrastructure."
+    }
+  ]
+}

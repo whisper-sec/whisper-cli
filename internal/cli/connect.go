@@ -21,6 +21,7 @@ import (
 
 func newConnectCmd() *cobra.Command {
 	var tier, label, email, name, agent, agentFile, configFile string
+	var vin, ecuSerial string
 	var verbose, ensure bool
 	var port int
 	cmd := &cobra.Command{
@@ -66,6 +67,18 @@ func newConnectCmd() *cobra.Command {
 			}
 			if email != "" {
 				args["contact_email"] = email
+			}
+			// Automotive vehicle/ECU identity: bind this routed /128 to the vehicle's
+			// own VIN (+ optional ECU serial) as NAMED op:connect args, so the car derives the
+			// SAME identity every time it connects. --ecu-serial needs --vin (the ECU is scoped
+			// within its vehicle). No-op for the non-vehicle common case.
+			if v := strings.TrimSpace(vin); v != "" {
+				args["vin"] = v
+				if s := strings.TrimSpace(ecuSerial); s != "" {
+					args["ecu_serial"] = s
+				}
+			} else if strings.TrimSpace(ecuSerial) != "" {
+				return usageErr("--ecu-serial needs --vin (the ECU is identified within its vehicle)")
 			}
 			// agent selection, in precedence order (highest first):
 			//   1. --agent <id|/128>   explicit flag (overrides everything)
@@ -199,6 +212,8 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in)")
 	cmd.Flags().StringVar(&name, "name", "", "the agent's human name (required to create one; maps to the server label)")
 	cmd.Flags().StringVar(&agent, "agent", "", "bind egress to this agent (id or /128); overrides the persisted agent")
+	cmd.Flags().StringVar(&vin, "vin", "", "bind this routed /128 to a vehicle VIN (automotive; op:connect)")
+	cmd.Flags().StringVar(&ecuSerial, "ecu-serial", "", "an ECU serial to combine with --vin (automotive)")
 	_ = cmd.Flags().MarkHidden("label") // --name is the documented spelling
 	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show the full egress detail block (default: one line)")

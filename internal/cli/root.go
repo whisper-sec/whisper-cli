@@ -134,6 +134,7 @@ func NewRootCommand() *cobra.Command {
 		newListCmd(),
 		newAgentCmd(),
 		newCreateCmd(),
+		newDeviceCmd(),
 		newKillCmd(),
 		newConnectCmd(),
 		newConnectDaemonCmd(),
@@ -145,10 +146,14 @@ func NewRootCommand() *cobra.Command {
 		newUseCmd(),
 		newStatusCmd(),
 		newLogsCmd(),
+		newQueryCmd(),
+		newGraphCmd(),
 		newPolicyCmd(),
+		newDomainCmd(),
 		newTokenCmd(),
 		newMonitorCmd(),
 		newDashCmd(),
+		newExploreCmd(),
 		newRDAPCmd(),
 		newVerifyCmd(),
 		newLedgerCmd(),
@@ -173,6 +178,43 @@ func newDashCmd() *cobra.Command {
 				return usageErr("the dashboard needs a terminal - run `whisper dash` in an interactive shell")
 			}
 			return runDashboard()
+		},
+	}
+}
+
+// newExploreCmd opens the full-screen dashboard on the EXPLORE tab: the graph-explorer
+// DECK, optionally landed straight on a node (host / IPv4 / IPv6 / email / AS#, parsed
+// liberally). Keyed runs walk the live whisper.security graph; keyless runs show the
+// fixture demo and say so.
+func newExploreCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "explore [node]",
+		Short: "Explore the whisper.security graph from a node (TUI)",
+		Long: "Open the graph explorer: stand on a node and walk the whisper.security graph\n" +
+			"around it (TRAIL | FOCUS | EDGES | NEIGHBORS), with the intelligence catalog one\n" +
+			"keystroke away. With an API key the deck is live; without one it is a demo.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if !isInteractive() || !stdoutIsTTY() {
+				return usageErr("the explorer needs a terminal: run `whisper explore` in an interactive shell")
+			}
+			c, _ := resolveClient(false, true)
+			node := ""
+			if len(args) == 1 {
+				node = args[0]
+			}
+			opts := tui.Options{
+				Client:         c,
+				Tenant:         bestEffortTenant(c),
+				Node:           "ns",
+				ThemeName:      theme.ParseName(g.themeName),
+				NoColor:        theme.ColorDisabled(g.noColor),
+				Light:          theme.LightBackground(),
+				StartOnExplore: true,
+				StartNode:      node,
+				Version:        Version,
+			}
+			return tui.Run(opts)
 		},
 	}
 }
@@ -260,9 +302,9 @@ func runDashboard() error {
 	return tui.Run(opts)
 }
 
-// runMonitorDashboard opens the full-screen TUI on the MONITOR tab, optionally focused
-// on one agent's /128 (the SSE narrow is by address - ). Used by `whisper monitor`
-// on a terminal with no --follow.
+// runMonitorDashboard opens the full-screen TUI on the merged AGENTS dashboard,
+// optionally with the live monitor already pinned to one agent's /128 (the SSE narrow
+// is by address). Used by `whisper monitor` on a terminal with no --follow.
 func runMonitorDashboard(agentAddr string) error {
 	c, _ := resolveClient(false, true)
 	opts := tui.Options{

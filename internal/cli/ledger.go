@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -16,8 +17,11 @@ import (
 
 // newLedgerCmd is the PUBLIC, KEYLESS verifiable-ledger surface: a third party
 // confirms an agent's identity commitment is recorded in Whisper's signed, append-only
-// transparency log - WITHOUT trusting Whisper's word. It needs no key (the proof surface is
-// public) and uses only stock crypto (Ed25519 + SHA-256 + RFC-6962 Merkle folding).
+// transparency log. It needs no API key (the proof surface is public) and uses only stock
+// crypto (Ed25519 + SHA-256 + RFC-6962 Merkle folding). Signature + inclusion checks are
+// fully trustless; the SPLIT-VIEW-resistance verdict is trustless only when the independent
+// witness key is pinned out-of-band (--witness-key) - otherwise it is qualified as "per the
+// server-published witness policy" (never over-state the guarantee).
 //
 //	whisper ledger checkpoint                     # fetch + verify the latest signed checkpoint
 //	whisper ledger verify <addr> --salt <hex> --event-file <f>   # prove inclusion under it
@@ -43,14 +47,43 @@ func newLedgerCmd() *cobra.Command {
 	return cmd
 }
 
-// newLedgerCheckpointCmd fetches the latest checkpoint and verifies its Ed25519 signature
-// under the published key. Exit 0 = a valid signed checkpoint; exit 1 otherwise.
+// newLedgerCheckpointCmd fetches the latest checkpoint, verifies its Ed25519 signature under
+// the published key, and cryptographically checks any witness cosignatures. The verdict
+// is HONEST by construction: "publicly verifiable" is printed ONLY when the CLI itself verified
+// a FRESH cosignature from an independent witness on the served note - a config-only policy, a
+// stale cosignature, or the availability cross-check keeps the truthful "tamper-evident,
+// signed" wording. TWO trust modes for the witness key set (review): by default the
+// independent witnesses come from the SAME origin's /witness/keys, so the verdict is qualified
+// "per the server-published witness policy"; with --witness-key the operator pins the
+// independent witness key(s) OUT-OF-BAND and only cosignatures verifying under a pinned key
+// count - the fully trustless mode (a compromised origin listing its own key as independent
+// gains nothing). Exit 0 = a valid signed checkpoint (either verdict); exit 1 only on a real
+// error (no checkpoint / bad log signature / a malformed pin).
 func newLedgerCheckpointCmd() *cobra.Command {
-	return &cobra.Command{
+	var witnessKeys []string
+	cmd := &cobra.Command{
 		Use:   "checkpoint",
-		Short: "Fetch the latest signed checkpoint and verify its signature under the published key",
-		Args:  cobra.NoArgs,
+		Short: "Fetch the latest signed checkpoint and verify its signature + witness cosignatures",
+		Long: "Fetch the latest C2SP signed checkpoint, verify its Ed25519 log signature under the\n" +
+			"published key, and cryptographically verify any witness cosignatures on it.\n\n" +
+			"The verdict is computed locally with stock crypto - the server's own claim is never\n" +
+			"trusted. Which witness keys count as INDEPENDENT has two modes:\n\n" +
+			"  default          the server-published policy (GET /witness/keys) - the verdict is\n" +
+			"                   qualified 'per the server-published witness policy'\n" +
+			"  --witness-key    pin the independent witness public key(s) OUT-OF-BAND (base64 raw,\n" +
+			"                   base64 SPKI, or hex); only cosignatures verifying under a pinned\n" +
+			"                   key count - fully trustless split-view resistance\n",
+		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			// A malformed pin is a REAL argument error (exit non-zero) - never silently unpinned.
+			var pins [][]byte
+			for _, wk := range witnessKeys {
+				pin, err := client.ParseWitnessKeyPin(wk)
+				if err != nil {
+					return &client.ProblemError{Status: 400, Title: "bad --witness-key", Detail: err.Error()}
+				}
+				pins = append(pins, pin)
+			}
 			c, err := resolveClient(false, false) // keyless
 			if err != nil {
 				return err
@@ -68,10 +101,56 @@ func newLedgerCheckpointCmd() *cobra.Command {
 			if err := cp.VerifySignature(key); err != nil {
 				return &client.ProblemError{Status: 1, Title: "checkpoint did not verify", Detail: err.Error()}
 			}
+			// (G5): recompute the cosignature/v1 verification ourselves - count FRESH,
+			// VERIFYING, INDEPENDENT cosignatures on THIS note. Pinned mode trusts ONLY the
+			// --witness-key pins (the served policy is not consulted for the key set); unpinned
+			// mode falls back to the server-published policy, and the verdict says so. A missing
+			// /witness/keys (witnessing off) or a fetch fault is simply "no policy" - fail-open
+			// to the honest tamper-evident verdict, never an error (the checkpoint itself already
+			// verified). The endpoint's own publicly_verifiable bool is never trusted.
+			policy, perr := c.FetchWitnessKeys(cx)
+			if perr != nil {
+				policy = nil
+			}
+			pinned := len(pins) > 0
+			independent := 0
+			if pinned {
+				var maxAge int64 // <= 0 ⇒ the 24h default inside the verifier
+				if policy != nil {
+					maxAge = policy.MaxAgeSeconds
+				}
+				independent = cp.VerifyIndependentCosignatures(client.PinnedWitnessPolicy(pins, maxAge), time.Now().Unix())
+			} else if policy != nil {
+				independent = cp.VerifyIndependentCosignatures(policy, time.Now().Unix())
+			}
 			if g.jsonOut {
 				fmt.Fprint(os.Stdout, cp.Note)
 				if !strings.HasSuffix(cp.Note, "\n") {
 					fmt.Fprintln(os.Stdout)
+				}
+			} else if independent > 0 {
+				trust := "server-published policy - pin with --witness-key for out-of-band trust"
+				if pinned {
+					trust = fmt.Sprintf("pinned out-of-band (%d key(s))", len(pins))
+				}
+				printTable([]string{"FIELD", "VALUE"}, [][]string{
+					{"origin", cp.Origin},
+					{"tree_size", fmt.Sprintf("%d", cp.TreeSize)},
+					{"root_sha256", hex.EncodeToString(cp.Root)},
+					{"key_id", key.KeyID},
+					{"signature", "VERIFIED (Ed25519)"},
+					{"witness_cosignatures", fmt.Sprintf("%d independent (VERIFIED)", independent)},
+					{"witness_keys", trust},
+					{"claim", ledgerClaimRow(pinned)},
+				})
+				if pinned {
+					fmt.Fprintf(os.Stderr,
+						"whisper: checkpoint VERIFIED + PUBLICLY VERIFIABLE - %d cosignature(s) from your pinned independent witness key(s)\n",
+						independent)
+				} else {
+					fmt.Fprintf(os.Stderr,
+						"whisper: checkpoint VERIFIED + publicly verifiable per the SERVER-PUBLISHED witness policy - %d independent cosignature(s); pin the witness key with --witness-key to drop that last trust assumption\n",
+						independent)
 				}
 			} else {
 				printTable([]string{"FIELD", "VALUE"}, [][]string{
@@ -80,12 +159,37 @@ func newLedgerCheckpointCmd() *cobra.Command {
 					{"root_sha256", hex.EncodeToString(cp.Root)},
 					{"key_id", key.KeyID},
 					{"signature", "VERIFIED (Ed25519)"},
+					{"claim", "tamper-evident, signed"},
 				})
-				fmt.Fprintf(os.Stderr, "whisper: checkpoint VERIFIED - signed tree of %d leaves\n", cp.TreeSize)
+				if pinned {
+					fmt.Fprintf(os.Stderr,
+						"whisper: checkpoint VERIFIED - tamper-evident, signed tree of %d leaves (no fresh cosignature from a pinned witness key)\n",
+						cp.TreeSize)
+				} else {
+					fmt.Fprintf(os.Stderr,
+						"whisper: checkpoint VERIFIED - tamper-evident, signed tree of %d leaves\n", cp.TreeSize)
+				}
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringArrayVar(&witnessKeys, "witness-key", nil,
+		"pin an independent witness public key out-of-band (base64 raw / base64 SPKI / hex; repeatable)")
+	return cmd
+}
+
+// ledgerClaimRow returns the value for the "claim" table row once a FRESH independent cosignature has
+// verified. DISPLAY-ONLY - it never gates verification. In UNPINNED mode the independent witness set came
+// from the SAME origin's /witness/keys, so the strong claim rests on the server-published policy; a tool
+// scraping only the `claim` field would otherwise miss that caveat (it lives in the adjacent witness_keys row
+// + stderr), so we suffix the qualifier here too (erring toward under-claiming). In PINNED mode the
+// verifier supplied the witness key out-of-band, so the claim stands on its own and needs no qualifier.
+func ledgerClaimRow(pinned bool) string {
+	const strong = "publicly verifiable / split-view-resistant"
+	if pinned {
+		return strong
+	}
+	return strong + " (per server-published witness policy - pin with --witness-key to verify independently)"
 }
 
 // newLedgerVerifyCmd proves a disclosed (salt, event) for an address is included in the
