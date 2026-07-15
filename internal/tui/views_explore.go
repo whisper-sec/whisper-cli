@@ -10,7 +10,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
-// exploreView is the 6th top-level view: the DECK graph explorer. It folds into the App
+// exploreView is the tab-1 top-level view: the DECK graph explorer. It folds into the App
 // exactly like monitorView (no new tea.Program, no new event loop). Keystrokes mutate
 // the cursor / overlay SYNCHRONOUSLY (instant); only travel, verbs and enrichment touch
 // the network, each as an async tea.Cmd tagged with the focusToken so a stale reply
@@ -79,24 +79,29 @@ func (v *exploreView) keyless() bool {
 
 func (v *exploreView) resize(w, h int) { v.w, v.h = w, h }
 
-// onEnter lands the first time EXPLORE opens: live on the start node (or a sensible
-// default) when a key is present; the fixture demo otherwise, stated plainly.
+// exploreDefaultNode is where EXPLORE lands when no start node is given: our own
+// front door - dog-fooding the graph on the domain that serves it.
+const exploreDefaultNode = "whisper.security"
+
+// onEnter lands the first time EXPLORE opens: live on the start node (default
+// whisper.security) when a key is present; the honest whisper.security fixture
+// demo otherwise, stated plainly.
 func (v *exploreView) onEnter() tea.Cmd {
 	if v.deck.focus.Value != "" {
 		return nil
 	}
 	if v.keyless() {
-		v.loadDeck(fixtureCloudflare())
+		v.loadDeck(fixtureWhisperSecurity())
 		v.app.setToast("no API key: fixture demo - set a key for live traversal", false)
 		return nil
 	}
 	start := v.app.opts.StartNode
 	if start == "" {
-		start = "cloudflare.com"
+		start = exploreDefaultNode
 	}
 	kind, val := normalizeRef(start)
 	if val == "" {
-		kind, val = "HOSTNAME", "cloudflare.com"
+		kind, val = "HOSTNAME", exploreDefaultNode
 	}
 	if v.deck.cache == nil {
 		v.deck.cache = newLRU(512)
@@ -416,19 +421,26 @@ func (v *exploreView) handleOverlayKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 			v.jump.onAgents = !v.jump.onAgents
 		case "enter":
 			return app, v.jumpLand()
-		case "j", "down":
+		// The JUMP query is a FOCUSED TEXT INPUT: every printable rune belongs to the
+		// text, so list-cursor movement is arrow-keys ONLY. The bare "j"/"k" cases that
+		// used to sit here made it impossible to type them ("kaveh.org" lost every k -
+		// the bug); a focused input must never lose printable keys to hotkeys.
+		case "down":
 			v.jump.cursor++
-		case "k", "up":
+		case "up":
 			if v.jump.cursor > 0 {
 				v.jump.cursor--
 			}
 		case "backspace":
 			if v.jump.query != "" {
-				v.jump.query = v.jump.query[:len(v.jump.query)-1]
+				v.jump.query = trimLastRune(v.jump.query)
 			}
 		default:
-			if len(ks) == 1 {
-				v.jump.query += ks
+			// Liberal in what we accept: take the full rune payload - any
+			// unicode rune types, and a bracketed paste (multiple runes in one
+			// KeyMsg) lands whole - not just single-byte ASCII.
+			if k.Type == tea.KeyRunes {
+				v.jump.query += string(k.Runes)
 			}
 		}
 	case ovRepl:
@@ -666,6 +678,16 @@ func (v *exploreView) runSelectedVerb(applicable []catalogVerb) tea.Cmd {
 	}
 	v.app.setToast("running "+cv.Proc+" on "+v.deck.focus.Value+"...", false)
 	return exRunVerb(v.app.client, cv, v.deck.focus, v.token)
+}
+
+// trimLastRune drops the final RUNE (not byte) from s - the backspace for a query that
+// may hold multi-byte unicode (JUMP accepts any rune, so deletion must be rune-wise too).
+func trimLastRune(s string) string {
+	r := []rune(s)
+	if len(r) == 0 {
+		return s
+	}
+	return string(r[:len(r)-1])
 }
 
 func ornamentName(o ornamentMode) string {

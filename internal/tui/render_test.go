@@ -38,19 +38,45 @@ func TestRenderAllModes(t *testing.T) {
 	}
 	a.agentsView.syncRows()
 
-	for m := modeAgents; m <= modeConfig; m++ {
+	// Iterate the FULL mode range from 0 (not modeAgents..modeConfig): ordered
+	// EXPLORE before AGENTS, and a from-name loop would silently skip any mode that
+	// sorts before its start (exactly how a tab could lose render coverage).
+	for m := mode(0); m < mode(len(modeNames)); m++ {
 		a.mode = m
 		a.layout()
 		out := renderOf(a)
 		if strings.TrimSpace(out) == "" {
 			t.Fatalf("mode %s rendered empty", modeNames[m])
 		}
-		// The tab bar (all five labels) must be present in every frame.
+		// The tab bar (all six labels) must be present in every frame.
 		for _, name := range modeNames {
 			if !strings.Contains(out, name) {
 				t.Errorf("mode %s frame missing tab %q", modeNames[m], name)
 			}
 		}
+	}
+}
+
+// TestModeOrderContract pins the tab order: EXPLORE is tab 1 (the showpiece opens
+// the walk), CONFIG stays last, AGENTS remains the launch view (bare `whisper` lands on
+// your fleet; `whisper explore` starts on tab 1).
+func TestModeOrderContract(t *testing.T) {
+	if modeNames[0] != "EXPLORE" {
+		t.Errorf("tab 1 must be EXPLORE; got %q", modeNames[0])
+	}
+	if modeNames[len(modeNames)-1] != "CONFIG" {
+		t.Errorf("the last tab must stay CONFIG; got %q", modeNames[len(modeNames)-1])
+	}
+	if int(modeExplore) != 0 {
+		t.Errorf("modeExplore must be index 0; got %d", modeExplore)
+	}
+	a := newTestApp(t, 100, 30)
+	if a.mode != modeAgents {
+		t.Errorf("bare launch must land on AGENTS (the operational home); got %s", modeNames[a.mode])
+	}
+	b := New(Options{Client: client.New(client.Config{}), ThemeName: theme.Whisper, StartOnExplore: true})
+	if b.mode != modeExplore {
+		t.Errorf("whisper explore must land on EXPLORE; got %s", modeNames[b.mode])
 	}
 }
 
@@ -124,7 +150,7 @@ func TestResizeFuzz(t *testing.T) {
 		{20, 8}, {40, 10}, {59, 17}, {60, 18}, {80, 24}, {100, 30},
 		{200, 60}, {1, 1}, {300, 12}, {61, 19}, {120, 16}, {120, 23},
 	}
-	for _, mdN := range []mode{modeAgents, modeGraph, modeLogs, modePolicy, modeConfig} {
+	for _, mdN := range []mode{modeExplore, modeAgents, modeGraph, modeLogs, modePolicy, modeConfig} {
 		a.mode = mdN
 		for _, s := range sizes {
 			a.Update(tea.WindowSizeMsg{Width: s[0], Height: s[1]})
