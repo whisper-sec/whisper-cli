@@ -11,7 +11,9 @@ started.
 
 It is two surfaces over one core: a fully scriptable [Cobra](https://github.com/spf13/cobra)
 CLI, and a full-screen [Bubble Tea](https://github.com/charmbracelet/bubbletea) TUI when
-you run `whisper` on a terminal with no subcommand.
+you run `whisper` on a terminal with no subcommand. And it talks to the
+[whisper.security](https://www.whisper.security) graph: `whisper query` for raw Cypher,
+`whisper graph` for the 29-recipe catalog ([below](#query-the-security-graph)).
 
 ---
 
@@ -171,8 +173,47 @@ identities, nothing to remember. Pass `--agent <name|/128>` to reuse an existing
 `--name <new>` to mint one.
 
 Other useful commands: `whisper list`, `whisper logs`, `whisper policy`, `whisper rdap
-<address>`, `whisper verify <address>`, `whisper login`, `whisper dash` (the full-screen
-dashboard), `whisper config`. Run `whisper <command> --help` for details.
+<address>`, `whisper verify <address>`, `whisper query <cypher>`, `whisper graph
+<recipe>`, `whisper login`, `whisper dash` (the full-screen dashboard), `whisper config`.
+Run `whisper <command> --help` for details.
+
+---
+
+## Query the security graph
+
+The same [whisper.security](https://www.whisper.security) graph the Whisper resolver
+consults on every lookup - 3.6B nodes (hostnames, IPs, ASNs, certs, threat intel), 30B
+relationships - is a first-class CLI surface. `whisper query` runs raw parameterised
+Cypher; `whisper graph` runs a named recipe from the embedded catalog:
+
+```sh
+whisper query "CALL whisper.identify(['api.openai.com'])"    # who operates this host?
+whisper query 'CALL whisper.assess([$v])' --param v=8.8.8.8  # threat posture, one row per host
+whisper graph list                    # all 29 recipes, each with its docs URL
+whisper graph variants paypal.com     # registered typosquat look-alikes, one table
+whisper graph typosquat paypal.com    # the full brand-impersonation flow (streams NDJSON)
+```
+
+Direct recipes answer with one result table (`--json` emits the raw
+`{columns,rows,statistics}` envelope); flow recipes stream their steps as NDJSON - pipe
+them to `jq`. Every recipe documents itself: `whisper graph <recipe> --help`.
+
+`query` and `graph` authenticate with your API key (`whisper login`, `WHISPER_API_KEY`,
+or `--key`). The graph endpoint itself is two-tier: the direct read verbs
+(`whisper.identify`, `whisper.assess`, `whisper.variants`, `whisper.explain`,
+`db.schema`, ...) also answer keyless and rate-limited - no account needed:
+
+```sh
+curl -s https://graph.whisper.security/api/query \
+  -H 'content-type: application/json' \
+  -d '{"query":"CALL whisper.assess([\"8.8.8.8\"])"}'
+```
+
+A key lifts the rate limit and unlocks raw Cypher and the multi-step flows. The same
+tools ride the MCP server (`whisper mcp`): `whisper_graph_query` plus one tool per
+recipe. Docs: [www.whisper.security/docs](https://www.whisper.security/docs) - the raw
+Cypher API at [/docs/cypher-api](https://www.whisper.security/docs/cypher-api), per-verb
+pages under `/docs/whisper-graph`.
 
 ---
 
@@ -263,6 +304,7 @@ as the release assets):
 ## Links
 
 - **Whisper** - [whisper.online](https://whisper.online)
+- **Docs (graph procedures, recipes, the Cypher API)** - [www.whisper.security/docs](https://www.whisper.security/docs)
 - **Registry / NIC** - [nic.whisper.online](https://nic.whisper.online)
 - **RDAP** - [rdap.whisper.online](https://rdap.whisper.online)
 - **AS219419** (release-signing key, network info) - [as219419.net](https://as219419.net)
