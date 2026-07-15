@@ -37,7 +37,7 @@ func newDeviceCmd() *cobra.Command {
 }
 
 func newDeviceAddCmd() *cobra.Command {
-	var label string
+	var label, retention string
 	cmd := &cobra.Command{
 		Use:   "add",
 		Short: "Mint a device identity + print its DoH URL and Apple one-tap profile",
@@ -45,12 +45,21 @@ func newDeviceAddCmd() *cobra.Command {
 			"(op:register {device:true}) and print everything you need to put the device\n" +
 			"behind Whisper - the encrypted-DNS (DoH) URL, the Apple one-tap profile URL, the\n" +
 			"Android Private-DNS host, and the device's routable /128. The token is a\n" +
-			"credential: it can ONLY resolve DNS - it can never touch your account.",
+			"credential: it can ONLY resolve DNS - it can never touch your account.\n\n" +
+			"--retention sets how many days this device's ordinary DNS/query logs are kept\n" +
+			"(0-3650); you can change it later with `whisper policy --retention`.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			args := map[string]any{"device": true}
 			if s := strings.TrimSpace(label); s != "" {
 				args["label"] = s
+			}
+			if cmd.Flags().Changed("retention") {
+				days, err := parseRetentionDays(retention)
+				if err != nil {
+					return err
+				}
+				args["retention"] = days
 			}
 			c, err := resolveClient(true, false)
 			if err != nil {
@@ -72,6 +81,7 @@ func newDeviceAddCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&label, "label", "", "a friendly name for the device (e.g. \"kitchen-ipad\")")
+	cmd.Flags().StringVar(&retention, "retention", "", "days to keep this device's DNS/query logs (0-3650); 0 = keep none (the security floor is still retained for a fixed operator window)")
 	return cmd
 }
 
