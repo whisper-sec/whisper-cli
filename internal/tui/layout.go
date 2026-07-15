@@ -69,7 +69,7 @@ func (a *App) renderHeader() string {
 	return a.bar(left, right)
 }
 
-// renderTabs draws the AGENTS · GRAPH · EXPLORE · LOGS · POLICY · CONFIG tab strip.
+// renderTabs draws the EXPLORE · AGENTS · GRAPH · LOGS · POLICY · CONFIG tab strip.
 func (a *App) renderTabs() string {
 	var tabs []string
 	for i, name := range modeNames {
@@ -103,15 +103,15 @@ func (a *App) renderFooter() string {
 func (a *App) footerHints() string {
 	switch a.mode {
 	case modeAgents:
-		return "j/k move · ↵ watch agent · a all · d details · c create · x kill · e connect · space pause · / filter · q quit"
+		return "j/k move · ↵ watch agent · a all · F freeze · d details · c create · x kill · e connect · space pause · / filter · q quit"
 	case modeGraph:
-		return "j/k scroll · space pause · C clear · 1 agents · q quit"
+		return "j/k scroll · space pause · C clear · 2 agents · q quit"
 	case modeLogs:
 		return "j/k move · ↵ drill · r run · k kind · t time · / filter · q quit"
 	case modePolicy:
 		return "a allow · b block · d default · w write · r reload · q quit"
 	case modeConfig:
-		return "t theme · l login · 1 agents · q quit"
+		return "t theme · l login · 2 agents · q quit"
 	case modeExplore:
 		return "j/k select · space peek · ↵ walk-in · h back · [ ] edge-type · z ornament · o catalog · / jump · : repl · q quit"
 	default:

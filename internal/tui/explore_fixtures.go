@@ -72,6 +72,48 @@ func fixtureCloudflare() deckState {
 	return deckState{focus: focus, edges: edges, edgeCur: 0}
 }
 
+// --- the DEFAULT landing: whisper.security ----------------------------------------
+// The keyless EXPLORE demo opens here - our own front door, dog-fooding the graph on the
+// domain that serves it. RESOLVES_TO links onto the mega fan-out deck so the guided
+// Phase-1 walk (enter on the first neighbour) still tells the whole story.
+
+func fixtureWhisperSecurity() deckState {
+	focus := graphNode{
+		Labels: []string{"HOSTNAME"},
+		Value:  "whisper.security",
+		Band:   "BENIGN",
+		Props: map[string]any{
+			"sub":        "apex whisper.security · TLD .security · dnssec ✓",
+			"first_seen": "2025-11-14",
+			"registrar":  "Gandi SAS",
+		},
+		Ident: &identity{Vendor: "Whisper Security (viaGraph B.V.)",
+			Roles: []string{"security graph", "DNS", "agent identity"}, Coverage: 0.99, Feeds: 5},
+	}
+	edges := []edgeGroup{
+		{Type: "RESOLVES_TO", Dir: 1, Total: 2, Sample: []graphNode{
+			ipv4("104.16.132.229", "BENIGN", cfIdent()),
+			ipv6("2606:4700::6810", "BENIGN", cfIdent()),
+		}},
+		{Type: "NAMESERVER_FOR", Dir: 1, Total: 2, Sample: []graphNode{
+			host("chloe.ns.cloudflare.com", "BENIGN"),
+			host("rustam.ns.cloudflare.com", "BENIGN"),
+		}},
+		{Type: "LINKS_TO", Dir: 1, Total: 3, Sample: []graphNode{
+			host("graph.whisper.security", "BENIGN"),
+			host("whisper.online", "BENIGN"),
+			host("docs.whisper.online", "BENIGN"),
+		}},
+		{Type: "HAS_EMAIL", Dir: 1, Total: 1, Sample: []graphNode{
+			node("EMAIL", "hello@whisper.security", "BENIGN"),
+		}},
+		{Type: "HAS_ORGANIZATION", Dir: 1, Total: 1, Sample: []graphNode{
+			node("ORGANIZATION", "viaGraph B.V.", "BENIGN"),
+		}},
+	}
+	return deckState{focus: focus, edges: edges, edgeCur: 0}
+}
+
 // --- SCREEN 2: mid-traversal onto a mega fan-out IPv4 -----------------------------------
 
 func fixtureMegaFanout() deckState {

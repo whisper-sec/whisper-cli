@@ -487,6 +487,179 @@ func TestMonitorObserveBlockRate(t *testing.T) {
 	}
 }
 
+// --- last-active fleet ordering + the freeze toggle --------------------------
+
+// TestAgentsOrderByLastActive asserts the DEFAULT fleet order follows folded activity:
+// fresh traffic moves an agent up; with no traffic the roster falls back to created-desc.
+func TestAgentsOrderByLastActive(t *testing.T) {
+	a := newTestApp(t, 120, 40)
+	a.agents = []model.Agent{
+		{ID: "agent-1", Address: "2a04:2a01::1", Label: "one", State: "active", Created: 3},
+		{ID: "agent-2", Address: "2a04:2a01::2", Label: "two", State: "active", Created: 2},
+		{ID: "agent-3", Address: "2a04:2a01::3", Label: "three", State: "active", Created: 1},
+	}
+	a.agentsView.syncRows()
+	if a.agentsView.sort != sortByActive {
+		t.Fatalf("the default sort must be last-active; got %s", sortKeyNames[a.agentsView.sort])
+	}
+	// No folded traffic: created-desc fallback keeps 1,2,3.
+	if order := a.agentsView.orderedIndices(); order[0] != 0 || order[2] != 2 {
+		t.Fatalf("cold fallback should be created-desc; got %v", order)
+	}
+	// Traffic for the created-OLDEST agent moves it to the top.
+	a.foldEvent(model.Event{Kind: "dns", TsMicros: 5_000_000, Addr128: "2a04:2a01::3",
+		QName: "x.", Decision: "allow"}, true)
+	if order := a.agentsView.orderedIndices(); order[0] != 2 {
+		t.Fatalf("newest traffic should move agent-3 up; got %v", order)
+	}
+	// Newer traffic for agent-1 tops it; agent-3 stays above the never-active agent-2.
+	a.foldEvent(model.Event{Kind: "conn", TsMicros: 6_000_000, Addr128: "2a04:2a01::1",
+		PeerHost: "1.1.1.1", PeerPort: 443}, true)
+	order := a.agentsView.orderedIndices()
+	if order[0] != 0 || order[1] != 2 || order[2] != 1 {
+		t.Fatalf("order should be 1(newest),3,2; got %v", order)
+	}
+	// The fold marks the fleet dirty and the tick re-syncs it (no per-event rebuild).
+	if !a.fleetDirty {
+		t.Error("a fresh watermark should mark the fleet dirty for the tick re-sort")
+	}
+	a.onTick()
+	if a.fleetDirty {
+		t.Error("the tick should clear fleetDirty after re-syncing")
+	}
+}
+
+// TestAgentsFreezeTogglePinsTheOrder asserts Shift-F pins the on-screen order (new
+// traffic no longer reshuffles), newcomers append at the tail, and F again resumes.
+func TestAgentsFreezeTogglePinsTheOrder(t *testing.T) {
+	a := newTestApp(t, 120, 40)
+	a.agents = []model.Agent{
+		{ID: "agent-1", Address: "2a04:2a01::1", State: "active", Created: 2},
+		{ID: "agent-2", Address: "2a04:2a01::2", State: "active", Created: 1},
+	}
+	a.agentsView.syncRows()
+	a.foldEvent(model.Event{Kind: "dns", TsMicros: 5_000_000, Addr128: "2a04:2a01::2",
+		QName: "x.", Decision: "allow"}, true)
+	if order := a.agentsView.orderedIndices(); order[0] != 1 {
+		t.Fatalf("agent-2 should lead after its traffic; got %v", order)
+	}
+	// Freeze via the real key path.
+	a.agentsView.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'F'}})
+	if !a.agentsView.frozen {
+		t.Fatal("F should freeze the ordering")
+	}
+	// Newer traffic for agent-1 must NOT reshuffle a frozen list.
+	a.foldEvent(model.Event{Kind: "dns", TsMicros: 9_000_000, Addr128: "2a04:2a01::1",
+		QName: "y.", Decision: "allow"}, true)
+	if order := a.agentsView.orderedIndices(); order[0] != 1 || order[1] != 0 {
+		t.Fatalf("frozen order must hold 2,1; got %v", order)
+	}
+	// A newcomer (stream-discovered) appends at the tail of a frozen list.
+	a.upsertStreamAgent("2a04:2a01::9", "agent-9")
+	if order := a.agentsView.orderedIndices(); len(order) != 3 || a.agents[order[2]].Address != "2a04:2a01::9" {
+		t.Fatalf("a newcomer should append at the frozen tail; got %v", order)
+	}
+	// The fleet title says so (the reader can see WHY it stopped moving).
+	if !strings.Contains(strip(a.agentsView.fleetTitle()), "frozen") {
+		t.Error("the fleet title should carry the frozen marker")
+	}
+	// Unfreeze: the live last-active order resumes (agent-1 now newest).
+	a.agentsView.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'F'}})
+	if order := a.agentsView.orderedIndices(); order[0] != 0 {
+		t.Fatalf("unfreeze should resume last-active order with agent-1 first; got %v", order)
+	}
+}
+
+// --- blocked events name WHAT was blocked -----------------------------------
+
+// TestBlockedSummaryNamesTheTarget folds a blocked lookup + a denied egress and asserts
+// the monitor summary names the qname and the peer host:port - in the (all) scope, the
+// per-agent scope, and the rendered frame (glyph-carried, so NO_COLOR reads the same).
+func TestBlockedSummaryNamesTheTarget(t *testing.T) {
+	a := newTestApp(t, 170, 44)
+	a.foldEvent(model.Event{Kind: "dns", TsMicros: 1_000_000, Addr128: "2a04:2a01::9",
+		QName: "ads.bad.example.", Decision: "block"}, true)
+	a.foldEvent(model.Event{Kind: "conn", TsMicros: 2_000_000, Addr128: "2a04:2a01::9",
+		PeerHost: "10.9.9.9", PeerPort: 445, Reason: "fw-deny"}, true)
+
+	q, p := a.monitorVw.lastBlockedTargets("")
+	if q != "ads.bad.example" || p != "10.9.9.9:445" {
+		t.Fatalf("(all) scope should name both targets; got q=%q p=%q", q, p)
+	}
+	q, p = a.monitorVw.lastBlockedTargets("2a04:2a01::9")
+	if q != "ads.bad.example" || p != "10.9.9.9:445" {
+		t.Fatalf("the agent's own scope should name its targets; got q=%q p=%q", q, p)
+	}
+	if q, p = a.monitorVw.lastBlockedTargets("2a04:2a01::1"); q != "" || p != "" {
+		t.Errorf("an uninvolved agent's scope must stay empty; got q=%q p=%q", q, p)
+	}
+	// An OLDER out-of-order row (a backfill replay) must never overwrite a fresher target.
+	a.foldEvent(model.Event{Kind: "dns", TsMicros: 500_000, Addr128: "2a04:2a01::9",
+		QName: "stale.example.", Decision: "block"}, false)
+	if q, _ := a.monitorVw.lastBlockedTargets(""); q != "ads.bad.example" {
+		t.Errorf("an older backfill row must not overwrite the newest target; got %q", q)
+	}
+
+	// The rendered (all)-scope frame carries the names + the ✗ glyph.
+	a.mode = modeAgents
+	a.layout()
+	out := strip(a.View())
+	for _, want := range []string{"last blocked:", "ads.bad.example", "10.9.9.9:445", "✗"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("the monitor summary should name the blocked target %q; frame:\n%s", want, out)
+		}
+	}
+}
+
+// --- the explicit (all) selection is the default -----------------------------
+
+// TestAllScopeIsDefaultAndAggregates pins the default: nothing focused, the scope reads
+// (all), and the aggregate numbers sum EVERY agent's ring (panels honor the selection).
+func TestAllScopeIsDefaultAndAggregates(t *testing.T) {
+	a := newTestApp(t, 150, 42)
+	if a.monitorVw.focused != "" {
+		t.Fatalf("the default scope must be (all); focused=%q", a.monitorVw.focused)
+	}
+	if title := a.monitorVw.scopeTitle(); !strings.Contains(title, "(all)") {
+		t.Errorf("the scope title should carry the explicit (all); got %q", title)
+	}
+	// Two agents' recent conns: the (all) rate sums both rings; a single key scopes to one.
+	now := time.Now().UnixMicro()
+	a.foldEvent(model.Event{Kind: "conn", TsMicros: now, Addr128: "2a04:2a01::1",
+		PeerHost: "1.1.1.1", PeerPort: 443, BytesUp: 100, BytesDown: 100}, true)
+	a.foldEvent(model.Event{Kind: "conn", TsMicros: now, Addr128: "2a04:2a01::2",
+		PeerHost: "1.0.0.1", PeerPort: 443, BytesUp: 100, BytesDown: 100}, true)
+	if got := a.monitorVw.connPerMin(""); got != 2 {
+		t.Errorf("(all) conn rate should sum every ring; got %v", got)
+	}
+	if got := a.monitorVw.connPerMin("2a04:2a01::1"); got != 1 {
+		t.Errorf("a single-agent scope should count only its ring; got %v", got)
+	}
+	// The frame names the (all) selection; the GRAPH tab honors it too.
+	a.mode = modeAgents
+	a.layout()
+	if out := strip(a.View()); !strings.Contains(out, "(all)") {
+		t.Error("the AGENTS frame should render the explicit (all) selection")
+	}
+	a.mode = modeGraph
+	a.layout()
+	if out := strip(a.View()); !strings.Contains(out, "(all agents)") {
+		t.Error("the GRAPH title should honor the (all) scope")
+	}
+	// Focusing an agent leaves (all) reachable and labeled on the way back.
+	a.agents = []model.Agent{{ID: "agent-1", Address: "2a04:2a01::1", State: "active"}}
+	a.selected = 0
+	a.agentsView.syncRows()
+	a.monitorVw.focus(a.agents[0])
+	if title := a.monitorVw.scopeTitle(); strings.Contains(title, "(all)") {
+		t.Errorf("a focused scope must name the agent, not (all); got %q", title)
+	}
+	a.monitorVw.unfocus()
+	if title := a.monitorVw.scopeTitle(); !strings.Contains(title, "(all)") {
+		t.Errorf("unfocus must return to the (all) selection; got %q", title)
+	}
+}
+
 // --- helpers ---------------------------------------------------------------------
 
 // strip removes ANSI escapes so assertions test the rendered text/shapes, not styling.

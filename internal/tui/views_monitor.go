@@ -29,6 +29,15 @@ type agentRing struct {
 	dnsTotal   [kbpsWindow]float64 // per-second dns query counts
 	dnsBlocked [kbpsWindow]float64 // per-second dns blocked counts
 	head       int                 // index of the current second's bucket
+
+	// WHAT was blocked, not just how much: the most recent blocked/refused
+	// lookup's qname and the most recent denied egress peer (host:port), with their
+	// event timestamps so the tenant-wide aggregate can pick the newest across rings.
+	// Session-lifetime (never rolled by advance) - "last blocked" means last seen.
+	lastBlockedQName string
+	lastBlockedUS    int64
+	lastDeniedPeer   string
+	lastDeniedUS     int64
 }
 
 // monitorView is the live half of the merged AGENTS dashboard: the per-agent rings (fed
@@ -86,6 +95,21 @@ func (v *monitorView) observe(e model.Event) {
 	if r == nil {
 		r = &agentRing{}
 		v.rings[key] = r
+	}
+	// Name the blocked TARGET, newest-wins by event time so an out-of-order
+	// backfill row never overwrites a fresher live one. The feed rows already show
+	// every target; this is the summary's memory of the most recent one.
+	switch e.Kind {
+	case "dns":
+		if isBlock(e.Decision) && e.QName != "" && e.TsMicros >= r.lastBlockedUS {
+			r.lastBlockedQName = components.TrimDot(e.QName)
+			r.lastBlockedUS = e.TsMicros
+		}
+	case "conn":
+		if isDeny(e.Reason) && e.PeerHost != "" && e.TsMicros >= r.lastDeniedUS {
+			r.lastDeniedPeer = fmt.Sprintf("%s:%d", e.PeerHost, e.PeerPort)
+			r.lastDeniedUS = e.TsMicros
+		}
 	}
 	// Bucket by the EVENT's own timestamp, not the current head: a -15m backfill or a
 	// 2-minute poll batch folded into head collapses history into one giant "now" spike
@@ -208,6 +232,48 @@ func (v *monitorView) blockRate(key string) float64 {
 		return 0
 	}
 	return blk / tot
+}
+
+// lastBlockedTargets returns the most recent blocked qname and denied peer for a scope
+// key = one agent's ring, "" = the newest across EVERY ring (the (all) view).
+// Empty strings mean none seen this session - the caller renders nothing (honest).
+func (v *monitorView) lastBlockedTargets(key string) (qname, peer string) {
+	var qUS, pUS int64
+	fold := func(r *agentRing) {
+		if r.lastBlockedQName != "" && r.lastBlockedUS >= qUS {
+			qname, qUS = r.lastBlockedQName, r.lastBlockedUS
+		}
+		if r.lastDeniedPeer != "" && r.lastDeniedUS >= pUS {
+			peer, pUS = r.lastDeniedPeer, r.lastDeniedUS
+		}
+	}
+	if key == "" {
+		for _, r := range v.rings {
+			fold(r)
+		}
+	} else if r := v.rings[key]; r != nil {
+		fold(r)
+	}
+	return qname, peer
+}
+
+// blockedTargetLine renders the WHAT-was-blocked summary line for the current scope
+// or "" when nothing was blocked this session. The ✗ glyph carries the meaning
+// (NO_COLOR-safe); red reinforces. Both targets show when both exist.
+func (v *monitorView) blockedTargetLine(key string, iw int) string {
+	qname, peer := v.lastBlockedTargets(key)
+	if qname == "" && peer == "" {
+		return ""
+	}
+	th := v.app.th
+	parts := make([]string, 0, 2)
+	if qname != "" {
+		parts = append(parts, th.Error.Render("✗ dns ")+th.Text.Render(qname))
+	}
+	if peer != "" {
+		parts = append(parts, th.Error.Render("✗ egress ")+th.Text.Render(peer))
+	}
+	return truncate(th.Dim.Render("  last blocked: ")+strings.Join(parts, th.Dim.Render(" · ")), iw)
 }
 
 // advance rolls every ring forward one bucket (called once per real second from the tick).
@@ -374,28 +440,34 @@ func (v *monitorView) panelLines(iw, ih int) []string {
 	return lines
 }
 
-// scopeTitle names what the monitor is pinned to (the section divider label).
+// scopeTitle names what the monitor is pinned to (the section divider label). The
+// default selection is the explicit "(all)" - every agent, aggregated.
 func (v *monitorView) scopeTitle() string {
 	if v.focused == "" {
-		return "watching · whole tenant"
+		return fmt.Sprintf("watching · (all) · %d agents", len(v.app.agents))
 	}
 	return "watching · " + components.ShortAddr(v.focused, 14, 8)
 }
 
-// watchedLines renders the watched agent's own stat block (2 lines), or the tenant
-// aggregate rates with the how-to hint when nothing is focused.
+// watchedLines renders the watched agent's own stat block, or - the default - the
+// explicit "(all)" selection: every agent's traffic aggregated, with the
+// what-was-blocked line and the how-to-scope hint.
 func (v *monitorView) watchedLines(iw int) []string {
 	th := v.app.th
 	key := v.focused
 	if key == "" {
-		return []string{
+		lines := []string{
 			truncate(fmt.Sprintf("%s  conn/min %s · now %s kbps · block %.0f%%",
-				th.Dim.Render("▸ all agents"),
+				th.Accent.Render("▸ (all) agents"),
 				th.Text.Render(components.Count(int64(v.connPerMin("")))),
 				th.Text.Render(components.Count(int64(v.curKbps("")))),
 				v.blockRate("")*100), iw),
-			truncate(th.Dim.Render("  ↵ on an agent (or click it) to pin the monitor to its traffic"), iw),
 		}
+		if bl := v.blockedTargetLine("", iw); bl != "" {
+			lines = append(lines, bl)
+		}
+		return append(lines,
+			truncate(th.Dim.Render("  ↵ on an agent (or click it) to pin · a returns to (all)"), iw))
 	}
 	var ag model.Agent
 	found := false
@@ -426,7 +498,12 @@ func (v *monitorView) watchedLines(iw int) []string {
 	if !ag.Detailed {
 		stat = "  " + th.Dim.Render("loading counters...")
 	}
-	return []string{truncate(head, iw), truncate(stat, iw), truncate(rates, iw)}
+	out := []string{truncate(head, iw), truncate(stat, iw), truncate(rates, iw)}
+	// The focused scope names ITS most recent blocked targets too.
+	if bl := v.blockedTargetLine(key, iw); bl != "" {
+		out = append(out, bl)
+	}
+	return out
 }
 
 // chainTitle labels the activity section: the data source, the kind filter, and pause.

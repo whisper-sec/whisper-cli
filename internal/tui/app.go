@@ -15,21 +15,25 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/tui/theme"
 )
 
-// mode is one of the six top-level views (the tab bar). AGENTS is the merged primary
-// view (fleet + the selected agent's live monitor in one panel); GRAPH is the live,
-// self-expanding agent-activity graph fed by the monitor stream.
+// mode is one of the six top-level views (the tab bar). EXPLORE leads the order as tab 1
+// - the graph explorer is the showpiece; it opens on whisper.security); AGENTS is
+// the merged operational view (fleet + the selected agent's live monitor in one panel)
+// and remains the LAUNCH view (bare `whisper` lands on your agents; `whisper explore`
+// lands on tab 1). GRAPH is the live, self-expanding agent-activity graph fed by the
+// monitor stream. CONFIG stays last. Every dispatch site references modes BY NAME, so
+// this const block is the single place the order lives.
 type mode int
 
 const (
-	modeAgents mode = iota
+	modeExplore mode = iota
+	modeAgents
 	modeGraph
-	modeExplore
 	modeLogs
 	modePolicy
 	modeConfig
 )
 
-var modeNames = []string{"AGENTS", "GRAPH", "EXPLORE", "LOGS", "POLICY", "CONFIG"}
+var modeNames = []string{"EXPLORE", "AGENTS", "GRAPH", "LOGS", "POLICY", "CONFIG"}
 
 // overlay is a modal/palette state stacked above the active view.
 type overlay int
@@ -112,9 +116,17 @@ type App struct {
 	// hybrid backfill/poll bookkeeping (the pattern)
 	backfillToken int   // drops a stale backfill reply after a focus change
 	lastEventUS   int64 // newest folded event ts (µs) - dedup for the poll fallback
-	bufferedPause int   // events dropped while paused (the "⏸ N buffered" counter)
-	hbPulse       int   // heartbeat animation phase (●→◉→●), advanced on the tick
-	pollArmed     bool  // ONE poll chain at a time - N failed reconnects must not stack N pollers
+
+	// lastActiveUS is each agent's newest folded-event timestamp (µs), keyed exactly
+	// like the monitor rings (Addr128, falling back to the agent id - Agent.Key()).
+	// It drives the fleet's last-active sort: fresh traffic moves an agent up.
+	// Derived from data we already fold - never fetched (self-contained by design).
+	// fleetDirty coalesces the re-sort to the 4Hz tick (never a rebuild per event).
+	lastActiveUS  map[string]int64
+	fleetDirty    bool
+	bufferedPause int  // events dropped while paused (the "⏸ N buffered" counter)
+	hbPulse       int  // heartbeat animation phase (●→◉→●), advanced on the tick
+	pollArmed     bool // ONE poll chain at a time - N failed reconnects must not stack N pollers
 
 	// toast (transient status)
 	toast      string
@@ -139,16 +151,17 @@ type App struct {
 func New(opts Options) *App {
 	th := theme.New(opts.ThemeName, opts.NoColor, opts.Light)
 	a := &App{
-		opts:     opts,
-		client:   opts.Client,
-		th:       th,
-		mode:     modeAgents,
-		feed:     newFeedRing(2000),
-		join:     newJoinCache(512),
-		lgraph:   newLiveGraph(),
-		stream:   streamIdle,
-		streamMu: make(chan struct{}, 1),
-		loading:  true,
+		opts:         opts,
+		client:       opts.Client,
+		th:           th,
+		mode:         modeAgents,
+		feed:         newFeedRing(2000),
+		join:         newJoinCache(512),
+		lgraph:       newLiveGraph(),
+		stream:       streamIdle,
+		streamMu:     make(chan struct{}, 1),
+		lastActiveUS: map[string]int64{},
+		loading:      true,
 	}
 	a.agentsView = newAgentsView(a)
 	a.logsView = newLogsView(a)
@@ -484,6 +497,13 @@ func (a *App) onTick() {
 		if a.toastTicks == 0 {
 			a.toast = ""
 		}
+	}
+	// A fresh last-active watermark re-sorts the fleet at tick cadence: the list
+	// follows live activity without a per-event table rebuild. syncRows itself honors
+	// the freeze toggle, so a frozen list stays put even while watermarks advance.
+	if a.fleetDirty {
+		a.fleetDirty = false
+		a.agentsView.syncRows()
 	}
 	// The render tick fires at 4Hz; advance the per-second sparkline rings once a second
 	// (every 4th tick). The always-on feed re-renders each frame from the ring.

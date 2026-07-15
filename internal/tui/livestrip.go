@@ -123,6 +123,20 @@ func (a *App) foldEvent(e model.Event, live bool) {
 	if e.TsMicros > a.lastEventUS {
 		a.lastEventUS = e.TsMicros
 	}
+	// The last-active watermark behind the fleet's default sort: keyed exactly
+	// like the rings so a fleet row and its ring agree on identity. Every fold path
+	// (live, backfill, poll) counts as activity. The re-sort itself happens at most
+	// once per 4Hz tick (fleetDirty), never per event - a backfill folding hundreds of
+	// rows must not rebuild the table hundreds of times.
+	if key := e.Addr128; key != "" || e.Agent != "" {
+		if key == "" {
+			key = e.Agent
+		}
+		if e.TsMicros > a.lastActiveUS[key] {
+			a.lastActiveUS[key] = e.TsMicros
+			a.fleetDirty = true
+		}
+	}
 	if live && a.paused {
 		a.bufferedPause++
 		return

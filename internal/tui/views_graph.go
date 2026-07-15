@@ -105,7 +105,7 @@ func (v *graphView) view(w, h int) string {
 // title carries the honest graph size + scope + pause state.
 func (v *graphView) title() string {
 	nodes, edges := v.app.lgraph.stats()
-	scope := "tenant-wide"
+	scope := "(all agents)" // the default: the graph grows from EVERY agent's fold
 	if f := v.app.monitorVw.focused; f != "" {
 		scope = "watching " + components.ShortAddr(f, 10, 6)
 	}

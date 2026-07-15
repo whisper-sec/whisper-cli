@@ -18,17 +18,20 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/tui/theme"
 )
 
-// sortKey orders the fleet table (Shift-K cycles).
+// sortKey orders the fleet table (Shift-K cycles). last-active leads and is the DEFAULT
+// fresh traffic moves an agent up, so the busy fleet reads newest-first with
+// zero configuration; Shift-F freezes the order in place while you read.
 type sortKey int
 
 const (
-	sortByCreated sortKey = iota
+	sortByActive sortKey = iota
+	sortByCreated
 	sortByName
 	sortByState
 	sortByTraffic
 )
 
-var sortKeyNames = []string{"created", "name", "state", "traffic"}
+var sortKeyNames = []string{"active", "created", "name", "state", "traffic"}
 
 // agentsView is the merged primary dashboard: the fleet table on the left, the
 // SELECTED agent's live monitor (aggregate counters, throughput, activity feed) on the
@@ -51,10 +54,17 @@ type agentsView struct {
 	matches   []int // indices into app.agents matching the filter
 
 	sort sortKey
+
+	// freeze: Shift-F pins the CURRENT visual order so the last-active sort
+	// stops reshuffling under the reader's eyes. frozenOrder snapshots the Key() list
+	// at freeze time; agents that appear later append at the tail (in live sort order),
+	// removed ones simply drop out. Shift-F again resumes the live re-ordering.
+	frozen      bool
+	frozenOrder []string
 }
 
 func newAgentsView(app *App) *agentsView {
-	v := &agentsView{app: app, sort: sortByCreated}
+	v := &agentsView{app: app, sort: sortByActive}
 	v.tbl = table.New(
 		table.WithFocused(true),
 		table.WithColumns(v.columns(80)),
@@ -234,7 +244,9 @@ func (v *agentsView) row(a model.Agent) table.Row {
 	return table.Row{name, addr, a.State, spark}
 }
 
-// orderedIndices returns app.agent indices in the active sort + filter order.
+// orderedIndices returns app.agent indices in the active sort + filter order. When the
+// order is FROZEN the freeze-time snapshot order wins: known agents keep their
+// pinned positions, newcomers append at the tail (in live sort order), gone ones drop.
 func (v *agentsView) orderedIndices() []int {
 	var idxs []int
 	if v.filtering || v.filter != "" {
@@ -254,9 +266,37 @@ func (v *agentsView) orderedIndices() []int {
 			return a.State < b.State
 		case sortByTraffic:
 			return (a.BytesUp + a.BytesDown) > (b.BytesUp + b.BytesDown)
-		default:
+		case sortByCreated:
+			return a.Created > b.Created
+		default: // sortByActive: newest folded traffic first
+			aa, bb := v.app.lastActiveUS[a.Key()], v.app.lastActiveUS[b.Key()]
+			if aa != bb {
+				return aa > bb
+			}
+			// No folded traffic yet: fall back to the roster's own recency signals
+			// (op:agent last_seen, then created) so a cold launch is still sensible.
+			if a.LastSeen != b.LastSeen {
+				return a.LastSeen > b.LastSeen
+			}
 			return a.Created > b.Created
 		}
+	})
+	if !v.frozen || len(v.frozenOrder) == 0 {
+		return idxs
+	}
+	// Frozen: replay the snapshot order over the live-sorted list. Stable, so agents
+	// outside the snapshot keep their live relative order at the tail.
+	pos := make(map[string]int, len(v.frozenOrder))
+	for i, k := range v.frozenOrder {
+		pos[k] = i
+	}
+	sort.SliceStable(idxs, func(i, j int) bool {
+		pi, iok := pos[ag[idxs[i]].Key()]
+		pj, jok := pos[ag[idxs[j]].Key()]
+		if iok && jok {
+			return pi < pj
+		}
+		return iok && !jok // snapshot members first; newcomers sink to the tail
 	})
 	return idxs
 }
@@ -303,6 +343,17 @@ func (v *agentsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		v.syncRows()
 		app.setToast("sort: "+sortKeyNames[v.sort], false)
 		return app, nil
+	case "F": // Shift-F freezes/unfreezes the ordering - stop the reshuffle while reading
+		v.frozen = !v.frozen
+		if v.frozen {
+			v.frozenOrder = v.snapshotOrderKeys()
+			app.setToast("order frozen - F resumes auto-reorder", false)
+		} else {
+			v.frozenOrder = nil
+			v.syncRows()
+			app.setToast("auto-reorder resumed (sort: "+sortKeyNames[v.sort]+")", false)
+		}
+		return app, nil
 	case "z":
 		v.dense = !v.dense
 		v.tbl.SetRows(nil) // rows must never be wider than the column set
@@ -314,9 +365,9 @@ func (v *agentsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// the SSE + backfills for that one /128). `m` stays as the muscle-memory alias.
 		return v.watchSelected()
 	case "a":
-		// back to the whole tenant (un-narrow the stream).
+		// back to the explicit (all) selection - every agent, aggregated.
 		if cmd := app.monitorVw.unfocus(); cmd != nil {
-			app.setToast("watching the whole tenant", false)
+			app.setToast("watching (all) agents", false)
 			return app, cmd
 		}
 		return app, nil
@@ -346,6 +397,18 @@ func (v *agentsView) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return app, nil
 	}
 	return app, nil
+}
+
+// snapshotOrderKeys captures the CURRENT visual order as agent keys - taken at
+// freeze time, while frozen is already set, so it snapshots what is on screen right now.
+// (orderedIndices ignores an empty frozenOrder, so calling it here is snapshot-safe.)
+func (v *agentsView) snapshotOrderKeys() []string {
+	order := v.orderedIndices()
+	keys := make([]string, 0, len(order))
+	for _, idx := range order {
+		keys = append(keys, v.app.agents[idx].Key())
+	}
+	return keys
 }
 
 // watchSelected pins the live monitor to the selected agent (the ENTER / click action).
@@ -478,6 +541,9 @@ func (v *agentsView) fleetTitle() string {
 		}
 	}
 	t := fmt.Sprintf("FLEET %d agents · %d active", len(v.app.agents), active)
+	if v.frozen {
+		t += " · ❄ frozen" // the order is pinned; F resumes
+	}
 	if v.filtering || v.filter != "" {
 		t += "  /" + v.filter
 	}

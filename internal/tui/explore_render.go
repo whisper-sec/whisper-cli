@@ -253,7 +253,10 @@ func (v *exploreView) renderReplBar(w int) []string {
 	th := v.app.th
 	q := "MATCH (n {" + matchKeyFor(v.deck.focus) + ":$v})-[r]-(m) RETURN type(r), labels(m), count(*) ORDER BY count(*) DESC"
 	l1 := th.Accent.Render(": ") + th.Text.Render(q)
-	l2 := th.Dim.Render("  $v = " + v.deck.focus.Value + "   ·  ↑↓ history  ·  ↵ run to RESULT  ·  esc close")
+	// Honest hint: this bar previews the query shape; in-deck execution lands in a later
+	// phase, so we say what works TODAY (`whisper query` runs it live) instead of
+	// promising an ↵-to-RESULT that closes the bar (never a surprise).
+	l2 := th.Dim.Render("  $v = " + v.deck.focus.Value + "   ·  ↵/esc close  ·  run it live: whisper query")
 	return []string{padRight(l1, w), padRight(l2, w)}
 }
 
