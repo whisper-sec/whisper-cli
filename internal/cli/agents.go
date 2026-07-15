@@ -166,7 +166,7 @@ func renderAgentDetail(res *client.Result) {
 // --- create ----------------------------------------------------------------------
 
 func newCreateCmd() *cobra.Command {
-	var email, name, label string
+	var email, name, label, retention string
 	var register bool
 	var ids identifierFlags
 	var wallet, walletChain string
@@ -195,7 +195,9 @@ func newCreateCmd() *cobra.Command {
 			"use `whisper connect --tier wireguard --vin <VIN>` - the device holds the key.\n\n" +
 			"With --wallet, additionally pin an x402 wallet (EOA) to the new /128 as a\n" +
 			"resolvable TXT binding (via op:host) so a facilitator can tie the wallet to the\n" +
-			"verifiable, revocable agent identity.",
+			"verifiable, revocable agent identity.\n\n" +
+			"With --register, --retention sets how many days the new agent's DNS/query logs\n" +
+			"are kept (0-3650); change it later with `whisper policy --retention`.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --label is the legacy spelling of the name; --name wins (§3.2).
@@ -213,6 +215,14 @@ func newCreateCmd() *cobra.Command {
 				register = true
 			}
 
+			// --retention sets the NEW agent's log-retention policy, which only the register
+			// path mints. On the plain op:identity path there is nothing to attach it to, so
+			// point the user at the right flag rather than silently dropping it (Postel: a
+			// clear, helpful error, never a silent no-op).
+			if cmd.Flags().Changed("retention") && !register {
+				return usageErr("--retention applies when minting a new agent; add --register, or set it later with `whisper policy --retention`")
+			}
+
 			if register {
 				if strings.TrimSpace(chosen) == "" {
 					return usageErr("--register needs a --name")
@@ -223,6 +233,13 @@ func newCreateCmd() *cobra.Command {
 				}
 				if deviceID != "" {
 					args["device_id"] = deviceID
+				}
+				if cmd.Flags().Changed("retention") {
+					days, rerr := parseRetentionDays(retention)
+					if rerr != nil {
+						return rerr
+					}
+					args["retention"] = days
 				}
 				c, err := resolveClient(true, false)
 				if err != nil {
@@ -303,6 +320,7 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&label, "label", "", "legacy alias for --name (--name wins)")
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in; surfaced in RDAP)")
 	cmd.Flags().BoolVar(&register, "register", false, "mint a NEW agent + its own API key (op:register)")
+	cmd.Flags().StringVar(&retention, "retention", "", "with --register: days to keep the new agent's DNS/query logs (0-3650); 0 = keep none (the security floor is still retained for a fixed operator window)")
 	ids.register(cmd)
 	cmd.Flags().StringVar(&wallet, "wallet", "", "pin an x402 wallet (EOA) to the new /128 as a resolvable TXT binding (op:host)")
 	cmd.Flags().StringVar(&walletChain, "wallet-chain", "", "the wallet's chain id for --wallet (e.g. eip155:8453)")
