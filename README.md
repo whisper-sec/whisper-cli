@@ -182,7 +182,7 @@ Run `whisper <command> --help` for details.
 ## Query the security graph
 
 The same [whisper.security](https://www.whisper.security) graph the Whisper resolver
-consults on every lookup - 3.6B nodes (hostnames, IPs, ASNs, certs, threat intel), 30B
+consults on every lookup - 7.4B nodes (hostnames, IPs, ASNs, certs, threat intel), 39B
 relationships - is a first-class CLI surface. `whisper query` runs raw parameterised
 Cypher; `whisper graph` runs a named recipe from the embedded catalog:
 
