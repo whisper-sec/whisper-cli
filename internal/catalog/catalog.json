@@ -1420,7 +1420,7 @@
         "slowPatterns",
         "bestPractices"
       ],
-      "prompt": "List the graph schema. CALL db.schema() (no args). Returns node + relationship types with live counts (HOSTNAME ~2.63B, IPV4 ~619M, ...), descriptions, examples and per-type query best-practices.",
+      "prompt": "List the graph schema. CALL db.schema() (no args). Returns node + relationship types with live counts (HOSTNAME, IPV4, ...), descriptions, examples and per-type query best-practices.",
       "provenance": true,
       "version": "1.0.0"
     },

@@ -17,7 +17,7 @@ import (
 )
 
 // newQueryCmd is `whisper query <cypher>`: RAW parameterised Cypher against the
-// public whisper.security graph (the 3.6B-node security graph the resolver consults),
+// public whisper.security graph (the 7.4B-node security graph the resolver consults),
 // POSTed as {"query","parameters"} with the caller's API key. The named counterpart
 // is `whisper graph <recipe>`; this is the power tool for everything else.
 func newQueryCmd() *cobra.Command {

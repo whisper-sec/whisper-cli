@@ -137,7 +137,7 @@ func renderTrailRail(deck deckState, pins, w, h int, th *theme.Theme) []string {
 
 // renderMinimap draws a tiny grid showing WHERE you stand among your pins and trail. It
 // uses NO invented coordinates: the current node sits centre, trail nodes stack above it,
-// pins mark the edges. It is orientation, not a map of the 3.67B-node graph.
+// pins mark the edges. It is orientation, not a map of the 7.4B-node graph.
 func renderMinimap(deck deckState, pins, w, h int, th *theme.Theme) []string {
 	iw := w
 	if iw > 11 {

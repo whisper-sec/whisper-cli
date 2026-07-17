@@ -33,11 +33,11 @@ func graphStub(t *testing.T) *httptest.Server {
 		w.Header().Set("Content-Type", "application/json")
 		switch {
 		case strings.Contains(q, "db.schema"):
-			schema := `{"nodes":[{"label":"IPV4","count":619,"virtual":false,"properties":[{"name":"name","type":"String"}]},{"label":"HOSTNAME","count":2631,"virtual":false,"properties":[]}],"relationships":[{"type":"RESOLVES_TO","source":["HOSTNAME"],"target":["IPV4","IPV6"],"count":1,"virtual":false},{"type":"LOCATED_IN","source":["IPV4"],"target":["CITY"],"count":1,"virtual":false}]}`
+			schema := `{"nodes":[{"label":"IPV4","count":12,"virtual":false,"properties":[{"name":"name","type":"String"}]},{"label":"HOSTNAME","count":34,"virtual":false,"properties":[]}],"relationships":[{"type":"RESOLVES_TO","source":["HOSTNAME"],"target":["IPV4","IPV6"],"count":1,"virtual":false},{"type":"LOCATED_IN","source":["IPV4"],"target":["CITY"],"count":1,"virtual":false}]}`
 			enc, _ := json.Marshal(schema)
 			_, _ = w.Write([]byte(`{"columns":["schema"],"rows":[{"schema":` + string(enc) + `}]}`))
 		case strings.Contains(q, "db.labels"):
-			_, _ = w.Write([]byte(`{"columns":["label","count"],"rows":[{"label":"HOSTNAME","count":2631},{"label":"IPV4","count":619}]}`))
+			_, _ = w.Write([]byte(`{"columns":["label","count"],"rows":[{"label":"HOSTNAME","count":34},{"label":"IPV4","count":12}]}`))
 		case strings.Contains(q, "explain"):
 			_, _ = w.Write([]byte(`{"columns":["indicator","score","level"],"rows":[{"indicator":"1.1.1.1","score":37.8,"level":"INFO"}]}`))
 		case strings.Contains(q, "whisper.identify"):
