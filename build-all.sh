@@ -37,7 +37,7 @@ PKG="github.com/whisper-sec/whisper-cli/internal/cli"
 LDFLAGS="-s -w -X ${PKG}.Version=${VERSION}"
 
 command -v go >/dev/null 2>&1 || {
-  echo "build-all.sh: 'go' not found on PATH - install Go 1.24+ (https://go.dev/dl/) and retry." >&2
+  echo "build-all.sh: 'go' not found on PATH - install Go 1.25+ (https://go.dev/dl/) and retry." >&2
   exit 1
 }
 [ -f "$PLATFORMS_FILE" ] || {
