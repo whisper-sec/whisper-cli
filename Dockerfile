@@ -1,6 +1,6 @@
 # Whisper CLI - multi-stage, CGO-free static build into a minimal distroless image.
 # Built + pushed multi-arch (amd64/arm64) to ghcr.io/whisper-sec/whisper by .github/workflows/docker.yml.
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.25-alpine AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev
