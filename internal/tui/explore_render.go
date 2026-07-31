@@ -513,7 +513,7 @@ func (v *exploreView) renderJumpFrame(w, h int) string {
 		sectionDivider("your agents (whisper.agents)", leftW-4, th),
 		th.Dim.Render(" land on an agent /128 to see identity,"),
 		th.Dim.Render(" policy, live traffic as graph nodes, then"),
-		th.Dim.Render(" walk its egress neighbours (RULE 14)."),
+		th.Dim.Render(" walk its egress neighbours."),
 		"",
 		th.Dim.Render(" ↵ land · esc cancel · Tab node↔agents"),
 	}

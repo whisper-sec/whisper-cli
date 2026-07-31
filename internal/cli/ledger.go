@@ -26,7 +26,7 @@ import (
 //	whisper ledger checkpoint                     # fetch + verify the latest signed checkpoint
 //	whisper ledger verify <addr> --salt <hex> --event-file <f>   # prove inclusion under it
 //
-// PRIVACY (ADR 0016): the public feed exposes ONLY the opaque commitment (leaf hash) + the
+// PRIVACY: the public feed exposes ONLY the opaque commitment (leaf hash) + the
 // inclusion proof + the signed checkpoint. To verify WHAT a commitment attests, the SUBJECT
 // supplies the (salt, event) they were given out-of-band; the verifier recomputes the leaf
 // and checks it is in the signed tree. Nobody but the subject can do this - selective
@@ -101,7 +101,7 @@ func newLedgerCheckpointCmd() *cobra.Command {
 			if err := cp.VerifySignature(key); err != nil {
 				return &client.ProblemError{Status: 1, Title: "checkpoint did not verify", Detail: err.Error()}
 			}
-			// (G5): recompute the cosignature/v1 verification ourselves - count FRESH,
+			// recompute the cosignature/v1 verification ourselves - count FRESH,
 			// VERIFYING, INDEPENDENT cosignatures on THIS note. Pinned mode trusts ONLY the
 			// --witness-key pins (the served policy is not consulted for the key set); unpinned
 			// mode falls back to the server-published policy, and the verdict says so. A missing
