@@ -34,8 +34,8 @@ func mcpGraphTools() []map[string]any {
 	tools := []map[string]any{
 		{
 			"name": mcpGraphQueryToolName,
-			"description": "Run raw parameterised Cypher against the whisper.security graph (7.4B nodes: " +
-				"hostnames, IPs, ASNs, certs, threat intel) and get {columns,rows} back - rows are objects " +
+			"description": "Run raw parameterised Cypher against the whisper.security graph (7.4B nodes / " +
+				"39B relationships: hostnames, IPs, ASNs, certs, threat intel) and get {columns,rows} back - rows are objects " +
 				"keyed by column name. Reference parameters as $name in the query and pass them in params. " +
 				"Prefer the named whisper_* recipe tools for their questions; use this for everything else. " +
 				"Docs: " + catalog.RawCypherDocsURL(),

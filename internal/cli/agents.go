@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sort"
@@ -176,7 +177,8 @@ func newCreateCmd() *cobra.Command {
 		Long: "Create the caller's own /128 identity via op:identity. Every agent has a human\n" +
 			"name - pass --name (an unnamed agent is a future support ticket; we refuse\n" +
 			"to create one). On a terminal with no --name we ask for it; headless, --name is\n" +
-			"required.\n\n" +
+			"required. One key holds ONE identity: if this key already has its /128, create\n" +
+			"reuses it and says so; --register is the way to mint a genuinely new agent.\n\n" +
 			"With --register, mint a brand-new agent with its own API key via op:register\n" +
 			"(the key is shown ONCE - capture it).\n\n" +
 			"Typed identity (one of): register the object under a domain-specific identifier it\n" +
@@ -285,6 +287,12 @@ func newCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// snapshot the identities held BEFORE the call. op:identity is
+			// idempotent on the server (one key = one /128) and returns an existing
+			// identity with NO wire marker, so looking first is the only honest way
+			// to tell "created" from "reused" - and a silent reuse under a fresh
+			// --name is exactly the surprise we refuse to emit.
+			pre := preCreateIdentityAddrs(c)
 			env, err := createIdentityWithDevice(c, finalName, email, deviceID)
 			if err != nil {
 				return err
@@ -298,15 +306,30 @@ func newCreateCmd() *cobra.Command {
 			// mirrors the --register path, which already routes through renderEnvelope.
 			// --json wins over --quiet (same precedence as --register).
 			handled, perr := renderEnvelope(env)
-			if handled || perr != nil {
+			if perr != nil {
 				return perr
 			}
 			choice := identityChoice(env, finalName)
+			prevName, reused := pre[choice.addr]
+			reused = reused && choice.addr != ""
+			// The reuse note is stderr CHROME: printed on the human and --json paths
+			// (stdout stays machine-clean), suppressed under --quiet (no chrome).
+			if reused && !g.quiet {
+				fmt.Fprintf(os.Stderr,
+					"whisper: reusing existing agent %s - %s (this key already holds its identity; `whisper create --register --name <name>` mints a new one)\n",
+					firstNonBlank(prevName, choice.name), choice.addr)
+			}
+			if handled {
+				return nil
+			}
 			if g.quiet {
 				if choice.addr != "" {
 					fmt.Fprintln(os.Stdout, choice.addr)
 				}
 				return nil
+			}
+			if reused {
+				return nil // the reuse note above IS the report - never also claim "created"
 			}
 			if choice.addr != "" {
 				fmt.Fprintf(os.Stderr, "whisper: created %s - %s\n", choice.name, choice.addr)
@@ -431,6 +454,9 @@ func createAgent(c *client.Client, name string) (agentChoice, error) {
 // RDAP). Splitting it keeps createAgent's signature exactly as specified while the
 // `create` command can still pass --email.
 func createAgentWithContact(c *client.Client, name, email string) (agentChoice, error) {
+	// snapshot-first so the server's idempotent reuse (op:identity returns the
+	// caller's existing /128 with no wire marker) is SIGNALLED, never silent.
+	pre := preCreateIdentityAddrs(c)
 	env, err := createIdentity(c, name, email)
 	if err != nil {
 		return agentChoice{}, err
@@ -438,7 +464,48 @@ func createAgentWithContact(c *client.Client, name, email string) (agentChoice, 
 	if perr := envelopeError(env); perr != nil {
 		return agentChoice{}, perr
 	}
-	return identityChoice(env, strings.TrimSpace(name)), nil
+	choice := identityChoice(env, strings.TrimSpace(name))
+	if prev, ok := pre[choice.addr]; ok && choice.addr != "" {
+		fmt.Fprintf(os.Stderr, "whisper: reusing existing agent %s - %s\n",
+			firstNonBlank(prev, choice.name), choice.addr)
+	}
+	return choice, nil
+}
+
+// preCreateIdentityAddrs snapshots the caller's EXISTING identity /128s (address ->
+// display name) right before a create. op:identity is idempotent on the server (one
+// principal = one /128): when the caller already holds an identity it returns that row
+// with NO wire marker, so the only honest way to tell a fresh mint from a reuse is to
+// look before we leap. Best-effort by design: any listing failure yields nil -
+// the signal is chrome and must never block or fail the create itself. Bounded short
+// (the bestEffortTenant pattern) so create stays snappy. op:register is untouched: it
+// always mints a brand-new agent, so it has nothing to signal.
+func preCreateIdentityAddrs(c *client.Client) map[string]string {
+	cx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	env, err := c.Agents(cx, "list", map[string]any{"kind": "identities"})
+	if err != nil || env == nil || !env.Ok || env.Result == nil {
+		return nil
+	}
+	out := map[string]string{}
+	for _, rec := range env.Result.Records() {
+		item := rec
+		if m, ok := rec["item"].(map[string]any); ok {
+			item = m
+		}
+		addr := field(item, "address", "addr128")
+		if addr == "" {
+			continue
+		}
+		// The display name: an explicit label, else the friendly/canonical fqdn's
+		// first (per-agent) label - liberal in what we read.
+		name := field(item, "label", "agent", "id")
+		if name == "" {
+			name = firstLabel(field(item, "friendly", "fqdn"))
+		}
+		out[addr] = name
+	}
+	return out
 }
 
 // createIdentity fires the op:identity wire call and returns the RAW envelope, exactly as

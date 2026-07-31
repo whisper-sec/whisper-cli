@@ -9,8 +9,10 @@ require (
 	github.com/charmbracelet/bubbletea v1.3.10
 	github.com/charmbracelet/huh v1.0.0
 	github.com/charmbracelet/lipgloss v1.1.0
+	github.com/cloudflare/circl v1.6.4
 	github.com/miekg/dns v1.1.72
 	github.com/muesli/termenv v0.16.0
+	github.com/smallstep/pkcs7 v0.2.3
 	github.com/spf13/cobra v1.8.1
 	golang.org/x/crypto v0.55.0
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446

@@ -158,7 +158,7 @@ func computeSignedNoteKeyID(name string, pub ed25519.PublicKey) uint32 {
 	return binary.BigEndian.Uint32(d[:4])
 }
 
-// ---- (G5): witness cosignature verification -----------------------------------------
+// ---- witness cosignature verification -----------------------------------------
 
 // computeCosignatureKeyID mirrors the server's C2SP COSIGNATURE key-id (the 0x04 flavour):
 // first 4 bytes of SHA-256(name || '\n' || 0x04 || raw-ed25519-public), big-endian.
@@ -242,7 +242,7 @@ func TestCosignatureParsingDiscriminatesBlobWidths(t *testing.T) {
 	}
 }
 
-// TestIndependentCosignatureVerdict proves the HONEST CLI verdict (G5): "publicly
+// TestIndependentCosignatureVerdict proves the HONEST CLI verdict: "publicly
 // verifiable" requires a FRESH, VERIFYING cosignature from an INDEPENDENT witness - a stale
 // cosignature, an availability-only witness, a tampered signature, or a wrong key never count.
 func TestIndependentCosignatureVerdict(t *testing.T) {
@@ -392,7 +392,7 @@ func TestPinnedWitnessVerdict(t *testing.T) {
 	}
 }
 
-// TestFetchWitnessKeys proves the /witness/keys decode (G4/G5) - and that a 404
+// TestFetchWitnessKeys proves the /witness/keys decode - and that a 404
 // (witnessing off) surfaces as a clean ProblemError the CLI treats as "no policy".
 func TestFetchWitnessKeys(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
