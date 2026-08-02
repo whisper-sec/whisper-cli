@@ -28,7 +28,7 @@ import (
 //
 // Mechanism (nothing new, per the north star): each HELD session (interactive `whisper connect`, the
 // guided TTY hold, the `--ensure` daemon) writes one small JSON record - the /128, the ACTUAL bound
-// local endpoint, the tier, the port, our pid - under ~/.config/whisper-ns/sessions/ (0700/0600), and
+// local endpoint, the tier, the port, our pid - under ~/.config/whisper/sessions/ (0700/0600), and
 // removes it on teardown. A one-shot consults the registry FIRST and, before trusting a record,
 // CONFIRMS liveness with the existing probeWhisperProxy (a real SOCKS5 no-auth handshake), so a stale
 // record (crashed daemon, foreign listener) is discarded - and lazily cleaned up - never reused. No
@@ -53,9 +53,9 @@ var sessionsDirFn = defaultSessionsDir
 func defaultSessionsDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return filepath.Join(".config", "whisper-ns", "sessions")
+		return filepath.Join(".config", "whisper", "sessions")
 	}
-	return filepath.Join(home, ".config", "whisper-ns", "sessions")
+	return filepath.Join(home, ".config", "whisper", "sessions")
 }
 
 // sessionRecordPath maps a /128 to its record file. Colons are not portable in filenames

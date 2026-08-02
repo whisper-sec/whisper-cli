@@ -38,7 +38,7 @@ func newConnectCmd() *cobra.Command {
 			"                     Your key is generated locally and never leaves this host; the\n" +
 			"                     same local SOCKS5 endpoint fronts it, so tools need no change.\n\n" +
 			"Which identity it binds: --agent <id|/128> pins a specific one; else the\n" +
-			"agent persisted in ~/.config/whisper-ns/agent (written when you pick/create one);\n" +
+			"agent persisted in ~/.config/whisper/agent (written when you pick/create one);\n" +
 			"else, if you already have an agent, the server's reuse-most-recent default.\n\n" +
 			"If you have NO agent yet, connect creates one first - and every agent has a human\n" +
 			"name, so it asks for --name (a terminal prompts; headless --name is\n" +
@@ -82,7 +82,7 @@ func newConnectCmd() *cobra.Command {
 			}
 			// agent selection, in precedence order (highest first):
 			//   1. --agent <id|/128>   explicit flag (overrides everything)
-			//   2. ~/.config/whisper-ns/agent   the agent persisted by a prior pick/create
+			//   2. ~/.config/whisper/agent   the agent persisted by a prior pick/create
 			//   3. (absent)            ⇒ no selector ⇒ server reuse-most-recent default
 			// Empty at every rung ⇒ omit the arg entirely (the zero-config common case).
 			sel := resolveAgentSelector(agent, agentFile)
@@ -215,7 +215,7 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().StringVar(&vin, "vin", "", "bind this routed /128 to a vehicle VIN (automotive; op:connect)")
 	cmd.Flags().StringVar(&ecuSerial, "ecu-serial", "", "an ECU serial to combine with --vin (automotive)")
 	_ = cmd.Flags().MarkHidden("label") // --name is the documented spelling
-	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
+	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper/agent)")
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show the full egress detail block (default: one line)")
 	cmd.Flags().BoolVar(&ensure, "ensure", false, "idempotent: reuse a live proxy on the project's port, else start the tunnel as a detached daemon (used by `whisper init claude`)")
 	cmd.Flags().IntVar(&port, "port", 0, "pin the local proxy to a fixed loopback port (default: a free one)")

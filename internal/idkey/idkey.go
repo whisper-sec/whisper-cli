@@ -3,7 +3,7 @@
 
 // Package idkey is the client side of - the tunneled-tier AGENT-HELD identity key. It mints an
 // EC P-256 keypair LOCALLY (mirroring wgtun.GenerateKeypair's WireGuard keypair, one level up the
-// stack), persists it 0600 under ~/.config/whisper-ns/identity/ so it survives across reconnects, and
+// stack), persists it 0600 under ~/.config/whisper/identity/ so it survives across reconnects, and
 // builds the self-signed DANE-EE leaf the routed tunnel serves on :443. The private key NEVER leaves
 // this process: only the raw base64 DER SubjectPublicKeyInfo is ever handed to op:connect
 // (identity_public_key) - the server pins SHA-256 of THAT exact submission, verbatim, and never
@@ -62,7 +62,7 @@ func (k *Keypair) MarshalSPKIBase64() string {
 	return base64.StdEncoding.EncodeToString(k.spkiDER)
 }
 
-// identityDir resolves ~/.config/whisper-ns/identity (a package var so tests point it at a temp dir).
+// identityDir resolves ~/.config/whisper/identity (a package var so tests point it at a temp dir).
 var identityDir = defaultIdentityDir
 
 // SetIdentityDirForTest overrides the identity-key directory for the duration of a test - a seam
@@ -77,9 +77,9 @@ func SetIdentityDirForTest(dir string) func() {
 func defaultIdentityDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return filepath.Join(".config", "whisper-ns", "identity")
+		return filepath.Join(".config", "whisper", "identity")
 	}
-	return filepath.Join(home, ".config", "whisper-ns", "identity")
+	return filepath.Join(home, ".config", "whisper", "identity")
 }
 
 // PathFor maps a persistence handle (an agent id or a /128 - whatever is already known before the

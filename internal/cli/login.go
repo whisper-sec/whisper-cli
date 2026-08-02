@@ -31,7 +31,7 @@ func newLoginCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "login [key]",
-		Short: "Sign in at console.whisper.security (or save an API key) to ~/.config/whisper-ns/key",
+		Short: "Sign in at console.whisper.security (or save an API key) to ~/.config/whisper/key",
 		Long: "Sign in to Whisper. With NO key argument on a terminal you can just press Enter to\n" +
 			"open console.whisper.security in your browser and approve the login (the device\n" +
 			"flow, RFC 8628) - or paste an API key instead. Pass the key as an argument to skip\n" +

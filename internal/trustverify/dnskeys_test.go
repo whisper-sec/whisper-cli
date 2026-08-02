@@ -97,17 +97,18 @@ func TestDNSKeys_HappyPathDerivesKidsAndKeyIDs(t *testing.T) {
 
 func TestDNSKeys_LiveWhisperLedgerKeyIDGolden(t *testing.T) {
 	// GOLDEN against the production key derivation: the PUBLIC whisper.online ledger key
-	// (served at /checkpoint/key) must derive key-id 8a3a5df0 under its C2SP name -- the
-	// exact value the live checkpoint signature line embeds.
-	lk, ok := parseLedgerKeyTXT("v=whisper1; k=ed25519; n=whisper.online/ledger;" +
-		" p=MCowBQYDK2VwAyEApyTBKL3bSJO7kBbdw4FqJsjREW23jNP07HybKByIabg=")
+	// (served at /checkpoint/key, anchored in the _whisper-ledger TXT) must derive key-id
+	// d40e573a under its C2SP name -- the exact value the live checkpoint signature line
+	// embeds. Rotated to the g2 genesis identity (whisper.online).
+	lk, ok := parseLedgerKeyTXT("v=whisper1; k=ed25519; n=whisper.online/ledger/g2;" +
+		" p=MCowBQYDK2VwAyEA7pSYYInKXm2TMjwAqEsoKon/d3E8SDq34V1VUrgTAm0=")
 	if !ok {
 		t.Fatal("the live ledger key TXT did not parse")
 	}
-	if lk.KeyID != "8a3a5df0" {
-		t.Fatalf("derived key-id = %s, want 8a3a5df0", lk.KeyID)
+	if lk.KeyID != "d40e573a" {
+		t.Fatalf("derived key-id = %s, want d40e573a", lk.KeyID)
 	}
-	if lk.PublicKey != "pyTBKL3bSJO7kBbdw4FqJsjREW23jNP07HybKByIabg=" {
+	if lk.PublicKey != "7pSYYInKXm2TMjwAqEsoKon/d3E8SDq34V1VUrgTAm0=" {
 		t.Fatalf("raw key mismatch: %s", lk.PublicKey)
 	}
 }

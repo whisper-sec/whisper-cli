@@ -89,7 +89,7 @@ func newIPCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "verify THIS agent's egress (id or /128); overrides the persisted agent")
-	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
+	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper/agent)")
 	return cmd
 }
 

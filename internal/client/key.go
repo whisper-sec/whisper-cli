@@ -10,25 +10,25 @@ import (
 )
 
 // DefaultKeyFile is the on-disk key location, mirroring the shell CLI + installer:
-// $HOME/.config/whisper-ns/key (mode 600).
+// $HOME/.config/whisper/key (mode 600).
 func DefaultKeyFile() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return filepath.Join(".config", "whisper-ns", "key")
+		return filepath.Join(".config", "whisper", "key")
 	}
-	return filepath.Join(home, ".config", "whisper-ns", "key")
+	return filepath.Join(home, ".config", "whisper", "key")
 }
 
 // DefaultAgentFile is the on-disk location of the CHOSEN agent id, mirroring
-// DefaultKeyFile: $HOME/.config/whisper-ns/agent (mode 600). install.sh writes the agent
+// DefaultKeyFile: $HOME/.config/whisper/agent (mode 600). install.sh writes the agent
 // the user picked/created here so `connect` binds egress to THAT identity with zero extra
 // config; absent ⇒ the server's reuse-most-recent default applies (still zero-config).
 func DefaultAgentFile() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return filepath.Join(".config", "whisper-ns", "agent")
+		return filepath.Join(".config", "whisper", "agent")
 	}
-	return filepath.Join(home, ".config", "whisper-ns", "agent")
+	return filepath.Join(home, ".config", "whisper", "agent")
 }
 
 // ReadAgentFile returns the persisted CHOSEN agent id (trimmed), or "" when the file is
@@ -113,7 +113,7 @@ type KeyLadderOptions struct {
 //  2. --key flag           (owner key        -> X-API-Key)
 //  3. WHISPER_API_KEY env
 //  4. WHISPER_KEY env      (the alias the shell CLI also honoured)
-//  5. ~/.config/whisper-ns/key  (mode-600 file)
+//  5. ~/.config/whisper/key  (mode-600 file)
 //  6. interactive prompt   (only when opts.Prompt != nil AND it yields a value)
 //
 // Conservative+liberal: try every place a key could legitimately live; prompt only

@@ -18,7 +18,7 @@ import (
 
 // TestResolveAgentSelector covers the op:connect agent-selection precedence:
 //
-//	--agent flag > ~/.config/whisper-ns/agent file > "" (server reuse-most-recent default)
+//	--agent flag > ~/.config/whisper/agent file > "" (server reuse-most-recent default)
 //
 // Table-driven: each case sets up an (optional) agent file and a flag value, then asserts
 // the selector the CLI would send as the op:connect `agent` arg ("" ⇒ omit the arg entirely).
