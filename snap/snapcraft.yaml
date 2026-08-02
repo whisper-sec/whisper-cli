@@ -1,0 +1,53 @@
+name: whisper-cli
+base: core24
+version: '0.201.0'
+summary: A routable Whisper IPv6 identity and safe egress for agents
+description: |
+  The official Whisper CLI: give an AI agent a real, routable IPv6 /128 identity
+  (AS219419), verifiable from the outside, with safe egress that leaves from that
+  address. Register, connect, and verify in one command.
+license: MIT
+source-code: https://github.com/whisper-sec/whisper-cli
+
+# Strict confinement. Two file surfaces and one network surface:
+#  - `whisper init` writes project-level .claude/settings.local.json, .whisper/
+#    and .gitignore into the developer's current project directory under $HOME.
+#    These project-level hidden files are reachable through the `home` interface
+#    (home only excludes dotfiles at the TOP of $HOME, not inside a project dir).
+#    Projects outside $HOME (/srv, /opt, mounted volumes) are intentionally not
+#    supported - that is the arbitrary-path case, out of scope for a snap.
+#  - The CLI's own global state lives in ~/.config/whisper-ns (identity, key,
+#    session registry). That is granted by the `dot-config-whisper`
+#    personal-files plug (the app's own namespaced dir under ~/.config).
+#  - `whisper connect` runs a local user-space SOCKS5 egress proxy: `network` +
+#    `network-bind`. The optional routed WireGuard tier uses `network-control`
+#    (connect it manually: `snap connect whisper-cli:network-control`).
+confinement: strict
+grade: stable
+
+plugs:
+  dot-config-whisper:
+    interface: personal-files
+    write:
+      - $HOME/.config/whisper-ns
+
+parts:
+  whisper:
+    plugin: go
+    source: https://github.com/whisper-sec/whisper-cli.git
+    source-tag: v0.201.0
+    build-snaps: [go]
+    build-environment:
+      - CGO_ENABLED: "0"
+    override-build: |
+      go build -trimpath -ldflags "-s -w -X github.com/whisper-sec/whisper-cli/internal/cli.Version=0.201.0" -o "$CRAFT_PART_INSTALL/bin/whisper" ./cmd/whisper
+
+apps:
+  whisper:
+    command: bin/whisper
+    plugs:
+      - home
+      - network
+      - network-bind
+      - network-control
+      - dot-config-whisper
