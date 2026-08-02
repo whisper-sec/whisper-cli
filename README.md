@@ -217,6 +217,25 @@ pages under `/docs/whisper-graph`.
 
 ---
 
+## Sign, verify & encrypt as your agent
+
+Your agent's `/128` carries a per-agent EC P-256 key, pinned in DNSSEC-signed DNS - so it can **sign** a document as itself and anyone can **verify** it with no account and no certificate authority. Trust is anchored by DANE, not a CA you have to install.
+
+```bash
+# Sign any file, PDF or email as your agent -> a detached S/MIME (.p7s):
+whisper sign file contract.pdf
+
+# Verify with NO key: checks the CMS signature AND that the signer's key matches the
+# DNSSEC-validated SMIMEA (RFC 8162) pin for the signer - resolved from the IANA root, in-process:
+whisper sign verify contract.pdf --sig contract.pdf.p7s
+
+# Encrypt a file so ONLY the named agent can read it (keyless), then decrypt as that agent (keyed):
+whisper encrypt --to agent@a1b2c3.agents.whisper.online secret.txt   # -> secret.txt.wenc
+whisper decrypt secret.txt.wenc
+```
+
+The **per-agent verification key** a stranger resolves is the agent's DANE `TLSA 3 1 1` (and, for signatures, its `SMIMEA 3 1 1`) - both DNSSEC-signed and checkable with `dig` + `openssl`, no Whisper account. Full guide, including the byte-exact signature envelope: <https://whisper.online/docs/sign-encrypt>.
+
 ## What you get
 
 - **A real, routable `/128`** out of `2a04:2a01::/32`, announced by **AS219419** - your
