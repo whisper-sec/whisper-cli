@@ -63,7 +63,7 @@ func newRunCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "use THIS agent's egress (id or /128); overrides the persisted agent")
-	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
+	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper/agent)")
 	cmd.Flags().StringVar(&tier, "tier", "", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
 	// Stop flag-parsing at the first positional so `whisper run curl -v …` passes -v to
 	// curl, not to us (Postel: the child owns its own flags).
@@ -89,7 +89,7 @@ func newClaudeCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "use THIS agent's egress (id or /128); overrides the persisted agent")
-	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
+	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper/agent)")
 	cmd.Flags().StringVar(&tier, "tier", "", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
 	cmd.Flags().SetInterspersed(false)
 	return cmd

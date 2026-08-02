@@ -1,6 +1,6 @@
 name: whisper-cli
 base: core24
-version: '0.201.0'
+version: '0.202.0'
 summary: A routable Whisper IPv6 identity and safe egress for agents
 description: |
   The official Whisper CLI: give an AI agent a real, routable IPv6 /128 identity
@@ -16,7 +16,7 @@ source-code: https://github.com/whisper-sec/whisper-cli
 #    (home only excludes dotfiles at the TOP of $HOME, not inside a project dir).
 #    Projects outside $HOME (/srv, /opt, mounted volumes) are intentionally not
 #    supported - that is the arbitrary-path case, out of scope for a snap.
-#  - The CLI's own global state lives in ~/.config/whisper-ns (identity, key,
+#  - The CLI's own global state lives in ~/.config/whisper (identity, key,
 #    session registry). That is granted by the `dot-config-whisper`
 #    personal-files plug (the app's own namespaced dir under ~/.config).
 #  - `whisper connect` runs a local user-space SOCKS5 egress proxy: `network` +
@@ -29,18 +29,18 @@ plugs:
   dot-config-whisper:
     interface: personal-files
     write:
-      - $HOME/.config/whisper-ns
+      - $HOME/.config/whisper
 
 parts:
   whisper:
     plugin: go
     source: https://github.com/whisper-sec/whisper-cli.git
-    source-tag: v0.201.0
+    source-tag: v0.202.0
     build-snaps: [go]
     build-environment:
       - CGO_ENABLED: "0"
     override-build: |
-      go build -trimpath -ldflags "-s -w -X github.com/whisper-sec/whisper-cli/internal/cli.Version=0.201.0" -o "$CRAFT_PART_INSTALL/bin/whisper" ./cmd/whisper
+      go build -trimpath -ldflags "-s -w -X github.com/whisper-sec/whisper-cli/internal/cli.Version=0.202.0" -o "$CRAFT_PART_INSTALL/bin/whisper" ./cmd/whisper
 
 apps:
   whisper:

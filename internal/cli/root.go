@@ -15,6 +15,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"time"
@@ -125,7 +126,7 @@ func NewRootCommand() *cobra.Command {
 	pf.StringVar(&g.verifyURL, "verify-url", "", "override the verify-identity endpoint (default "+client.DefaultVerifyURL+")")
 	pf.StringVar(&g.echoURL, "echo-url", "", "override the egress source-IP echo endpoint (default "+client.DefaultEchoURL+")")
 	pf.StringVar(&g.consoleURL, "console-url", "", "override the console endpoint for device login (default "+client.DefaultConsoleURL+")")
-	pf.StringVar(&g.keyFile, "key-file", "", "override the key file (default ~/.config/whisper-ns/key)")
+	pf.StringVar(&g.keyFile, "key-file", "", "override the key file (default ~/.config/whisper/key)")
 	pf.DurationVar(&g.timeout, "timeout", 30*time.Second, "per-call timeout")
 	pf.BoolVar(&g.noColor, "no-color", false, "disable colour (NO_COLOR env also honoured)")
 	pf.StringVar(&g.themeName, "theme", "", "TUI theme: whisper (default) | nord | gruvbox")
@@ -230,6 +231,7 @@ func newExploreCmd() *cobra.Command {
 //	1  a control-plane / runtime failure (ok:false, transport, bad args we surfaced)
 //	2  a usage error (unknown flag/subcommand - Cobra's own)
 func Execute() int {
+	migrateLegacyConfigDir()
 	root := NewRootCommand()
 	err := root.Execute()
 	if err == nil {
@@ -242,6 +244,26 @@ func Execute() int {
 	}
 	fmt.Fprintf(os.Stderr, "whisper: %s\n", friendly(err))
 	return code
+}
+
+// migrateLegacyConfigDir moves the pre-2026-08 state directory ~/.config/whisper-ns to its
+// brand-correct home ~/.config/whisper, once, when the new path does not exist yet. This keeps
+// existing identities, keys, agents and sessions working across the rename. Fail-soft: any
+// error is ignored, and the resolvers simply create the new directory fresh.
+func migrateLegacyConfigDir() {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return
+	}
+	newDir := filepath.Join(home, ".config", "whisper")
+	if _, err := os.Stat(newDir); err == nil {
+		return // already migrated (or a fresh install); leave it be
+	}
+	oldDir := filepath.Join(home, ".config", "whisper-ns")
+	if fi, err := os.Stat(oldDir); err != nil || !fi.IsDir() {
+		return // nothing to migrate
+	}
+	_ = os.Rename(oldDir, newDir) // best-effort atomic move
 }
 
 // resolveClient resolves the credential via the key ladder and builds a Client. needKey

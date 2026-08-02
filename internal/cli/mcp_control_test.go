@@ -34,7 +34,7 @@ func problemServer(t *testing.T, status int, body string) *httptest.Server {
 // (env cleared via t.Setenv, key file pointed into an empty temp dir), key != "" supplies
 // that key via the flag rung. controlURL points the client at a stub. g is restored on
 // cleanup. This keeps the gate tests deterministic on a dev box that has a real
-// ~/.config/whisper-ns/key.
+// ~/.config/whisper/key.
 func pinKeyState(t *testing.T, key, controlURL string) {
 	t.Helper()
 	saved := g

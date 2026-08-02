@@ -24,9 +24,9 @@ func newUseCmd() *cobra.Command {
 	var agentFile string
 	cmd := &cobra.Command{
 		Use:   "use <agent|address>",
-		Short: "Choose the agent the rest of whisper binds to (saved to ~/.config/whisper-ns/agent)",
+		Short: "Choose the agent the rest of whisper binds to (saved to ~/.config/whisper/agent)",
 		Long: "Pin the agent (by name or /128) that `whisper`, `connect`, and `status` use by\n" +
-			"default - written to ~/.config/whisper-ns/agent (mode 600).",
+			"default - written to ~/.config/whisper/agent (mode 600).",
 		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			var sel string
@@ -62,7 +62,7 @@ func newUseCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
+	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper/agent)")
 	return cmd
 }
 
@@ -110,7 +110,7 @@ func newStatusCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper-ns/agent)")
+	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper/agent)")
 	return cmd
 }
 
