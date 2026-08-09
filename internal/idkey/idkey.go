@@ -113,6 +113,14 @@ func LoadOrGenerate(handle string) (*Keypair, error) {
 	return kp, nil
 }
 
+// Load returns the ALREADY-persisted identity keypair for handle, or an error when none
+// exists. Unlike LoadOrGenerate it NEVER mints: callers that must present the key whose
+// DANE-EE pin is already published (the summary uplink's mTLS client cert) use this,
+// because a freshly-minted key would present an unpinned - and thus unverifiable - leaf.
+func Load(handle string) (*Keypair, error) {
+	return load(PathFor(handle))
+}
+
 // load reads + parses a persisted EC PRIVATE KEY PEM file.
 func load(path string) (*Keypair, error) {
 	b, err := os.ReadFile(path)

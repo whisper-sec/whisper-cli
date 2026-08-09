@@ -31,9 +31,10 @@ const SchemaVersion = 1
 const Dir = ".whisper"
 
 const (
-	configName   = "config"
-	pidName      = "connect.pid"
-	proxyEnvName = "proxy.env"
+	configName      = "config"
+	pidName         = "connect.pid"
+	proxyEnvName    = "proxy.env"
+	sensorSpoolName = "sensor.ndjson"
 )
 
 // Config is the machine-readable `.whisper/config` shape. It carries ONLY non-secret
@@ -46,20 +47,31 @@ type Config struct {
 	Tier          string `json:"tier"`           // "socks5" (default) | "wireguard"
 	Port          int    `json:"port"`           // the deterministic local loopback proxy port
 	FQDN          string `json:"fqdn,omitempty"` // the agent's canonical name (display only)
+
+	// The endpoint sections, read by a build that has an endpoint half. Their types are
+	// defined in endpoint.go, the one file in this package that differs between such a
+	// build and this one: this build does not interpret these sections, it carries them
+	// verbatim so a config written by the full product round-trips unchanged. Nothing
+	// else in this file reads them.
+	Sensor   *SensorConfig   `json:"sensor,omitempty"`
+	Enforce  *EnforceConfig  `json:"enforce,omitempty"`
+	Response *ResponseConfig `json:"response,omitempty"`
+	Respond  *RespondConfig  `json:"respond,omitempty"`
 }
 
 // Paths bundles the resolved absolute paths for one project root, so callers never re-derive
 // them (and so tests can point a whole run at a temp dir). Root is the project directory the
 // user ran `whisper init` in.
 type Paths struct {
-	Root          string // the project root (where the user ran init)
-	WhisperDir    string // <root>/.whisper
-	ConfigFile    string // <root>/.whisper/config
-	PIDFile       string // <root>/.whisper/connect.pid
-	ProxyEnvFile  string // <root>/.whisper/proxy.env (dotenv proxy block - `whisper init python`)
-	ClaudeDir     string // <root>/.claude
-	ClaudeLocal   string // <root>/.claude/settings.local.json
-	GitignoreFile string // <root>/.gitignore
+	Root            string // the project root (where the user ran init)
+	WhisperDir      string // <root>/.whisper
+	ConfigFile      string // <root>/.whisper/config
+	PIDFile         string // <root>/.whisper/connect.pid
+	ProxyEnvFile    string // <root>/.whisper/proxy.env (dotenv proxy block - `whisper init python`)
+	SensorSpoolFile string // <root>/.whisper/sensor.ndjson
+	ClaudeDir       string // <root>/.claude
+	ClaudeLocal     string // <root>/.claude/settings.local.json
+	GitignoreFile   string // <root>/.gitignore
 }
 
 // PathsFor resolves every per-project path under root. root is cleaned to an absolute path
@@ -75,14 +87,15 @@ func PathsFor(root string) Paths {
 	whisper := filepath.Join(root, Dir)
 	claude := filepath.Join(root, ".claude")
 	return Paths{
-		Root:          root,
-		WhisperDir:    whisper,
-		ConfigFile:    filepath.Join(whisper, configName),
-		PIDFile:       filepath.Join(whisper, pidName),
-		ProxyEnvFile:  filepath.Join(whisper, proxyEnvName),
-		ClaudeDir:     claude,
-		ClaudeLocal:   filepath.Join(claude, "settings.local.json"),
-		GitignoreFile: filepath.Join(root, ".gitignore"),
+		Root:            root,
+		WhisperDir:      whisper,
+		ConfigFile:      filepath.Join(whisper, configName),
+		PIDFile:         filepath.Join(whisper, pidName),
+		ProxyEnvFile:    filepath.Join(whisper, proxyEnvName),
+		SensorSpoolFile: filepath.Join(whisper, sensorSpoolName),
+		ClaudeDir:       claude,
+		ClaudeLocal:     filepath.Join(claude, "settings.local.json"),
+		GitignoreFile:   filepath.Join(root, ".gitignore"),
 	}
 }
 
@@ -112,8 +125,12 @@ func AssertSafeNamespace(p Paths) error {
 			}
 		}
 	}
-	// (2) The leaf files we read or write: none may be a symlink.
-	for _, f := range []string{p.ConfigFile, p.PIDFile, p.ProxyEnvFile, filepath.Join(p.WhisperDir, "agent")} {
+	// (2) The leaf files we read or write: none may be a symlink. The sensor spool is
+	// in the list because the SERVICE daemon appends to it as root - a planted
+	// symlink would turn telemetry into a root-append to an arbitrary file. The
+	// runner has its own refusal (an Lstat just before open, made atomic by the
+	// sink's O_NOFOLLOW open on non-Windows); this closes the init-time half.
+	for _, f := range []string{p.ConfigFile, p.PIDFile, p.ProxyEnvFile, p.SensorSpoolFile, filepath.Join(p.WhisperDir, "agent")} {
 		if err := refuseSymlink(f); err != nil {
 			return err
 		}

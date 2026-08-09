@@ -394,22 +394,67 @@ func verifyEgressLive(ctx context.Context, c *client.Client, s *egressSession) e
 	if err != nil {
 		return err
 	}
+	// The v4-egress branch needs the host's OWN direct egress IP to compare against; fetch it ONLY
+	// when the observed source is not a Whisper /128 (the common v6 case needs no direct fetch).
+	direct, haveDirect := "", false
 	if !inWhisperRange(observed) {
+		if d, derr := c.DirectEgressIP(ctx); derr == nil {
+			direct, haveDirect = d, true
+		}
+	}
+	verdict := classifyEgress(observed, s.addr, direct, haveDirect)
+	switch verdict.kind {
+	case egressPinned:
+		if s.addr == "" {
+			s.addr = observed // adopt the observed /128 when the envelope did not carry one
+		}
+		s.verified = true
+		return nil
+	case egressTunnelled:
+		s.verified = true // v4-via-NAT64: tunnelled through Whisper, /128 not pinnable from a v4 dest
+		return nil
+	case egressMismatch:
+		return &client.ProblemError{Status: 502,
+			Detail: "connected, but the address didn't match your agent - please try `whisper connect` again"}
+	default: // egressNotThroughWhisper
 		return &client.ProblemError{Status: 502,
 			Detail: "your traffic isn't going through Whisper yet - please try `whisper connect` again"}
 	}
-	// When we know the selected agent's /128, require an exact match (the egress must
-	// source from THIS identity). When the address is unknown (a rare envelope), a
-	// Whisper-range source is still a pass (we can't pin it tighter).
-	if s.addr != "" && !sameIP(observed, s.addr) {
-		return &client.ProblemError{Status: 502,
-			Detail: "connected, but the address didn't match your agent - please try `whisper connect` again"}
+}
+
+// egressVerdictKind is the pure classification of an egress-verify observation.
+type egressVerdictKind int
+
+const (
+	egressNotThroughWhisper egressVerdictKind = iota // proxied source == host's direct source => a leak
+	egressPinned                                     // observed IS a Whisper /128 matching the agent
+	egressTunnelled                                  // v4-via-NAT64: shared SNAT, but provably tunnelled
+	egressMismatch                                   // a Whisper /128, but NOT the selected agent's
+)
+
+type egressVerdict struct{ kind egressVerdictKind }
+
+// classifyEgress is the PURE verify decision (no I/O), table-testable and the single place the
+// security-critical logic lives:
+//   - observed ∈ 2a04:2a01::/32 (a Whisper /128): PINNED when it equals wantAddr (or wantAddr is
+//     empty), else MISMATCH (a Whisper identity, but not the one we asked for - never silently accept).
+//   - otherwise the echo was reached over IPv4 (a v6 /128 cannot source a v4 packet), so the server
+//     saw Whisper's SHARED v4 SNAT: TUNNELLED iff it provably differs from the host's own direct
+//     egress IP (haveDirect && observed != direct), OR the host has NO direct path at all
+//     (!haveDirect) yet the proxied echo still succeeded (Whisper is the only working path). If the
+//     proxied source EQUALS the host's direct source, the traffic is leaking straight out, NOT
+//     through Whisper: NOT-THROUGH-WHISPER (fail closed).
+func classifyEgress(observed, wantAddr, direct string, haveDirect bool) egressVerdict {
+	if inWhisperRange(observed) {
+		if wantAddr != "" && !sameIP(observed, wantAddr) {
+			return egressVerdict{egressMismatch}
+		}
+		return egressVerdict{egressPinned}
 	}
-	if s.addr == "" {
-		s.addr = observed
+	if !haveDirect || !sameIP(observed, direct) {
+		return egressVerdict{egressTunnelled}
 	}
-	s.verified = true
-	return nil
+	return egressVerdict{egressNotThroughWhisper}
 }
 
 // connectAndVerify is the full shared path: op:connect (already run by the caller, its

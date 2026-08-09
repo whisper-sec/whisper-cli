@@ -73,8 +73,9 @@ func TestDeviceAdd_HumanPrintsAllForms(t *testing.T) {
 	if strings.TrimSpace(stdout) != devTok {
 		t.Fatalf("device add must print the token on stdout; stdout=%q", stdout)
 	}
-	// The Apple URL points at the generator on the endpoint host for THIS token.
-	if got := mobileconfigURL(devTok); got != "https://endpoint.whisper.online/apple/"+devTok+".mobileconfig" {
+	// The Apple URL points at the profile generator on the canonical resolver host for THIS token
+	// Phase 1 renamed the consumer product to resolver.whisper.online).
+	if got := mobileconfigURL(devTok); got != "https://resolver.whisper.online/apple/"+devTok+".mobileconfig" {
 		t.Fatalf("mobileconfigURL wrong: %q", got)
 	}
 }

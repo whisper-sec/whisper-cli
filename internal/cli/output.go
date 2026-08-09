@@ -242,7 +242,19 @@ func mapProblem(pe *client.ProblemError) string {
 		}
 		return "your key was not accepted - run: whisper login"
 	case 404:
-		return "that agent isn't in your account - run `whisper list` to see your agents"
+		// Not every 404 is an agent lookup: a local "no .whisper/config here", a
+		// host-sensor config, or another resource can 404 too, and answering
+		// those with "that agent isn't in your account" is a false trail (it is
+		// what sent a fresh-box `service install --sensor` chasing a nonexistent
+		// agent). Only an AGENT-scoped 404 gets the account nudge; anything
+		// else falls through ("") to the problem's own actionable, secret-free
+		// detail. The local "no config" 404s stay ProblemErrors on purpose -
+		// isProjectNotFound keys off Status 404 for `whisper run`'s fail-open - so
+		// the fix lives here in the rendering, not in the error construction.
+		if problemMentionsAgent(pe) {
+			return "that agent isn't in your account - run `whisper list` to see your agents"
+		}
+		return ""
 	case 503:
 		if pe.Type == "EGRESS_DISABLED" || strings.Contains(strings.ToLower(pe.Error()), "egress") {
 			return "egress isn't enabled for this agent yet - try again shortly or contact support"
@@ -253,6 +265,15 @@ func mapProblem(pe *client.ProblemError) string {
 		return "egress isn't enabled for this agent yet - try again shortly or contact support"
 	}
 	return ""
+}
+
+// problemMentionsAgent reports whether a problem is about an agent identity (so
+// a 404 renders as the account nudge) rather than some other missing resource
+// (a local config, a sensor path). Keyed on the problem's own text - the backend
+// agent-not-found 404 carries "agent ..." in its detail - so it is robust to
+// where the 404 came from.
+func problemMentionsAgent(pe *client.ProblemError) bool {
+	return strings.Contains(strings.ToLower(pe.Title+" "+pe.Type+" "+pe.Error()), "agent")
 }
 
 // isUsageError detects Cobra's flag/arg usage errors AND our own *usageError (exit 2).

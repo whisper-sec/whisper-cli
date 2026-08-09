@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -168,7 +169,7 @@ func renderAgentDetail(res *client.Result) {
 
 func newCreateCmd() *cobra.Command {
 	var email, name, label, retention string
-	var register bool
+	var register, reuse bool
 	var ids identifierFlags
 	var wallet, walletChain string
 	cmd := &cobra.Command{
@@ -180,7 +181,11 @@ func newCreateCmd() *cobra.Command {
 			"required. One key holds ONE identity: if this key already has its /128, create\n" +
 			"reuses it and says so; --register is the way to mint a genuinely new agent.\n\n" +
 			"With --register, mint a brand-new agent with its own API key via op:register\n" +
-			"(the key is shown ONCE - capture it).\n\n" +
+			"(the key is shown ONCE - capture it). Add --reuse to make that bind idempotent\n" +
+			"on the name: when an agent is ALREADY registered under --name, its existing\n" +
+			"/128 is returned instead of minting a duplicate - the installer's fleet\n" +
+			"auto-bind uses this so an upgrade or re-run preserves the endpoint's identity\n" +
+			"(a reuse cannot re-show the agent's API key; only a fresh mint carries one).\n\n" +
 			"Typed identity (one of): register the object under a domain-specific identifier it\n" +
 			"already carries, so its /128 is attributed to that identifier (fleet device\n" +
 			"attribution - the owner-private device_id `whisper list` surfaces). Passing one\n" +
@@ -246,6 +251,44 @@ func newCreateCmd() *cobra.Command {
 				c, err := resolveClient(true, false)
 				if err != nil {
 					return err
+				}
+				// --reuse makes the register bind IDEMPOTENT on the agent name.
+				// An upgrade / re-image / lost-marker re-run of the installer must
+				// re-find the agent this endpoint already registered as, never mint a
+				// duplicate /128 (which strands the old identity and moves the
+				// telemetry). The lookup is best-effort by design: a listing failure
+				// falls through to the mint, so a genuinely fresh endpoint (or an
+				// unreachable list) still binds.
+				if reuse {
+					if renv, found := reuseRegisteredAgent(c, strings.TrimSpace(chosen)); found {
+						handled, perr := renderEnvelope(renv)
+						if perr != nil {
+							return perr
+						}
+						if err := maybePinWallet(c, renv, wallet, walletChain); err != nil {
+							return err
+						}
+						if handled {
+							return nil // --json: the verbatim reuse envelope is already on stdout
+						}
+						recs := renv.Result.Records()
+						addr, existing := "", ""
+						if len(recs) > 0 {
+							addr = field(recs[0], "address", "addr128")
+							existing = field(recs[0], "label", "agent")
+						}
+						if g.quiet {
+							// --quiet: ONLY the load-bearing value, no chrome.
+							if addr != "" {
+								fmt.Fprintln(os.Stdout, addr)
+							}
+							return nil
+						}
+						fmt.Fprintf(os.Stderr,
+							"whisper: reusing existing agent %s - %s (already registered under this name; drop --reuse to mint a new one)\n",
+							firstNonBlank(existing, chosen), addr)
+						return nil
+					}
 				}
 				cx, cancel := ctx()
 				defer cancel()
@@ -343,6 +386,7 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&label, "label", "", "legacy alias for --name (--name wins)")
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in; surfaced in RDAP)")
 	cmd.Flags().BoolVar(&register, "register", false, "mint a NEW agent + its own API key (op:register)")
+	cmd.Flags().BoolVar(&reuse, "reuse", false, "with --register: reuse the agent already registered under --name (mint only when none exists; the bind is idempotent on a re-run)")
 	cmd.Flags().StringVar(&retention, "retention", "", "with --register: days to keep the new agent's DNS/query logs (0-3650); 0 = keep none (the security floor is still retained for a fixed operator window)")
 	ids.register(cmd)
 	cmd.Flags().StringVar(&wallet, "wallet", "", "pin an x402 wallet (EOA) to the new /128 as a resolvable TXT binding (op:host)")
@@ -506,6 +550,82 @@ func preCreateIdentityAddrs(c *client.Client) map[string]string {
 		out[addr] = name
 	}
 	return out
+}
+
+// reuseRegisteredAgent implements the idempotent register bind: look for an
+// agent ALREADY registered under name (the endpoint's hostname in the installer's
+// fleet auto-bind) and, when one exists, synthesize a reuse envelope carrying its
+// existing identity - so a re-run (a sensor upgrade, a re-imaged box, a lost or
+// unreachable autobind marker, a different $HOME) re-finds the SAME /128 instead
+// of minting a duplicate that strands the old identity and moves the telemetry.
+//
+// Matching is liberal (Postel): the friendly label, the agent handle, or the
+// fqdn's first (per-agent) label, all case-insensitive - whichever the server
+// surfaced. Only a live agent is reused (state active or unstated); a revoked or
+// released one is never resurrected. When several match (exactly the duplicates
+// this fix stops accruing), the NEWEST wins: that is the identity currently
+// shipping telemetry, so continuity is preserved.
+//
+// Best-effort BY DESIGN: any listing failure returns found=false and the caller
+// proceeds to mint - the installer must bind a fresh endpoint even when the list
+// is briefly unreachable. The reuse envelope mirrors the op:register result shape
+// (columns/rows, so install.sh's json_field and --json consumers read it
+// unchanged) but carries NO api_key: a key is shown once at mint, never again.
+func reuseRegisteredAgent(c *client.Client, name string) (*client.Envelope, bool) {
+	if name == "" {
+		return nil, false
+	}
+	cx, cancel := ctx()
+	defer cancel()
+	env, err := c.Agents(cx, "list", map[string]any{"kind": "agents"})
+	if err != nil || env == nil || !env.Ok || env.Result == nil {
+		return nil, false
+	}
+	type match struct {
+		agent, addr, fqdn, label string
+		created                  int64
+	}
+	var best *match
+	for _, rec := range env.Result.Records() {
+		item := rec
+		if m, ok := rec["item"].(map[string]any); ok {
+			item = m
+		}
+		switch strings.ToLower(field(item, "state")) {
+		case "", "active":
+		default:
+			continue // never resurrect a revoked/released identity
+		}
+		label := field(item, "label")
+		handle := field(item, "agent", "id")
+		fqdn := field(item, "fqdn")
+		if !strings.EqualFold(label, name) && !strings.EqualFold(handle, name) &&
+			!strings.EqualFold(firstLabel(fqdn), name) {
+			continue
+		}
+		addr := field(item, "address", "addr128")
+		if addr == "" {
+			continue
+		}
+		m := match{agent: handle, addr: addr, fqdn: fqdn,
+			label:   firstNonBlank(label, name),
+			created: parseEpoch(field(item, "created", "allocated_at"))}
+		if best == nil || m.created > best.created {
+			best = &m
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	res := &client.Result{
+		Columns: []string{"agent", "address", "fqdn", "label", "reused"},
+		Rows:    [][]any{{best.agent, best.addr, best.fqdn, best.label, true}},
+	}
+	raw, merr := json.Marshal(map[string]any{"ok": true, "status": 200, "reused": true, "result": res})
+	if merr != nil {
+		return nil, false // cannot happen for these types; fail-open to the mint regardless
+	}
+	return &client.Envelope{Ok: true, Status: 200, Result: res, Raw: raw}, true
 }
 
 // createIdentity fires the op:identity wire call and returns the RAW envelope, exactly as

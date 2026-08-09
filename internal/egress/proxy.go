@@ -46,6 +46,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -89,6 +90,7 @@ type Proxy struct {
 	osMu     sync.Mutex
 	onStop   func() // optional extra teardown (e.g. the WG device) - run once, under Stop()
 	dialer   Dialer
+	dialObs  atomic.Pointer[DialObserver] // optional per-dial tap - see SetDialObserver
 }
 
 // Endpoint is the load-bearing connection string: socks5h://127.0.0.1:<port>.
@@ -379,9 +381,11 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 
 	up, err := p.dialer.Dial(ctx, target)
 	if err != nil {
+		p.notifyDial(conn.RemoteAddr(), target, true)
 		socks5Reply(conn, 0x05) // connection refused (a generic, non-leaky failure)
 		return
 	}
+	p.notifyDial(conn.RemoteAddr(), target, false)
 	defer up.Close()
 
 	// Success. Reply with a CONCRETE bind addr 0.0.0.0:0 (ATYP=IPv4) - NOT the DOMAIN
@@ -457,9 +461,11 @@ func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader)
 	}
 	up, err := p.dialer.Dial(ctx, target)
 	if err != nil {
+		p.notifyDial(conn.RemoteAddr(), target, true)
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
+	p.notifyDial(conn.RemoteAddr(), target, false)
 	defer up.Close()
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
@@ -613,6 +619,36 @@ func halfClose(c net.Conn) {
 		return
 	}
 	_ = c.Close()
+}
+
+// --- dial observation --------------------------------------------------------
+
+// DialObserver observes each upstream dial the front-end performs on behalf of an
+// accepted local client: the CLIENT's loopback address (its ephemeral 127.0.0.1:<port>
+// side - enough to attribute the flow to a local process), the target exactly as the
+// client requested it, and denied=true when the upstream dial failed/was refused. It
+// runs inline on the per-connection goroutine, so it MUST be fast and MUST NOT block;
+// and it MUST NOT log the target (it can name a sensitive destination) - the process
+// graph folds it into bounded memory only.
+type DialObserver func(clientAddr net.Addr, target string, denied bool)
+
+// SetDialObserver installs (or replaces; nil clears) the proxy's dial observer. Safe
+// to call at any time, including while the proxy is serving - observation is telemetry
+// and never affects the tunnel either way.
+func (p *Proxy) SetDialObserver(f DialObserver) {
+	if f == nil {
+		p.dialObs.Store(nil)
+		return
+	}
+	p.dialObs.Store(&f)
+}
+
+// notifyDial invokes the observer when one is installed. A nil observer is the
+// common (un-tapped) case and costs one atomic load.
+func (p *Proxy) notifyDial(client net.Addr, target string, denied bool) {
+	if f := p.dialObs.Load(); f != nil {
+		(*f)(client, target, denied)
+	}
 }
 
 // prefixedConn replays bytes the upstream sent immediately after the CONNECT reply

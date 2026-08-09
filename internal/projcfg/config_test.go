@@ -124,4 +124,7 @@ func TestPathsFor_AbsoluteAndLayout(t *testing.T) {
 	if p.ClaudeLocal != filepath.Join(p.Root, ".claude", "settings.local.json") {
 		t.Fatalf("ClaudeLocal = %q", p.ClaudeLocal)
 	}
+	if p.SensorSpoolFile != filepath.Join(p.Root, ".whisper", "sensor.ndjson") {
+		t.Fatalf("SensorSpoolFile = %q", p.SensorSpoolFile)
+	}
 }

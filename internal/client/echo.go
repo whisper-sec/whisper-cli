@@ -48,10 +48,31 @@ func (c *Client) ObservedEgressIP(ctx context.Context, proxyEndpoint string) (st
 	if err != nil {
 		return "", &ProblemError{Status: 400, Detail: "the local egress proxy endpoint is malformed"}
 	}
+	return c.fetchEchoIP(ctx, pu)
+}
+
+// DirectEgressIP fetches the same keyless echo WITHOUT the local egress proxy, so the
+// observed source is the host's OWN (direct, un-tunnelled) public IP. verifyEgress uses it
+// as the reference for the v4-egress case: when the egress reaches a v4 destination via NAT64
+// the observed source is Whisper's shared v4 SNAT (NOT the agent's v6 /128, which cannot source
+// a v4 packet), so a range check alone cannot confirm the tunnel. Proving the proxied source
+// DIFFERS from this direct source proves the traffic is genuinely leaving through Whisper and
+// not leaking straight out of the host. Never logs the URL or body.
+func (c *Client) DirectEgressIP(ctx context.Context) (string, error) {
+	return c.fetchEchoIP(ctx, nil) // nil proxy → direct
+}
+
+// fetchEchoIP GETs the keyless source-IP echo, routed via proxyURL when non-nil (through the
+// Whisper egress) or directly when nil. Returns the observed source IP the server saw.
+func (c *Client) fetchEchoIP(ctx context.Context, proxyURL *url.URL) (string, error) {
 	echoURL := orDefault(c.echoURL, DefaultEchoURL)
 
+	var proxy func(*http.Request) (*url.URL, error)
+	if proxyURL != nil {
+		proxy = http.ProxyURL(proxyURL)
+	}
 	tr := &http.Transport{
-		Proxy:                 http.ProxyURL(pu),
+		Proxy:                 proxy,
 		TLSClientConfig:       &tls.Config{RootCAs: RootCAs(), MinVersion: tls.VersionTLS12},
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   15 * time.Second,
