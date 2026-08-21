@@ -28,7 +28,7 @@ var catalogJSON []byte
 // (Postel: a sane zero-config default, never a panic).
 const (
 	fallbackDocsBase   = "https://www.whisper.security"
-	fallbackGraphURL   = "https://graph.whisper.security/api/query"
+	fallbackGraphURL   = "https://graph.whisper.online/api/query"
 	fallbackFlowRunURL = "https://console.whisper.security/api/gallery/run"
 	rawCypherDocPath   = "/docs/cypher-api"
 	toolNamePrefix     = "whisper_"

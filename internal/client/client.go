@@ -16,12 +16,13 @@ import (
 	"time"
 )
 
-// Canonical endpoints. graph.whisper.security is the ONE control endpoint; the live
-// monitor SSE is served directly by the active/active ns nodes (the gateway does not
-// proxy /monitor/stream); rdap.whisper.online is the public RDAP service. All
-// overridable by env for pre-prod (Postel: liberal in, but a sane zero-config default).
+// Canonical endpoints. graph.whisper.online is the ONE control endpoint - the own-infra front
+// door that serves whisper.agents directly; the live monitor SSE is served directly by the
+// active/active ns nodes (the gateway does not proxy /monitor/stream); rdap.whisper.online is the
+// public RDAP service. Each is overridable with its --*-url flag for a self-hosted or pre-prod
+// endpoint (Postel: liberal in, but a sane zero-config default - the common case needs no flag).
 const (
-	DefaultControlURL = "https://graph.whisper.security/api/query"
+	DefaultControlURL = "https://graph.whisper.online/api/query"
 	DefaultMonitorURL = "https://ns1.whisper.online/monitor/stream"
 	DefaultRDAPURL    = "https://rdap.whisper.online"
 	// DefaultConsoleURL is the user-facing console that hosts the device-authorization

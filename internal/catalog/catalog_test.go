@@ -83,7 +83,7 @@ func TestFindLiberal(t *testing.T) {
 
 // The endpoints and docs base come from the embedded SSOT.
 func TestEndpoints(t *testing.T) {
-	if got := GraphEndpoint(); got != "https://graph.whisper.security/api/query" {
+	if got := GraphEndpoint(); got != "https://graph.whisper.online/api/query" {
 		t.Errorf("GraphEndpoint() = %q", got)
 	}
 	if got := FlowRunEndpoint(); got != "https://console.whisper.security/api/gallery/run" {
