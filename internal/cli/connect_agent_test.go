@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/idkey"
 )
 
 // --- resolveConnectAgent: display-name resolution (fix 2) -----------------------------
@@ -136,6 +137,7 @@ func TestConnect_FullCommand_AgentDisplayName(t *testing.T) {
 	srv := recordingServer(t, []agentChoice{{name: "scout", addr: "2a04:2a01:9::abcd"}}, &seen)
 	defer srv.Close()
 	defer stubEgressTail(t)()
+	defer idkey.SetIdentityDirForTest(t.TempDir())() // the AUTO Tier-1 attempt mints a real identity key
 
 	savedG := g
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}

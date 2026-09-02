@@ -18,9 +18,9 @@ import (
 // eye scans columns, not free text. The connector between lanes encodes the decision as
 // a DISTINCT SHAPE, not just a colour:
 //
-//	allowed full chain   client ──▶ qname ──▶ peer   ▕▰▰▰▱▏      (flowed)
-//	blocked AT DNS       client ──╳ blocked.name                 (never reached a peer)
-//	blocked AT EGRESS    client ──▶ qname ──╳ peer               (resolved, then denied)
+//	allowed full chain client ──▶ qname ──▶ peer ▕▰▰▰▱▏ (flowed)
+//	blocked AT DNS client ──╳ blocked.name (never reached a peer)
+//	blocked AT EGRESS client ──▶ qname ──╳ peer (resolved, then denied)
 //
 // So "blocked at dns" and "blocked at egress" are different silhouettes you can read at a
 // glance across a fast-scrolling feed - the ──╳ sits at a different lane. Colour
@@ -101,7 +101,7 @@ func (a *App) chainDNS(e model.Event, ln chainLanes, ts string) string {
 	}
 	qname := qstyle.Render(padTrunc(qn, ln.qname))
 	conn1 := a.connector(true)          // client ──▶ qname (the lookup always happened)
-	tail := a.connector(!blocked) + " " // qname ──▶/╳  (peer side)
+	tail := a.connector(!blocked) + " " // qname ──▶/╳ (peer side)
 	meta := th.Dim.Render(fmt.Sprintf("%s %s %dms",
 		orPlaceholder(e.QType, ""), upper(orPlaceholder(e.Decision, "")), e.LatencyMS()))
 	line := fmt.Sprintf("%s %s %s %s %s %s%s",

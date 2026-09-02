@@ -104,7 +104,7 @@ func newMonitorCmd() *cobra.Command {
 		Long: "Tail the live monitor SSE stream. The scriptable form is --follow, which writes\n" +
 			"one compact JSON object per line (NDJSON) to stdout - pipe it to jq, a file, or\n" +
 			"another process. Without --follow on a terminal, the full-screen monitor opens\n" +
-			"(wired in a later build step); for now --follow is the supported, scriptable mode.\n\n" +
+			"(not built yet); for now --follow is the supported, scriptable mode.\n\n" +
 			"Pass a /128 address to narrow within YOUR tenant (the SSE ?agent= narrow takes the\n" +
 			"address, not the agent id).",
 		Args: cobra.MaximumNArgs(1),

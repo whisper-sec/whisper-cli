@@ -31,9 +31,9 @@ func newLoginCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "login [key]",
-		Short: "Sign in at console.whisper.security (or save an API key) to ~/.config/whisper/key",
+		Short: "Sign in at console.whisper.online (or save an API key) to ~/.config/whisper/key",
 		Long: "Sign in to Whisper. With NO key argument on a terminal you can just press Enter to\n" +
-			"open console.whisper.security in your browser and approve the login (the device\n" +
+			"open console.whisper.online in your browser and approve the login (the device\n" +
 			"flow, RFC 8628) - or paste an API key instead. Pass the key as an argument to skip\n" +
 			"the prompt entirely. The key is saved to the key file (mode 600) so every later\n" +
 			"command uses it with no further config, then verified with a quick op:list.\n\n" +
@@ -45,6 +45,13 @@ func newLoginCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if web && manual {
 				return usageErr("choose at most one of --web / --manual")
+			}
+
+			// A managed host can switch interactive sign-in off. Saving a key you
+			// were handed is still allowed, because that is configuration rather than a
+			// sign-in; every path that would open a browser or prompt is not.
+			if len(args) == 0 && !interactiveLoginAllowed() {
+				return sysPolicyLoginRefusal()
 			}
 
 			// 1) An explicit key argument always wins (scriptable, unchanged behaviour).
@@ -64,7 +71,7 @@ func newLoginCmd() *cobra.Command {
 			// 3) --manual forces the bare key prompt (interactive) or errors with guidance.
 			if manual {
 				if !isInteractive() {
-					return usageErr("no key supplied - usage: whisper login <key> (get one at https://console.whisper.security/settings)")
+					return usageErr("no key supplied - usage: whisper login <key> (get one at https://console.whisper.online/settings)")
 				}
 				k, err := promptForKey()
 				if err != nil {
@@ -92,7 +99,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			// 5) No TTY and no key: a clear, helpful error (never an opaque hang).
-			return usageErr("no key supplied - usage: whisper login <key>, or 'whisper login --web' to sign in via browser (get a key at https://console.whisper.security/settings)")
+			return usageErr("no key supplied - usage: whisper login <key>, or 'whisper login --web' to sign in via browser (get a key at https://console.whisper.online/settings)")
 		},
 	}
 	cmd.Flags().BoolVar(&web, "web", false, "force the browser sign-in (device flow) - useful with no key on hand")
@@ -107,7 +114,7 @@ func newLoginCmd() *cobra.Command {
 // stdin mirrors promptForKey (the key-ladder last rung) so it behaves identically on a
 // terminal.
 func promptLoginChoice() (string, error) {
-	fmt.Fprint(os.Stderr, "Press Enter to sign in at console.whisper.security (opens your browser), or paste your API key: ")
+	fmt.Fprint(os.Stderr, "Press Enter to sign in at console.whisper.online (opens your browser), or paste your API key: ")
 	sc := bufio.NewScanner(os.Stdin)
 	if sc.Scan() {
 		return strings.TrimSpace(sc.Text()), nil
@@ -168,7 +175,7 @@ func deviceCallTimeout(timeout time.Duration) time.Duration {
 // is reported but is not fatal, exactly like the prior behaviour.
 func saveAndVerify(key string) error {
 	if key == "" {
-		return usageErr("no key supplied - usage: whisper login <key> (get one at https://console.whisper.security/settings)")
+		return usageErr("no key supplied - usage: whisper login <key> (get one at https://console.whisper.online/settings)")
 	}
 	path := g.keyFile
 	if path == "" {
@@ -230,6 +237,12 @@ func newConfigCmd() *cobra.Command {
 				"auth_scheme": authScheme(cred),
 				"version":     Version,
 			}
+			// Named only when there IS one, so an unmanaged host's output is unchanged and
+			// a managed one explains itself: without this row, an operator seeing a
+			// control_url that is not the default has no way to tell why.
+			if activeSysPolicy.Origin != "" {
+				cfg["managed_policy"] = activeSysPolicy.Origin
+			}
 			if g.jsonOut {
 				emitJSONValue(cfg)
 				return nil
@@ -244,6 +257,9 @@ func newConfigCmd() *cobra.Command {
 				{"key_present", fmt.Sprintf("%v", cfg["key_present"])},
 				{"auth_scheme", cfg["auth_scheme"].(string)},
 				{"version", cfg["version"].(string)},
+			}
+			if p, ok := cfg["managed_policy"].(string); ok {
+				rows = append(rows, []string{"managed_policy", p})
 			}
 			printTable([]string{"SETTING", "VALUE"}, rows)
 			return nil

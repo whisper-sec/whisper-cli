@@ -172,7 +172,7 @@ func computeCosignatureKeyID(name string, pub ed25519.PublicKey) uint32 {
 }
 
 // cosignLine builds the C2SP cosignature/v1 signed-note line the way the server (and a
-// stock tlog-witness) does: "- <name> <b64(keyId[4]||time[8]||sig[64])>", where sig is
+// stock tlog-witness) does: "\u2014 <name> <b64(keyId[4]||time[8]||sig[64])>", where sig is
 // Ed25519 over "cosignature/v1\ntime <ts>\n" + note body.
 func cosignLine(name string, priv ed25519.PrivateKey, pub ed25519.PublicKey, ts uint64, body []byte) string {
 	msg := append([]byte(fmt.Sprintf("cosignature/v1\ntime %d\n", ts)), body...)
@@ -331,7 +331,7 @@ func TestIndependentCosignatureVerdict(t *testing.T) {
 	}
 }
 
-// TestPinnedWitnessVerdict proves the OUT-OF-BAND pinned mode (review): with
+// TestPinnedWitnessVerdict proves the OUT-OF-BAND pinned mode: with
 // --witness-key pins the verdict counts ONLY cosignatures verifying under a pinned key - a
 // key the ORIGIN lists as independent:true but the verifier did not pin gains nothing (the
 // compromised-origin scenario), and all three accepted pin encodings decode to the same key.

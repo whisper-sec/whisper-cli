@@ -16,7 +16,7 @@ import (
 )
 
 // mode is one of the six top-level views (the tab bar). EXPLORE leads the order as tab 1
-// - the graph explorer is the showpiece; it opens on whisper.security); AGENTS is
+// the graph explorer is the showpiece; it opens on whisper.security); AGENTS is
 // the merged operational view (fleet + the selected agent's live monitor in one panel)
 // and remains the LAUNCH view (bare `whisper` lands on your agents; `whisper explore`
 // lands on tab 1). GRAPH is the live, self-expanding agent-activity graph fed by the
@@ -61,7 +61,7 @@ type Options struct {
 	StartOnMon bool   // launch with the merged dashboard focused on StartAgent (whisper monitor <addr>)
 
 	StartOnExplore bool   // open straight on the EXPLORE tab (whisper explore [node])
-	StartNode      string // optional node to land the explorer on (Phase 2 wires the fetch)
+	StartNode      string // optional node to land the explorer on (the fetch is not wired yet)
 
 	Version string
 }
@@ -260,7 +260,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.err != nil {
 			a.setToast(friendlyErr(m.err), true)
 		}
-		// Hybrid: when the live tail drops to poll (503/EOF/404), kick the op:logs
+		// The hybrid feed: when the live tail drops to poll (503/EOF/404), kick the op:logs
 		// poll fallback so the picture keeps updating until the SSE reconnects. pollArmed
 		// keeps it to ONE chain - the reconnect loop oscillates retry→poll, and firing on
 		// every oscillation would stack N concurrent pollers.
@@ -316,7 +316,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case verbResultMsg:
 		return a, a.exploreVw.onVerbResult(m)
 	case searchMsg:
-		_ = m // reserved for the Phase 3 JUMP match list
+		_ = m // reserved for the JUMP match list
 		return a, nil
 	}
 	// Anything else while a form overlay is open belongs to the form: huh drives its
@@ -382,7 +382,7 @@ func (a *App) SelectedAgent() (model.Agent, bool) {
 }
 
 // mergeFleet replaces the fleet from op:list, preserving any stream-discovered agents
-// op:list may miss connect-created agents) and any already-fetched detail.
+// (op:list may miss connect-created agents) and any already-fetched detail.
 func (a *App) mergeFleet(fresh []model.Agent) {
 	byKey := make(map[string]model.Agent, len(a.agents))
 	for _, ex := range a.agents {

@@ -299,3 +299,67 @@ func TestGraphQueryRowsNeedsKey(t *testing.T) {
 		t.Fatal("keyless GraphQueryRows must be a 401 problem")
 	}
 }
+
+// --- the keyless tier ----------------------------------------------
+
+// GraphQueryPublic answers with NO credential at all - it is the transport the public
+// procedures (whisper.assess / .identify / .explain) ride, and the whole point of the
+// keyless tier is that it does not demand a key. It must also send no auth header:
+// an empty X-API-Key is a claim to be an unnamed tenant, not an absent claim.
+func TestGraphQueryPublicNeedsNoKeyAndSendsNoAuthHeader(t *testing.T) {
+	var sawKeyHeader, sawAuthHeader bool
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, sawKeyHeader = r.Header["X-Api-Key"]
+		_, sawAuthHeader = r.Header["Authorization"]
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"columns":["host"],"rows":[{"host":"8.8.8.8"}]}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{ControlURL: srv.URL, HTTPClient: srv.Client()}) // no Cred at all
+	res, err := c.GraphQueryPublic(context.Background(), "CALL whisper.assess([$v])", map[string]any{"v": "8.8.8.8"})
+	if err != nil {
+		t.Fatalf("a keyless public read must not need a key: %v", err)
+	}
+	if len(res.Rows) != 1 {
+		t.Fatalf("rows = %v, want the one decoded row", res.Rows)
+	}
+	if sawKeyHeader || sawAuthHeader {
+		t.Fatalf("no credential means no auth header at all (X-API-Key=%v Authorization=%v)", sawKeyHeader, sawAuthHeader)
+	}
+	if gotBody["query"] != "CALL whisper.assess([$v])" {
+		t.Fatalf("query sent = %v", gotBody["query"])
+	}
+}
+
+// The control for the test above: the SAME statement through GraphQuery, with no key,
+// is still the 401 it always was. Relaxing the keyed path was never the intent.
+func TestGraphQueryStillDemandsAKeyAfterTheKeylessSplit(t *testing.T) {
+	c := New(Config{ControlURL: "http://127.0.0.1:1", HTTPClient: &http.Client{}})
+	_, err := c.GraphQuery(context.Background(), "CALL whisper.assess([$v])", map[string]any{"v": "8.8.8.8"})
+	pe, ok := AsProblem(err)
+	if !ok || pe.Status != 401 {
+		t.Fatalf("GraphQuery with no key must still be a 401 no-key problem, got %v", err)
+	}
+}
+
+// A key that DOES resolve is still carried on a public read: the same statement answers
+// with a higher cap for a key-holder, so the keyless tier never throws the key away.
+func TestGraphQueryPublicStillSendsAKeyWhenOneResolves(t *testing.T) {
+	var gotKey string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotKey = r.Header.Get("X-API-Key")
+		_, _ = w.Write([]byte(`{"columns":[],"rows":[]}`))
+	}))
+	defer srv.Close()
+
+	c := New(Config{ControlURL: srv.URL, Cred: Credential{Value: "whisper-test"}, HTTPClient: srv.Client()})
+	if _, err := c.GraphQueryPublic(context.Background(), "CALL whisper.identify([$v])", map[string]any{"v": "x"}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotKey != "whisper-test" {
+		t.Fatalf("X-API-Key = %q, want the resolved key to ride along", gotKey)
+	}
+}

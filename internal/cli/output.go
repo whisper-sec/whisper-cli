@@ -30,6 +30,67 @@ func emitJSON(env *client.Envelope) {
 	fmt.Fprintln(os.Stdout, "{}")
 }
 
+// emitOpEnvelope writes the whisper.agents OP envelope to stdout, as the plane itself
+// wrote it, unwrapped from the Cypher result table that carries it over the wire.
+//
+// The live control plane - graph.whisper.online and every ns box - does not answer a
+// `CALL whisper.agents({op:...})` with the op envelope at the top level. It answers with
+// the envelope sitting inside one row of a Cypher table:
+//
+//	{"columns":["op","ok","status","result","error","retry_after","elapsed_ms"],
+//	 "rows":[{"op":"list","ok":true,"status":200,"result":{"columns":[...],"rows":[...]}}]}
+//
+// The thing a script wants is that ROW. On the carrier, `.result.columns` is the carrier's
+// own column list, and `.result` at the top level does not exist at all, so a documented
+// `| jq '.result.columns'` reads null against every real endpoint.
+//
+// The row's bytes are SLICED OUT, never decoded and re-encoded. A round trip through
+// map[string]any would quietly rewrite the plane's numbers - a priority of 50.0 comes back
+// as 50, and a millisecond stamp goes through a float64 - and the whole promise of this
+// path is that a script sees exactly what the server sent.
+//
+// Postel, in both directions: we accept the carrier shape OR a flat envelope OR a
+// positional row we cannot safely unwrap, and we emit one stable shape for the first two
+// and the untouched body for the third, never an error and never an empty object.
+func emitOpEnvelope(env *client.Envelope) {
+	if env == nil || len(env.Raw) == 0 {
+		fmt.Fprintln(os.Stdout, "{}")
+		return
+	}
+	out := opEnvelopeBytes(env.Raw)
+	os.Stdout.Write(out)
+	if !strings.HasSuffix(string(out), "\n") {
+		fmt.Fprintln(os.Stdout)
+	}
+}
+
+// opEnvelopeBytes returns the op envelope inside body, or body itself when it is already
+// one (or when the carrier holds a shape we cannot unwrap without inventing bytes).
+func opEnvelopeBytes(body json.RawMessage) json.RawMessage {
+	var top map[string]json.RawMessage
+	if json.Unmarshal(body, &top) != nil {
+		return body
+	}
+	if _, flat := top["result"]; flat {
+		return body // already the op envelope
+	}
+	var rows []json.RawMessage
+	if json.Unmarshal(top["rows"], &rows) != nil || len(rows) == 0 {
+		return body
+	}
+	// Only an object row is the op envelope. A positional row ["list",true,200,{...}] is
+	// the same facts in a shape we would have to rebuild, and rebuilding is exactly the
+	// re-encoding this function exists to avoid.
+	var probe map[string]json.RawMessage
+	if json.Unmarshal(rows[0], &probe) != nil {
+		return body
+	}
+	if _, ok := probe["result"]; !ok {
+		return body
+	}
+	return rows[0]
+}
+
 // emitJSONValue marshals an arbitrary value as indented JSON to stdout (for `config`,
 // and any local, non-envelope output).
 func emitJSONValue(v any) {
@@ -205,7 +266,7 @@ func colorEnabled() bool {
 
 // promptForKey reads one line from the terminal (the key-ladder last rung).
 func promptForKey() (string, error) {
-	fmt.Fprint(os.Stderr, "Enter your Whisper API key (https://console.whisper.security/settings): ")
+	fmt.Fprint(os.Stderr, "Enter your Whisper API key (https://console.whisper.online/settings): ")
 	sc := bufio.NewScanner(os.Stdin)
 	if sc.Scan() {
 		return strings.TrimSpace(sc.Text()), nil
@@ -214,7 +275,7 @@ func promptForKey() (string, error) {
 }
 
 // friendly renders an error as the single most helpful PLAIN-LANGUAGE line - never a Go
-// stack trace, never a server problem code the user can't act on . Known server
+// stack trace, never a server problem code the user can't act on. Known server
 // problems are mapped to one calm sentence; everything else falls back to the problem's
 // own (already secret-free, helpful) detail, then the wrapped message.
 func friendly(err error) string {
@@ -240,17 +301,28 @@ func mapProblem(pe *client.ProblemError) string {
 		if pe.Title == "no key" {
 			break
 		}
+		// A refusal about what a key MAY DO is not a refusal of the key. The control
+		// plane authenticated it perfectly well and then declined one operation, and its
+		// own sentence names the grant and says whether retrying can ever obtain it,
+		// which the control plane guarantees for the operator grants. Answering that
+		// with "your key was not accepted - run: whisper login" sends a person to
+		// re-login and re-mint, and be refused identically, which is the exact loop
+		// that wording exists to end one layer down. Fall through to the problem's
+		// own detail.
+		if isScopeRefusal(pe) {
+			return ""
+		}
 		return "your key was not accepted - run: whisper login"
 	case 404:
-		// Not every 404 is an agent lookup: a local "no .whisper/config here", a
-		// host-sensor config, or another resource can 404 too, and answering
-		// those with "that agent isn't in your account" is a false trail (it is
-		// what sent a fresh-box `service install --sensor` chasing a nonexistent
-		// agent). Only an AGENT-scoped 404 gets the account nudge; anything
-		// else falls through ("") to the problem's own actionable, secret-free
-		// detail. The local "no config" 404s stay ProblemErrors on purpose -
-		// isProjectNotFound keys off Status 404 for `whisper run`'s fail-open - so
-		// the fix lives here in the rendering, not in the error construction.
+		// Not every 404 is an agent lookup: a local "no .whisper/config here" or
+		// another resource can 404 too, and answering those with "that agent
+		// isn't in your account" is a false trail, and one that has already sent
+		// a freshly provisioned box chasing an agent that never existed. Only an
+		// AGENT-scoped 404 gets the account nudge; anything else falls through
+		// ("") to the problem's own actionable, secret-free detail. The local
+		// "no config" 404s stay ProblemErrors on purpose - isProjectNotFound keys
+		// off Status 404 for `whisper run`'s fail-open - so the fix lives here in
+		// the rendering, not in the error construction.
 		if problemMentionsAgent(pe) {
 			return "that agent isn't in your account - run `whisper list` to see your agents"
 		}
@@ -265,6 +337,16 @@ func mapProblem(pe *client.ProblemError) string {
 		return "egress isn't enabled for this agent yet - try again shortly or contact support"
 	}
 	return ""
+}
+
+// isScopeRefusal reports whether a 401/403 is about a missing SCOPE rather than about the
+// key itself. Keyed on the control plane's own words in every shape it sends them: the
+// front door's {"code":"FORBIDDEN_SCOPE"} (decoded into Title), an RFC-7807 type, and the
+// message text, which reads "Missing required scope: dns:whale:write..." and, on older
+// paths, "missing required scope: dns:connect".
+func isScopeRefusal(pe *client.ProblemError) bool {
+	s := strings.ToLower(pe.Title + " " + pe.Type + " " + pe.Error())
+	return strings.Contains(s, "forbidden_scope") || strings.Contains(s, "required scope")
 }
 
 // problemMentionsAgent reports whether a problem is about an agent identity (so
@@ -295,6 +377,25 @@ func isUsageError(err error) bool {
 }
 
 // usageErr wraps a message as a usage error (so a subcommand can request exit 2).
+// showPath renders a filesystem path inside a message for a person to read and,
+// more to the point, to paste back.
+//
+// It exists because %q is the wrong verb for a path. Go's quoted form escapes
+// the backslash, so a Windows path leaves the process as
+// C:\\Users\\you\\project\\.whisper\\config: not the path the user typed, not a
+// path that works if they paste it, and not a string that any tool downstream
+// will match. It is also the reason a test asserting the error names the path it
+// failed on could not pass on Windows.
+//
+// An empty path is named rather than rendered as nothing at all, so a message
+// about a path never trails off mid-sentence.
+func showPath(p string) string {
+	if strings.TrimSpace(p) == "" {
+		return "(no path given)"
+	}
+	return p
+}
+
 func usageErr(format string, a ...any) error {
 	return &usageError{msg: fmt.Sprintf(format, a...)}
 }

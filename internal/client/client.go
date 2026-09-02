@@ -17,10 +17,12 @@ import (
 )
 
 // Canonical endpoints. graph.whisper.online is the ONE control endpoint - the own-infra front
-// door that serves whisper.agents directly; the live monitor SSE is served directly by the
-// active/active ns nodes (the gateway does not proxy /monitor/stream); rdap.whisper.online is the
-// public RDAP service. Each is overridable with its --*-url flag for a self-hosted or pre-prod
-// endpoint (Postel: liberal in, but a sane zero-config default - the common case needs no flag).
+// door that serves whisper.agents directly; the legacy graph.whisper.security proxy hop is
+// being decommissioned (agents are moving off it), so it is NOT a default and there is NO fallback
+// to it. The live monitor SSE is served directly by the active/active ns nodes (the gateway does not
+// proxy /monitor/stream); rdap.whisper.online is the public RDAP service. Each is overridable
+// with its --*-url flag for a self-hosted or pre-prod endpoint (Postel: liberal in, sane zero-config
+// default - the common case needs no flag).
 const (
 	DefaultControlURL = "https://graph.whisper.online/api/query"
 	DefaultMonitorURL = "https://ns1.whisper.online/monitor/stream"
@@ -108,10 +110,10 @@ func New(cfg Config) *Client {
 			IdleConnTimeout:       90 * time.Second,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
-			DialContext: (&net.Dialer{
+			DialContext: guardedDial(&net.Dialer{
 				Timeout:   10 * time.Second,
 				KeepAlive: 30 * time.Second,
-			}).DialContext,
+			}),
 		}
 		transport = tr
 		httpClient = &http.Client{Transport: tr, Timeout: timeout}
@@ -179,7 +181,7 @@ func (c *Client) Query(ctx context.Context, query string) (*Envelope, error) {
 
 // StreamMonitor opens the live SSE monitor stream and emits each decoded event on
 // emit() until ctx is cancelled or the stream ends. agentAddr (a /128 address, NOT an
-// agent id - see the dev guide ) optionally narrows the stream within the tenant;
+// agent id - see the dev guide) optionally narrows the stream within the tenant;
 // pass "" for the whole tenant. A non-2xx response is surfaced as a *ProblemError
 // (e.g. 503 subscriber-cap with Retry-After) so the caller can back off.
 func (c *Client) StreamMonitor(ctx context.Context, agentAddr string, emit func(MonitorEvent)) error {

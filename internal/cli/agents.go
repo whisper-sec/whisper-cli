@@ -305,7 +305,7 @@ func newCreateCmd() *cobra.Command {
 				}
 				if g.quiet {
 					// --quiet ⇒ ONLY the load-bearing value (the address) on stdout, no
-					// chrome - mirror the identity path's quiet short-circuit . The
+					// chrome - mirror the identity path's quiet short-circuit. The
 					// register-only API key is shown ONCE in the normal (non-quiet) path; a
 					// caller that asked for quiet asked for exactly the address.
 					if recs := env.Result.Records(); len(recs) > 0 {
@@ -330,7 +330,7 @@ func newCreateCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// snapshot the identities held BEFORE the call. op:identity is
+			// Snapshot the identities held BEFORE the call. op:identity is
 			// idempotent on the server (one key = one /128) and returns an existing
 			// identity with NO wire marker, so looking first is the only honest way
 			// to tell "created" from "reused" - and a silent reuse under a fresh
@@ -343,7 +343,7 @@ func newCreateCmd() *cobra.Command {
 			if err := maybePinWallet(c, env, wallet, walletChain); err != nil {
 				return err
 			}
-			// - under --json, emit the VERBATIM op:identity envelope (agent/address/
+			// under --json, emit the VERBATIM op:identity envelope (agent/address/
 			// fqdn/ptr/state) to STDOUT so a programmatic caller (the whisper-id SDKs'
 			// register()) can JSON-parse it; the human one-liner stays on stderr. This
 			// mirrors the --register path, which already routes through renderEnvelope.
@@ -386,7 +386,7 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&label, "label", "", "legacy alias for --name (--name wins)")
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in; surfaced in RDAP)")
 	cmd.Flags().BoolVar(&register, "register", false, "mint a NEW agent + its own API key (op:register)")
-	cmd.Flags().BoolVar(&reuse, "reuse", false, "with --register: reuse the agent already registered under --name (mint only when none exists; the bind is idempotent on a re-run)")
+	cmd.Flags().BoolVar(&reuse, "reuse", false, "with --register: reuse the agent already registered under --name (mint only when none exists)")
 	cmd.Flags().StringVar(&retention, "retention", "", "with --register: days to keep the new agent's DNS/query logs (0-3650); 0 = keep none (the security floor is still retained for a fixed operator window)")
 	ids.register(cmd)
 	cmd.Flags().StringVar(&wallet, "wallet", "", "pin an x402 wallet (EOA) to the new /128 as a resolvable TXT binding (op:host)")
@@ -485,7 +485,7 @@ func (f *identifierFlags) resolve() (string, error) {
 	}
 }
 
-// createAgent is THE single place that creates a named identity . It is used by the
+// createAgent is THE single place that creates a named identity. It is used by the
 // guided flow, by `whisper create`, and (indirectly) by the TUI create modal validation.
 // It REJECTS an empty/blank/whitespace name with a clear usage error - every agent has a
 // human name, no exceptions. The name maps to the server's friendly label (what op:list
@@ -793,13 +793,17 @@ func renderCreated(res *client.Result, register bool) {
 func newKillCmd() *cobra.Command {
 	var yes, full bool
 	cmd := &cobra.Command{
-		Use:   "kill <agent|address>",
+		Use:   "kill <agent|address|label>",
 		Short: "Release an identity (IRREVERSIBLE) - or --revoke an agent's Whisper access",
 		Long: "Release the caller's own /128 identity (op:identity release) - IRREVERSIBLE.\n" +
 			"With --revoke (admin:dns), revoke an agent: withdraw its /128, PTR and egress\n" +
 			"tokens and refuse its control-plane access (op:revoke). The API key is a Whisper\n" +
 			"API key managed by Whisper auth and is NOT deleted. Confirms unless --yes; in a\n" +
-			"non-interactive run --yes is required (we refuse to destroy without confirmation).",
+			"non-interactive run --yes is required (we refuse to destroy without confirmation).\n" +
+			"\n" +
+			"The target is anything `whisper list` printed: the AGENT id, the ADDRESS, or the\n" +
+			"LABEL. A label that names more than one of your agents is refused rather than\n" +
+			"guessed - use the id or the address to say which one.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := args[0]

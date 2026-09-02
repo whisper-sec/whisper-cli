@@ -16,11 +16,11 @@ import (
 
 // Fetcher retrieves HTTP resources for the transparency + identity-doc steps.
 //
-//   - Get fetches over ordinary WebPKI (the transparency object, JWKS and /checkpoint/key are
-//     served by the gateway under a publicly-trusted cert) -- this is the trust-on-pin surface.
-//   - GetPinned fetches over a DANE-EE-pinned connection: it dials the exact validated /128
-//     and verifies the served leaf against the DNSSEC TLSA pin (no WebPKI). The identity_doc,
-//     served by the agent itself, is fetched this way so its transport is DNSSEC-trustless.
+// - Get fetches over ordinary WebPKI (the transparency object, JWKS and /checkpoint/key are
+// served by the gateway under a publicly-trusted cert) -- this is the trust-on-pin surface.
+// - GetPinned fetches over a DANE-EE-pinned connection: it dials the exact validated /128
+// and verifies the served leaf against the DNSSEC TLSA pin (no WebPKI). The identity_doc,
+// served by the agent itself, is fetched this way so its transport is DNSSEC-trustless.
 type Fetcher interface {
 	Get(ctx context.Context, url string) (body []byte, status int, err error)
 	GetPinned(ctx context.Context, hostport, sni, path string, pin TLSAPin) (body []byte, status int, err error)

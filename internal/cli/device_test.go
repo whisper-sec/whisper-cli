@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-// deviceRegisterServer is a mock control plane whose op:register returns the DEVICE shape
+// deviceRegisterServer is a mock control plane whose op:register returns the first step DEVICE shape
 // (token/doh_url/dot_host/resolver_ip/address/label) rather than the agent shape. It records
 // each request body so a test can assert device:true was actually sent.
 func deviceRegisterServer(t *testing.T, token, doh, addr string, gotBody *string) *httptest.Server {
@@ -58,7 +58,7 @@ func TestDeviceAdd_HumanPrintsAllForms(t *testing.T) {
 		}
 	})
 
-	// It must have sent op:register with the device discriminator (the device flag). The client
+	// It must have sent op:register with the device discriminator (the first step device flag). The client
 	// serialises to a Cypher CALL, so the arg appears as the literal `device:true`.
 	if !strings.Contains(body, "op:'register'") || !strings.Contains(body, "device:true") {
 		t.Fatalf("device add must send op:register with device:true; body=%q", body)
@@ -73,8 +73,8 @@ func TestDeviceAdd_HumanPrintsAllForms(t *testing.T) {
 	if strings.TrimSpace(stdout) != devTok {
 		t.Fatalf("device add must print the token on stdout; stdout=%q", stdout)
 	}
-	// The Apple URL points at the profile generator on the canonical resolver host for THIS token
-	// Phase 1 renamed the consumer product to resolver.whisper.online).
+	// The Apple URL points at the profile generator on the canonical resolver host for THIS
+	// token (the consumer product is served from resolver.whisper.online).
 	if got := mobileconfigURL(devTok); got != "https://resolver.whisper.online/apple/"+devTok+".mobileconfig" {
 		t.Fatalf("mobileconfigURL wrong: %q", got)
 	}

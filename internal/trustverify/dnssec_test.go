@@ -17,6 +17,18 @@ const (
 	testTLSA  = "bbf5bdd83ff6a881e30cb0f7632194054d9a19c0cf706d49879d69c820e564da"
 )
 
+// corruptDigest returns hexDigest with its leading byte GUARANTEED different.
+// The hierarchy's keys are freshly generated per run, so a fixed "00" prefix
+// collided with a real digest that already started with 00 - a 1-in-256
+// per-run flake in the wrong-anchor and broken-DS tests. Deterministic
+// mutation, never a collision.
+func corruptDigest(hexDigest string) string {
+	if len(hexDigest) >= 2 && hexDigest[:2] == "00" {
+		return "ff" + hexDigest[2:]
+	}
+	return "00" + hexDigest[2:]
+}
+
 func TestValidateRRSet_HappyChainToAnchor(t *testing.T) {
 	h := buildHierarchy(t, testChild, testLeaf, testTLSA)
 	rrs, err := h.validator().ValidateRRSet(context.Background(), testLeaf, dns.TypeTLSA)
@@ -64,7 +76,7 @@ func TestValidateRRSet_WrongAnchorFails(t *testing.T) {
 		KeyTag:     h.anchors[0].KeyTag,
 		Algorithm:  h.anchors[0].Algorithm,
 		DigestType: h.anchors[0].DigestType,
-		Digest:     "00" + h.anchors[0].Digest[2:],
+		Digest:     corruptDigest(h.anchors[0].Digest),
 	}}
 	v := NewValidator(h.res, bad, h.now)
 	if _, err := v.ValidateRRSet(context.Background(), testLeaf, dns.TypeTLSA); err == nil {
@@ -76,7 +88,7 @@ func TestValidateRRSet_BrokenDSChainFails(t *testing.T) {
 	h := buildHierarchy(t, testChild, testLeaf, testTLSA)
 	// Corrupt the child's DS digest - the child DNSKEY is now unanchored.
 	msg := h.res.answers[rkey(testChild, dns.TypeDS)]
-	msg.Answer[0].(*dns.DS).Digest = "00" + msg.Answer[0].(*dns.DS).Digest[2:]
+	msg.Answer[0].(*dns.DS).Digest = corruptDigest(msg.Answer[0].(*dns.DS).Digest)
 	if _, err := h.validator().ValidateRRSet(context.Background(), testLeaf, dns.TypeTLSA); err == nil {
 		t.Fatal("expected FAIL for a corrupted DS (broken chain of trust)")
 	}

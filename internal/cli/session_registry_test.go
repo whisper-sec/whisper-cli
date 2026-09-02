@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // session_registry_test.go: a one-shot (`whisper ip`, `whisper run`) must DETECT a
@@ -29,7 +30,7 @@ func stubSessionsDir(t *testing.T) string {
 	saved := sessionsDirFn
 	sessionsDirFn = func() string { return dir }
 	t.Cleanup(func() { sessionsDirFn = saved })
-	t.Setenv("HOME", t.TempDir()) // ReadAgentFile("") must see a clean home, not the dev box's
+	testenv.HermeticHome(t) // ReadAgentFile("") must see a clean home, not the dev box's
 	return dir
 }
 

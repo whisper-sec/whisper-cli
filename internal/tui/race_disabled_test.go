@@ -5,5 +5,5 @@
 
 package tui
 
-// raceEnabled is false in a plain build: wall-clock budgets are asserted (see).
+// raceEnabled is false in a plain build, so wall-clock budgets are asserted.
 const raceEnabled = false

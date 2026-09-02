@@ -1,54 +1,119 @@
 name: Release
 
-# Cut a release by pushing a version tag, e.g.:  git tag v1.0.0 && git push origin v1.0.0
+# THIS WORKFLOW NO LONGER CUTS RELEASES, AND MUST NOT.
+#
+# The `whisper` people install is one binary with two halves in it: the client (identity,
+# egress, connect, verify, the graph surface, the TUI) and the endpoint (the host sensor and
+# the service that supervises it). Only the client half is open source. The endpoint half is
+# distributed as a signed binary, so its sources are not in this repository and cannot be.
+#
+# This workflow cross-compiles THIS tree. Everything it can produce is therefore a `whisper`
+# with no `service`, no `sensor` and no `posture` in it. It used to run on every `v*` tag, and
+# `install.sh` downloads from `/releases/latest/download`, so a tag pushed here would have
+# quietly replaced the product people install with a client that cannot run the sensor they
+# installed it for.
+#
+# The release assets are built once, from the tree that has both halves, signed once with the
+# AS219419 release key, and published to this repository's Releases by the build that bakes
+# them. One build, one set of bytes, served identically by the release, by the download route
+# and by every package channel.
+#
+# So the tag trigger is gone. What remains is a manual escape hatch for a client-only build,
+# behind a confirmation nobody types by accident, and it should be a very unusual thing to run.
+
 on:
-  push:
-    tags:
-      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build, without the leading v (e.g. 1.2.3)
+        required: true
+      confirm:
+        description: >-
+          Type "client-only" to confirm you intend to publish a build WITHOUT the endpoint half.
+        required: true
 
 permissions:
   contents: write   # required to create the GitHub Release and upload assets
 
 jobs:
   release:
-    name: build · sign · publish
+    name: build · sign · publish (client-only)
     runs-on: ubuntu-latest
-    # Surface the signing secrets as job-level env so the sign step's `if:` can test
-    # for their presence. They are never printed; the values only flow into gpg.
-    env:
-      PGP_SIGNING_KEY: ${{ secrets.PGP_SIGNING_KEY }}
-      PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
+    # The signing secrets are NOT job-level env. Job-level env is readable by every step in
+    # the job, which here includes ./build-all.sh and three third-party actions, and a signing
+    # key that every step can read is a signing key every step can leak. They are scoped to
+    # the one step that signs, and that step decides for itself whether it has them.
     steps:
-      - uses: actions/checkout@v4
+      - name: Confirm this is meant to be a client-only build
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -eu
+          if [ "$CONFIRM" != "client-only" ]; then
+            echo "This workflow builds only the client half of whisper. To publish that" >&2
+            echo "deliberately, re-run it and type client-only in the confirm box." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set up Go
-        uses: actions/setup-go@v5
+        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.25.13'
           cache: true
 
-      - name: Derive version from the tag
+      - name: Read the version
         id: ver
-        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+        env:
+          IN_VERSION: ${{ inputs.version }}
+        run: |
+          set -eu
+          v="${IN_VERSION#v}"
+          # A real semver check, not a glob. `[0-9]*.[0-9]*.[0-9]*` accepts
+          # `1.2.3" ; id ; echo "` and a value carrying a newline, and this value is
+          # operator-supplied and reaches both a shell and $GITHUB_OUTPUT below.
+          # grep matches per LINE, so a value carrying a newline passes on its first
+          # line alone. Reject any embedded newline before the pattern check.
+          [ "$(printf '%s' "$v" | wc -l)" -eq 0 ] \
+            || { echo "version must be a single line" >&2; exit 1; }
+          printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+            || { echo "not a release version: $v" >&2; exit 1; }
+          echo "version=$v" >> "$GITHUB_OUTPUT"
 
       # build-all.sh reads platforms.txt and emits, for every (os, arch):
       #   dist/whisper-<os>-<arch>[.exe]        the static binary
       #   dist/whisper-<os>-<arch>[.exe].sha256 its SHA-256
       # These names match exactly what install.sh / install.ps1 download.
+      # The version reaches the shell as an ENVIRONMENT variable, never interpolated into
+      # the script text. A `${{ }}` here is a command-injection sink in a job that holds
+      # contents: write and signs the release assets one step later.
       - name: Cross-compile all platforms
-        run: ./build-all.sh dist "${{ steps.ver.outputs.version }}"
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: ./build-all.sh dist "$VERSION"
 
-      # PGP-sign each binary into a detached .asc - ONLY if the signing secrets are
-      # present. The key is imported into an ephemeral keyring; nothing is hardcoded.
-      # If the secrets are absent the step skips cleanly (the release still ships with
-      # SHA-256 checksums).
+      # PGP-sign each binary into a detached .asc. The key is imported into an ephemeral
+      # keyring; nothing is hardcoded. Signing is ALL-OR-NOTHING: SECURITY.md and both
+      # installers tell people to verify a detached signature against a pinned fingerprint,
+      # so a release that quietly ships without one turns a documented security step into a
+      # dead end. An absent key fails the job instead of publishing unsigned.
       - name: Sign artifacts (PGP)
-        if: ${{ env.PGP_SIGNING_KEY != '' && env.PGP_PASSPHRASE != '' }}
+        env:
+          PGP_SIGNING_KEY: ${{ secrets.PGP_SIGNING_KEY }}
+          PGP_PASSPHRASE: ${{ secrets.PGP_PASSPHRASE }}
         run: |
           set -eu
+          if [ -z "${PGP_SIGNING_KEY:-}" ] || [ -z "${PGP_PASSPHRASE:-}" ]; then
+            echo "::error::no signing key configured, refusing to publish an unsigned release" >&2
+            echo "SECURITY.md and the installers both instruct users to verify a detached" >&2
+            echo "signature; shipping without one silently breaks that instruction." >&2
+            exit 1
+          fi
           export GNUPGHOME="$(mktemp -d)"
           chmod 700 "$GNUPGHOME"
           printf '%s' "$PGP_SIGNING_KEY" | gpg --batch --import
+          signed=0
           for f in dist/whisper-*; do
             case "$f" in
               *.sha256|*.asc) continue ;;
@@ -57,7 +122,18 @@ jobs:
             printf '%s' "$PGP_PASSPHRASE" | \
               gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
                   --detach-sign --armor --output "$f.asc" "$f"
+            # Read every signature back. A file written is not a signature that verifies,
+            # and the difference only shows up on the user's machine.
+            gpg --batch --verify "$f.asc" "$f"
+            signed=$((signed + 1))
           done
+          # An empty loop leaves signed=0 and would otherwise report success having signed
+          # nothing at all - the exact shape of an absence that reads as a pass.
+          if [ "$signed" -eq 0 ]; then
+            echo "::error::no binaries were signed - dist/ matched nothing" >&2
+            exit 1
+          fi
+          echo "signed and verified $signed binaries"
           # Scrub the ephemeral keyring.
           rm -rf "$GNUPGHOME"
 
@@ -77,9 +153,10 @@ jobs:
           cat checksums.txt
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          name: ${{ github.ref_name }}
+          tag_name: v${{ steps.ver.outputs.version }}
+          name: v${{ steps.ver.outputs.version }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           files: |

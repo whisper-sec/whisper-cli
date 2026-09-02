@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -149,7 +150,7 @@ func TestConnect_WireGuardTier_SendsPublicKeyNotPrivate(t *testing.T) {
 		t.Fatalf("the identity private key PEM LEAKED into output: out=%q err=%q", stdout, stderr)
 	}
 
-	// The identity key must be persisted 0600 (idkey.Save's contract) and REUSED on a second
+	// The identity key must be persisted 0600 (idkey's save contract) and REUSED on a second
 	// connect for the same (connect-first ⇒ "default"-handle) identity - same SPKI both times.
 	entries, rerr := os.ReadDir(idDir)
 	if rerr != nil || len(entries) == 0 {
@@ -159,7 +160,12 @@ func TestConnect_WireGuardTier_SendsPublicKeyNotPrivate(t *testing.T) {
 	if serr != nil {
 		t.Fatalf("stat persisted identity key: %v", serr)
 	}
-	if info.Mode().Perm() != 0o600 {
+	// Unix mode bits only. Windows carries none, so os.Stat reports 0666 whatever the
+	// file's real protection is, which is why the assertion below is skipped there.
+	// Confidentiality on Windows is not left to the parent directory: idkey's save path goes
+	// through secfile, which sets a protected, non-inheriting, owner-only DACL on the
+	// file itself before the first byte is written.
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o600 {
 		t.Fatalf("persisted identity key must be mode 0600, got %o", info.Mode().Perm())
 	}
 }
@@ -204,7 +210,7 @@ func TestPrepareWireGuard_AliasWG(t *testing.T) {
 	}
 }
 
-// TestPrepareIdentityKey_NoOpForSocks5 (client-side mirror): the identity keypair is
+// TestPrepareIdentityKey_NoOpForSocks5 (the client-side mirror): the identity keypair is
 // minted+injected ONLY for the routed tier - socks5/anyip (and no tier) must touch neither the key
 // nor the args.
 func TestPrepareIdentityKey_NoOpForSocks5(t *testing.T) {
@@ -248,7 +254,7 @@ func TestPrepareIdentityKey_WireGuard_InjectsPublicSpkiOnly(t *testing.T) {
 	}
 }
 
-// TestPrepareIdentityKey_ReusesPersistedKeyForTheSameHandle (client-side mirror): a second
+// TestPrepareIdentityKey_ReusesPersistedKeyForTheSameHandle (the client-side mirror): a second
 // connect for the SAME handle reuses the SAME persisted key - the server-side idempotent re-pin
 // then costs zero zone writes.
 func TestPrepareIdentityKey_ReusesPersistedKeyForTheSameHandle(t *testing.T) {

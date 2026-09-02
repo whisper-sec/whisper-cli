@@ -104,7 +104,7 @@ func loadLogs(c *client.Client, args map[string]any, token int) tea.Cmd {
 	}
 }
 
-// loadMonitorBackfill seeds the live monitor from op:logs on enter (the hybrid:
+// loadMonitorBackfill seeds the live monitor from op:logs on enter (the hybrid feed:
 // paint the recent history, then tail the SSE on top). agent narrows to one /128 when
 // focused; from is the window (e.g. "-15m"). Reads fail OPEN - an empty backfill is fine,
 // never an error to the operator.

@@ -93,11 +93,29 @@ func (c *Client) GraphQueryRows(ctx context.Context, cypher string, params map[s
 // endpoint (the same URL the control plane rides: POST {"query","parameters"}).
 // params may be nil (sent as {}). A failure comes back as a *ProblemError carrying
 // the server's own detail, never an opaque error.
+//
+// It requires a credential. The keyless public procedures (whisper.assess /
+// .identify / .explain) go through GraphQueryPublic instead.
 func (c *Client) GraphQuery(ctx context.Context, query string, params map[string]any) (*GraphResult, error) {
 	if c.cred.IsZero() {
 		return nil, &ProblemError{Status: 401, Title: "no key",
 			Detail: "graph queries need an API key - run 'whisper login', set WHISPER_API_KEY, or pass --key"}
 	}
+	return c.graphQuery(ctx, query, params)
+}
+
+// GraphQueryPublic runs a graph statement that does NOT need a tenant: the public
+// procedures anyone may call. It is the keyless half of the two tiers, so it
+// omits GraphQuery's credential precondition. A key is still SENT when one resolves,
+// because the same statement answers with a higher cap for a key-holder; it is simply
+// never demanded.
+func (c *Client) GraphQueryPublic(ctx context.Context, query string, params map[string]any) (*GraphResult, error) {
+	return c.graphQuery(ctx, query, params)
+}
+
+// graphQuery is the one request path both tiers share, so a keyless read and a keyed
+// read can never drift in how they encode, send, cap or decode.
+func (c *Client) graphQuery(ctx context.Context, query string, params map[string]any) (*GraphResult, error) {
 	if params == nil {
 		params = map[string]any{}
 	}
@@ -112,7 +130,12 @@ func (c *Client) GraphQuery(ctx context.Context, query string, params map[string
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("User-Agent", userAgent)
-	c.applyAuth(req)
+	// No credential means no auth header at all, rather than an empty one: an empty
+	// X-API-Key is a claim to be an unnamed tenant, and this request is not making a
+	// claim. Conservative in what we emit.
+	if !c.cred.IsZero() {
+		c.applyAuth(req)
+	}
 
 	resp, err := c.http.Do(req)
 	if err != nil {

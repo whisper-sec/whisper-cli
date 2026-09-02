@@ -5,13 +5,13 @@
 // agent identity, the mirror image of `whisper sign`.
 //
 // Two-tier, per the Whisper integration standard:
-//   - `whisper encrypt --to <agent-fqdn> <file>`  (KEYLESS) encrypts a file (or stdin) FOR an
-//     agent using that agent's DNSSEC-published public key. No API key is needed: the recipient's
-//     key is discovered from the OPENPGPKEY (RFC 7929) record, DNSSEC-validated from the IANA root
-//     IN-PROCESS, so anyone can encrypt to an agent and trust comes ONLY from the DNSSEC chain.
-//   - `whisper decrypt <file.wenc>`               (KEYED)   the agent, authenticated, decrypts. It
-//     fetches its own per-agent private key from the control plane (or you supply it with --key for
-//     the sole-control / agent-held case) and opens the message.
+// - `whisper encrypt --to <agent-fqdn> <file>` (KEYLESS) encrypts a file (or stdin) FOR an
+// agent using that agent's DNSSEC-published public key. No API key is needed: the recipient's
+// key is discovered from the OPENPGPKEY (RFC 7929) record, DNSSEC-validated from the IANA root
+// IN-PROCESS, so anyone can encrypt to an agent and trust comes ONLY from the DNSSEC chain.
+// - `whisper decrypt <file.wenc>` (KEYED) the agent, authenticated, decrypts. It
+// fetches its own per-agent private key from the control plane (or you supply it with --key for
+// the sole-control / agent-held case) and opens the message.
 //
 // Crypto: HPKE (RFC 9180) base mode with DHKEM(P-256, HKDF-SHA256) + HKDF-SHA256 + AES-256-GCM,
 // over the SAME per-agent EC P-256 identity key that the TLSA/SMIMEA/OPENPGPKEY records pin. The
@@ -37,6 +37,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/secfile"
 	"github.com/whisper-sec/whisper-cli/internal/trustverify"
 )
 
@@ -461,16 +462,19 @@ func writeOutput(target string, data []byte) error {
 	return nil
 }
 
-// writeSecretOutput writes recovered plaintext with owner-only perms (0o600) and create-exclusive
-// (O_EXCL), so a decrypted secret is never left world-readable, never silently clobbers an existing
-// file, and cannot be redirected through a symlink planted at the output path.
+// writeSecretOutput writes recovered plaintext owner-only and create-exclusive (O_EXCL), so a
+// decrypted secret is never left world-readable, never silently clobbers an existing file, and
+// cannot be redirected through a symlink planted at the output path.
 // O_EXCL is portable (Windows too); ciphertext keeps writeOutput (0o644) - it is not secret.
+//
+// Owner-only through secfile, not through a 0o600 mode argument. O_EXCL was portable;
+// the permission was not, and on Windows a decrypted secret took the output directory's DACL.
 func writeSecretOutput(target string, data []byte) error {
 	if target == "-" || target == "" {
 		_, err := os.Stdout.Write(data)
 		return err
 	}
-	f, err := os.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	f, err := secfile.OpenFile(target, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
 	if err != nil {
 		if os.IsExist(err) {
 			return fmt.Errorf("refusing to overwrite existing %s (use -o <path> or -o - for stdout)", target)

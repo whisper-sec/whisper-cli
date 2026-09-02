@@ -150,7 +150,7 @@ func (a *App) renderAgentsDashboard() string {
 }
 
 // renderHero is the first-run welcome: the four-ring brand mark (when colour and
-// height allow - the -approved art) over the wordmark + "press c to create".
+// height allow - the approved art) over the wordmark + "press c to create".
 func (a *App) renderHero(w, h int) string {
 	mark := brandGradient("whisper", a.th.NoColor)
 	sub := a.th.Dim.Render("identity-on-the-wire DNS - an agent IS a routable /128")

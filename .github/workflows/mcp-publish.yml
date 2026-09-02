@@ -1,5 +1,7 @@
 name: Publish MCP server
 
+# Manual only. This job PUBLISHES to the MCP Registry, so it must never fire on a
+# tag: that would publish a server.json pinned to an image built from this tree.
 on:
   workflow_dispatch:
 
@@ -11,11 +13,19 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - name: Install mcp-publisher
+        env:
+          MCP_PUBLISHER_VERSION: v1.8.1
+          MCP_PUBLISHER_SHA256: a06c9096dcb9727c13555b6be26c7effa707b01f06a4c561ba7a3635443cf2cc
         run: |
-          ver="$(curl -fsSL https://api.github.com/repos/modelcontextprotocol/registry/releases/latest | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)"
-          curl -fsSL "https://github.com/modelcontextprotocol/registry/releases/download/${ver}/mcp-publisher_linux_amd64.tar.gz" | tar xz -C "$RUNNER_TEMP" mcp-publisher
+          set -euo pipefail
+          url="https://github.com/modelcontextprotocol/registry/releases/download/${MCP_PUBLISHER_VERSION}/mcp-publisher_linux_amd64.tar.gz"
+          curl -fsSL --proto '=https' --tlsv1.2 -o "$RUNNER_TEMP/mcp-publisher.tar.gz" "$url"
+          # Verified BEFORE extraction, not after: `tar xz` on unverified bytes has already
+          # run the archive through the extractor by the time a later check could object.
+          echo "${MCP_PUBLISHER_SHA256}  $RUNNER_TEMP/mcp-publisher.tar.gz" | sha256sum -c -
+          tar xz -C "$RUNNER_TEMP" -f "$RUNNER_TEMP/mcp-publisher.tar.gz" mcp-publisher
           echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/mcp-publisher" --version
       - name: Validate server.json

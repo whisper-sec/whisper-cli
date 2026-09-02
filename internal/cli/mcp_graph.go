@@ -17,9 +17,17 @@ import (
 // mcp_graph.go is the GRAPH half of the MCP tool surface: one whisper_<camelId>
 // tool per embedded catalog recipe (direct recipes run their Cypher against the
 // public graph endpoint; flow recipes run by slug via the console gallery/run SSE
-// endpoint) plus whisper_graph_query for raw parameterised Cypher. The graph is a
-// keyed surface, so like the control tools these list only when a key resolves.
-// Every description ends with the recipe's docs URL (docsBase + docPath).
+// endpoint) plus whisper_graph_query for raw parameterised Cypher. Every description
+// ends with the recipe's docs URL (docsBase + docPath).
+//
+// The surface is two-tier, per that work. A handful of recipes are public graph
+// reads that need no tenant at all - whisper.assess, whisper.identify and
+// whisper.explain, the catalog's access:"keyless" entries - and those list AND run
+// with no key, next to whisper_verify and whisper_rdap. They are what a key-less user
+// gets, and it is real value rather than a stub. Everything else (raw Cypher, the
+// flows, the rest of the recipe catalog) stays keyed and unlocks with an API key.
+// A key is still sent on a keyless read when one resolves, because the same statement
+// answers with a higher cap for a key-holder; it is simply never demanded.
 
 // mcpFlowCap bounds one flow run inside a tools/call (an MCP call is one
 // request/response, so the stream is collected; a flow walks many steps).
@@ -28,8 +36,22 @@ const mcpFlowCap = 3 * time.Minute
 // mcpGraphQueryToolName is the raw-Cypher tool.
 const mcpGraphQueryToolName = "whisper_graph_query"
 
-// mcpGraphTools builds the graph tool catalogue: raw Cypher first, then every
-// catalog recipe as whisper_<camelId>.
+// mcpGraphKeylessTools is the keyless graph tier: the catalog's access:"keyless"
+// recipes, listed and runnable with no API key. Driven off the
+// catalog rather than a second hard-coded list here, so the tier has ONE definition.
+func mcpGraphKeylessTools() []map[string]any {
+	var tools []map[string]any
+	for _, e := range catalog.All() {
+		if e.IsKeyless() {
+			tools = append(tools, mcpGraphRecipeTool(e))
+		}
+	}
+	return tools
+}
+
+// mcpGraphTools builds the FULL graph tool catalogue for a key-holder: raw Cypher
+// first, then every catalog recipe as whisper_<camelId> (the keyless ones included,
+// which is why the caller lists either this or mcpGraphKeylessTools, never both).
 func mcpGraphTools() []map[string]any {
 	tools := []map[string]any{
 		{
@@ -69,6 +91,9 @@ func mcpGraphRecipeTool(e catalog.Entry) map[string]any {
 	}
 	if !e.IsDirect() {
 		d.WriteString(" Multi-step flow: the result streams as step events and can take a minute.")
+	}
+	if e.IsKeyless() {
+		d.WriteString(" No API key needed.")
 	}
 	d.WriteString(" Docs: ")
 	d.WriteString(e.DocsURL())
@@ -134,7 +159,7 @@ func mcpGraphCall(name string, args json.RawMessage) (mcpToolResult, bool) {
 	return mcpToolGraphRecipe(e, args), true
 }
 
-// mcpGraphClient resolves the keyed client every graph tool needs, with the same
+// mcpGraphClient resolves the keyed client the keyed graph tools need, with the same
 // helpful no-key guidance the control tools give.
 func mcpGraphClient() (*client.Client, mcpToolResult, bool) {
 	c, err := resolveClient(false, false)
@@ -143,6 +168,17 @@ func mcpGraphClient() (*client.Client, mcpToolResult, bool) {
 	}
 	if c.Credential().IsZero() {
 		return nil, mcpErr(mcpNoKeyErr), false
+	}
+	return c, mcpToolResult{}, true
+}
+
+// mcpGraphClientKeyless resolves a client WITHOUT demanding a credential, for the
+// keyless tier. A key that does resolve is still carried (higher cap), so this is the
+// same call for both kinds of caller.
+func mcpGraphClientKeyless() (*client.Client, mcpToolResult, bool) {
+	c, err := resolveClient(false, false)
+	if err != nil {
+		return nil, mcpErr(err.Error()), false
 	}
 	return c, mcpToolResult{}, true
 }
@@ -196,7 +232,21 @@ func mcpToolGraphRecipe(e catalog.Entry, args json.RawMessage) mcpToolResult {
 			return mcpErr(fmt.Sprintf("%s needs the %q input - see %s", e.ID, in.ParamName, e.DocsURL()))
 		}
 	}
-	c, errRes, ok := mcpGraphClient()
+	// The keyless tier resolves a client but never demands a key, and runs through
+	// GraphQueryPublic (which has no credential precondition). Every catalog entry
+	// marked keyless is a direct recipe; a flow needs the console, so if one were ever
+	// marked keyless it still falls through to the keyed path below rather than
+	// pretending it can run.
+	keyless := e.IsKeyless() && e.IsDirect()
+
+	var c *client.Client
+	var errRes mcpToolResult
+	var ok bool
+	if keyless {
+		c, errRes, ok = mcpGraphClientKeyless()
+	} else {
+		c, errRes, ok = mcpGraphClient()
+	}
 	if !ok {
 		return errRes
 	}
@@ -204,7 +254,11 @@ func mcpToolGraphRecipe(e catalog.Entry, args json.RawMessage) mcpToolResult {
 	if e.IsDirect() {
 		cx, cancel := ctx()
 		defer cancel()
-		res, err := c.GraphQuery(cx, e.Exec.Cypher, inputs)
+		run := c.GraphQuery
+		if keyless {
+			run = c.GraphQueryPublic
+		}
+		res, err := run(cx, e.Exec.Cypher, inputs)
 		if err != nil {
 			return mcpErr(friendly(err))
 		}

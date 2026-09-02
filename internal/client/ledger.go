@@ -20,8 +20,8 @@ import (
 )
 
 // LedgerCheckpoint is the decoded C2SP signed-note checkpoint served at GET /checkpoint
-// the log origin, the tree size, the 32-byte Merkle root, and - when
-// signed - the embedded key-id + Ed25519 signature over the note body. It is the trust
+// A checkpoint is the log origin, the tree size, the 32-byte Merkle root, and, when
+// signed, the embedded key-id + Ed25519 signature over the note body. It is the trust
 // anchor an inclusion/consistency proof is checked against.
 type LedgerCheckpoint struct {
 	Note     string // the verbatim C2SP note (body + signature line)
@@ -31,7 +31,7 @@ type LedgerCheckpoint struct {
 	KeyID    uint32 // the signed-note key-id from the signature line (0 if unsigned)
 	Sig      []byte // the 64-byte Ed25519 signature (nil if unsigned)
 	// Cosigs are the C2SP cosignature/v1 witness lines appended to the note: each is a
-	// "- <name> <b64(keyId[4]||time[8]||sig[64])>" line - 76-byte blobs, distinct from the
+	// "\u2014 <name> <b64(keyId[4]||time[8]||sig[64])>" line, 76-byte blobs, distinct from the
 	// 68-byte log-signature blob, so the two can never be confused.
 	Cosigs []LedgerCosignature
 	body   []byte // the exact note-body bytes the signature is over
@@ -49,12 +49,12 @@ type LedgerCosignature struct {
 
 // WitnessPolicy is the published witness-key set from GET /witness/keys: the
 // verifier-pinnable trusted witnesses, the k-of-n threshold, the freshness bound, and the
-// server's own claim (a CROSS-CHECK only - the CLI always recomputes the verification).
+// server's own claim (a CROSS-CHECK only; the CLI always recomputes the verification).
 type WitnessPolicy struct {
 	Object             string         `json:"object"`
 	Threshold          int            `json:"threshold"`
 	Claim              string         `json:"claim"`
-	PubliclyVerifiable bool           `json:"publicly_verifiable"` // server's view - never trusted blindly
+	PubliclyVerifiable bool           `json:"publicly_verifiable"` // server's view, never trusted blindly
 	MaxAgeSeconds      int64          `json:"publicly_verifiable_max_age_seconds"`
 	Witnesses          []WitnessEntry `json:"witnesses"`
 }
@@ -70,13 +70,13 @@ type WitnessEntry struct {
 	Role        string `json:"role"`
 }
 
-// ed25519SPKIPrefix is the 12-byte DER prefix of an Ed25519 X.509 SubjectPublicKeyInfo -
+// ed25519SPKIPrefix is the 12-byte DER prefix of an Ed25519 X.509 SubjectPublicKeyInfo,
 // accepting the /witness/keys public_key_spki form as a pin too (liberal accept).
 var ed25519SPKIPrefix = []byte{0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00}
 
 // ParseWitnessKeyPin decodes an OUT-OF-BAND pinned witness public key: the raw
 // 32-byte Ed25519 key as base64 (the /witness/keys public_key form), the 44-byte X.509
-// SubjectPublicKeyInfo as base64 (the public_key_spki form), or 64 hex chars - whichever
+// SubjectPublicKeyInfo as base64 (the public_key_spki form), or 64 hex chars, whichever
 // the operator was handed (Postel: liberal accept). Returns the raw 32-byte key.
 func ParseWitnessKeyPin(s string) ([]byte, error) {
 	s = strings.TrimSpace(s)
@@ -88,7 +88,7 @@ func ParseWitnessKeyPin(s string) ([]byte, error) {
 			return b, nil
 		}
 		if len(b) == len(ed25519SPKIPrefix)+ed25519.PublicKeySize && bytes.HasPrefix(b, ed25519SPKIPrefix) {
-			return b[len(ed25519SPKIPrefix):], nil // the SPKI form - strip the DER prefix
+			return b[len(ed25519SPKIPrefix):], nil // the SPKI form: strip the DER prefix
 		}
 	}
 	if b, err := hex.DecodeString(strings.TrimPrefix(s, "0x")); err == nil && len(b) == ed25519.PublicKeySize {
@@ -98,7 +98,7 @@ func ParseWitnessKeyPin(s string) ([]byte, error) {
 }
 
 // PinnedWitnessPolicy builds a WitnessPolicy from OUT-OF-BAND pinned witness keys:
-// each pin is independent BY THE VERIFIER'S OWN DECISION - the server-published policy is
+// each pin is independent BY THE VERIFIER'S OWN DECISION; the server-published policy is
 // not consulted at all, so the "publicly verifiable" verdict no longer trusts the origin
 // for the key set. maxAgeSeconds <= 0 falls back to the 24h default.
 func PinnedWitnessPolicy(pins [][]byte, maxAgeSeconds int64) *WitnessPolicy {
@@ -126,7 +126,7 @@ type LedgerKey struct {
 // LedgerInclusion is one leaf's opaque inclusion data from /ip/<addr>/transparency.
 type LedgerInclusion struct {
 	Index     uint64
-	LeafHash  []byte   // SHA-256(0x00 || commitment) - the opaque value a verifier recomputes
+	LeafHash  []byte   // SHA-256(0x00 || commitment), the opaque value a verifier recomputes
 	ProofPath [][]byte // the bottom-up RFC 6962 sibling hashes
 }
 
@@ -163,7 +163,7 @@ func (c *Client) FetchLedgerKey(ctx context.Context) (*LedgerKey, error) {
 }
 
 // FetchWitnessKeys downloads the published witness policy from <gateway>/witness/keys
-// A 404 means witnessing is simply not enabled on the node - callers treat that as
+// A 404 means witnessing is simply not enabled on the node, so callers treat that as
 // "no witness policy" (the honest tamper-evident posture), never an error to surface.
 func (c *Client) FetchWitnessKeys(ctx context.Context) (*WitnessPolicy, error) {
 	base := strings.TrimRight(c.rdapURL, "/")
@@ -261,13 +261,45 @@ func (c *Client) ledgerGet(ctx context.Context, u string) ([]byte, int, error) {
 
 // ---- pure RFC 6962 / C2SP verification (stock crypto: ed25519 + sha256) ----------------
 
-const sigPrefix = "- " // the C2SP signed-note "- " (em dash + space) rune
+// The C2SP signed-note signature-line prefix: U+2014 EM DASH + space. It is a PROTOCOL WIRE BYTE,
+// not prose, so it is written as a \u2014 escape (never a literal glyph) and an em-dash sweep can
+// never rewrite it. sigPrefixASCII is the hyphen-scrubbed variant we still ACCEPT (Postel: be liberal
+// in what we accept): a prior server build once served notes with a "- " separator, and a
+// conformant reader must not choke on them. We always EMIT the conformant U+2014 form; we PARSE both.
+const (
+	sigPrefix      = "\u2014 " // conformant C2SP prefix (U+2014 EM DASH + space), the form a signer emits
+	sigPrefixASCII = "- "      // hyphen-scrubbed variant, accepted for robustness
+)
+
+// noteSeparatorIndex finds the "\n\n<prefix>" that splits the signed body from the signature block,
+// accepting EITHER the conformant U+2014 prefix or a hyphen-scrubbed one. It returns the index
+// of the "\n\n", or -1 if the note carries no signature block. The signed body is the same bytes
+// regardless of which prefix follows, so verification is unaffected by which variant we matched.
+func noteSeparatorIndex(note string) int {
+	for _, p := range []string{sigPrefix, sigPrefixASCII} {
+		if i := strings.Index(note, "\n\n"+p); i >= 0 {
+			return i
+		}
+	}
+	return -1
+}
+
+// stripSigPrefix removes a signature-line prefix (conformant U+2014 or hyphen-scrubbed) and
+// reports whether a known prefix was present.
+func stripSigPrefix(line string) (string, bool) {
+	for _, p := range []string{sigPrefix, sigPrefixASCII} {
+		if strings.HasPrefix(line, p) {
+			return line[len(p):], true
+		}
+	}
+	return "", false
+}
 
 // ParseCheckpointNote parses a C2SP signed-note checkpoint (the 3-line body, optionally
-// followed by a blank line + a "- <origin> <base64(keyId||sig)>" signature line). It does
+// followed by a blank line + a "\u2014 <origin> <base64(keyId||sig)>" signature line). It does
 // NOT verify the signature (use VerifySignature with the published key for that).
 func ParseCheckpointNote(note string) (*LedgerCheckpoint, error) {
-	sep := strings.Index(note, "\n\n"+sigPrefix)
+	sep := noteSeparatorIndex(note)
 	body := note
 	if sep >= 0 {
 		body = note[:sep+1] // include the body's trailing '\n'
@@ -287,13 +319,13 @@ func ParseCheckpointNote(note string) (*LedgerCheckpoint, error) {
 	cp := &LedgerCheckpoint{Note: note, Origin: lines[0], TreeSize: size, Root: root, body: []byte(body)}
 	// Parse the signature lines if present: the log's own 68-byte (keyId[4]||sig[64]) line plus,
 	// any 76-byte (keyId[4]||time[8]||sig[64]) C2SP cosignature/v1 witness lines. The blob
-	// width discriminates the two - a malformed line is simply skipped (Postel).
+	// width discriminates the two, and a malformed line is simply skipped (Postel).
 	if sep >= 0 {
 		for _, sigLine := range strings.Split(note[sep+2:], "\n") { // skip the "\n\n"
-			if !strings.HasPrefix(sigLine, sigPrefix) {
+			after, ok := stripSigPrefix(sigLine) // accepts BOTH the U+2014 and the hyphen-scrubbed prefix
+			if !ok {
 				continue
 			}
-			after := sigLine[len(sigPrefix):]
 			sp := strings.IndexByte(after, ' ')
 			if sp < 0 {
 				continue
@@ -344,7 +376,7 @@ func (cp *LedgerCheckpoint) CosignatureMessage(ts uint64) []byte {
 
 // maxForwardSkewSeconds bounds the FORWARD clock skew tolerated on a cosignature timestamp:
 // up to 5 minutes in the future still counts as fresh (a slightly-slow local clock must never
-// over-revoke), anything further ahead does not - an unbounded future timestamp would keep
+// over-revoke), anything further ahead does not; an unbounded future timestamp would keep
 // the publicly-verifiable verdict alive indefinitely on a frozen tree, defeating the
 // self-revocation guarantee. Mirrors the server's forward-skew bound exactly, so the served
 // claim and the CLI verdict stay in lockstep.
@@ -353,7 +385,7 @@ const maxForwardSkewSeconds = 300
 // VerifyIndependentCosignatures counts the DISTINCT independent witnesses from the published
 // policy whose cosignature on THIS checkpoint cryptographically verifies AND is fresh
 // (-maxForwardSkew <= now-ts <= maxAge). This is the cryptographic publicly-verifiable check
-// the CLI recomputes everything with stock crypto - the endpoint's own
+// the CLI recomputes everything with stock crypto; the endpoint's own
 // publicly_verifiable bool is never trusted, only cross-checked. Availability-only
 // (independent=false) witnesses never count; a stale, far-future-dated, tampered, or
 // wrong-key cosignature never counts.
@@ -385,7 +417,7 @@ func (cp *LedgerCheckpoint) VerifyIndependentCosignatures(policy *WitnessPolicy,
 			age := now - int64(c.Timestamp)
 			if age <= maxAge && age >= -maxForwardSkewSeconds {
 				count++
-				break // distinct witnesses only - one cosignature per witness counts
+				break // distinct witnesses only; one cosignature per witness counts
 			}
 		}
 	}
@@ -396,7 +428,7 @@ func (cp *LedgerCheckpoint) VerifyIndependentCosignatures(policy *WitnessPolicy,
 // published key (raw 32-byte Ed25519 public key, base64). Returns nil on success.
 func (cp *LedgerCheckpoint) VerifySignature(key *LedgerKey) error {
 	if cp.Sig == nil {
-		return fmt.Errorf("the checkpoint is unsigned (unsigned-but-chained) - no signature to verify")
+		return fmt.Errorf("the checkpoint is unsigned (unsigned-but-chained), no signature to verify")
 	}
 	if key == nil {
 		return fmt.Errorf("no published key to verify the checkpoint signature")
@@ -419,7 +451,7 @@ func (cp *LedgerCheckpoint) VerifySignature(key *LedgerKey) error {
 
 // LeafHashFromDisclosure recomputes the RFC 6962 leaf hash from a DISCLOSED (salt, event):
 // commitment = SHA-256(salt || canonicalEvent); leafHash = SHA-256(0x00 || commitment).
-// This is the selective-disclosure recompute - only a holder of the salt can do it.
+// This is the selective-disclosure recompute: only a holder of the salt can do it.
 func LeafHashFromDisclosure(salt, canonicalEvent []byte) []byte {
 	c := sha256.New()
 	c.Write(salt)
@@ -433,7 +465,7 @@ func LeafHashFromDisclosure(salt, canonicalEvent []byte) []byte {
 
 // VerifyInclusion folds leafHash with the RFC 6962 audit path and returns nil iff it
 // reconstructs the checkpoint root for (index, treeSize). The exact reference index-walk a
-// stock CT verifier uses - interoperable with the server's RFC 6962 inclusion proofs.
+// stock CT verifier uses, interoperable with the server's RFC 6962 inclusion proofs.
 func VerifyInclusion(leafHash []byte, index, treeSize uint64, path [][]byte, root []byte) error {
 	if len(leafHash) != sha256.Size || len(root) != sha256.Size {
 		return fmt.Errorf("leaf hash / root must be 32 bytes")

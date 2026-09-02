@@ -25,30 +25,30 @@ import (
 // The type->hue mapping is FIXED across themes on purpose: it is a language you learn
 // (cyan == an IPv4, lavender == a hostname), so it must not shift when you cycle themes with
 // Ctrl-T. Each hue is a light pastel chosen to read on every dark background we ship
-// (whisper #0b0e14, nord #2e3440, gruvbox) AND to steer clear of the semantic band
-// hues (green / amber / red) and the periwinkle accent, so a node's TYPE colour never
-// collides with its THREAT colour or the UI chrome.
+// (whisper #0b0e14, nord #2e3440, and gruvbox's own dark ground) AND to steer clear of
+// the semantic band hues (green / amber / red) and the periwinkle accent, so a node's
+// TYPE colour never collides with its THREAT colour or the UI chrome.
 //
-//	cool blues / cyans  = infrastructure  (you can SEE the plumbing: IP / prefix / ASN / PTR)
-//	violet -> pink      = named entities  (hostname / email / organisation)
-//	teal                = crypto material (TLS fingerprint)
-//	coral               = threat-intel source (feed / indicator)
+//	cool blues / cyans = infrastructure (you can SEE the plumbing: IP / prefix / ASN / PTR)
+//	violet -> pink = named entities (hostname / email / organisation)
+//	teal = crypto material (TLS fingerprint)
+//	coral = threat-intel source (feed / indicator)
 const (
-	hexHostname = "#c3b0ff" // lavender    - the brand-anchored "name" hue (the commonest node)
-	hexIPv4     = "#5cc8d8" // cyan        - infra
-	hexIPv6     = "#6ea8fc" // azure       - infra (v4's sibling, bluer)
-	hexPrefix   = "#8091c9" // steel       - infra aggregate
+	hexHostname = "#c3b0ff" // lavender - the brand-anchored "name" hue (the commonest node)
+	hexIPv4     = "#5cc8d8" // cyan - infra
+	hexIPv6     = "#6ea8fc" // azure - infra (v4's sibling, bluer)
+	hexPrefix   = "#8091c9" // steel - infra aggregate
 	hexASN      = "#9a86e8" // blue-violet - the operator hub
-	hexPTR      = "#7fb2c9" // slate-cyan  - reverse DNS
-	hexEmail    = "#c9a0e0" // mauve       - a contact
-	hexOrg      = "#e0a2d0" // orchid      - a legal entity
-	hexTLSFP    = "#5ad6b8" // teal        - a crypto fingerprint
-	hexTLD      = "#cbab6b" // bronze      - a top-level zone
-	hexThreat   = "#ff9d7a" // coral       - a threat-intel feed / indicator
+	hexPTR      = "#7fb2c9" // slate-cyan - reverse DNS
+	hexEmail    = "#c9a0e0" // mauve - a contact
+	hexOrg      = "#e0a2d0" // orchid - a legal entity
+	hexTLSFP    = "#5ad6b8" // teal - a crypto fingerprint
+	hexTLD      = "#cbab6b" // bronze - a top-level zone
+	hexThreat   = "#ff9d7a" // coral - a threat-intel feed / indicator
 
 	// magnitude-bar gradient (dim -> steel -> bright cyan): the filled cells brighten with
 	// the log-degree so the mega fan-out lane visibly dominates the small ones.
-	hexBarMid = "#6f8fc9" // steel  (mid degree)
+	hexBarMid = "#6f8fc9" // steel (mid degree)
 	hexBarHi  = "#9fe0f5" // bright cyan (top degree: the 1.24M lane)
 )
 

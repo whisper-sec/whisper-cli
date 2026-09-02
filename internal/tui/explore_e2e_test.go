@@ -15,7 +15,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/tui/theme"
 )
 
-// TestExploreLiveE2E is the LIVE end-to-end proof of the Phase 2 traversal: it drives
+// TestExploreLiveE2E is the LIVE end-to-end proof of the traversal: it drives
 // the real Elm loop (land -> async cmds -> message folds -> render) against the keyed
 // whisper.security graph. It runs ONLY when WHISPER_EXPLORE_E2E=1 and a key is present
 // in the environment (WHISPER_API_KEY), so the normal suite stays hermetic. Set

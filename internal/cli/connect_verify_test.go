@@ -11,7 +11,7 @@ import "testing"
 func TestClassifyEgress(t *testing.T) {
 	const v6 = "2a04:2a01:0:1::1"
 	const v6other = "2a04:2a01:dead:beef:0:0:0:1"
-	const edgeSnat = "203.0.113.7" // Whisper's shared v4 SNAT for v4 destinations
+	const edgeSnat = "203.0.113.7" // the shared v4 SNAT a v4 destination sees
 	const hostDirect = "198.51.100.10"
 
 	cases := []struct {

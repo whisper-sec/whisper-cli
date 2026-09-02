@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/idkey"
 )
 
 // recordingServer stubs the control plane for the connect/create command tests: it records
@@ -128,6 +129,7 @@ func TestConnect_NameMapsToLabelNotFriendlyName(t *testing.T) {
 	srv := recordingServer(t, nil, &seen) // fresh account ⇒ connect must create a NAMED agent
 	defer srv.Close()
 	defer stubEgressTail(t)()
+	defer idkey.SetIdentityDirForTest(t.TempDir())() // the AUTO Tier-1 attempt mints a real identity key
 
 	savedG := g
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
@@ -159,6 +161,7 @@ func TestConnect_ExistingAgent_NoCreate(t *testing.T) {
 	srv := recordingServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:1::1"}}, &seen)
 	defer srv.Close()
 	defer stubEgressTail(t)()
+	defer idkey.SetIdentityDirForTest(t.TempDir())() // the AUTO Tier-1 attempt mints a real identity key
 
 	savedG := g
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}

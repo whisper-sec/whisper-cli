@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// `whisper domain submit --webpki` (b) must fire op:domain with the submit sub-op and set
+// `whisper domain submit --webpki` must fire op:domain with the submit sub-op and set
 // acme:true (the WebPKI opt-in). Without --webpki it must NOT set acme (DANE-EE-only stays the
 // default). Asserts the control-call SHAPE without a live control plane.
 

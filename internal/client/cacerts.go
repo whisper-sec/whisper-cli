@@ -19,8 +19,8 @@ var embeddedCABundle []byte
 
 // RootCAs returns the trust pool the CLI uses for every HTTPS call. It UNIONS the
 // system pool (when present) with the embedded Mozilla bundle, so:
-//   - a host with a trust store gets it plus our pinned bundle (max reliability), and
-//   - a host with NO trust store still verifies via the embedded bundle (zero config).
+// - a host with a trust store gets it plus our pinned bundle (max reliability), and
+// - a host with NO trust store still verifies via the embedded bundle (zero config).
 //
 // Conservative-emit: we never disable verification; liberal-accept: either trust
 // source suffices. A nil return is impossible - the embedded bundle is always present.

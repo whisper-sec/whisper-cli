@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/whisper-sec/whisper-cli/internal/secfile"
 )
 
 // DefaultKeyFile is the on-disk key location, mirroring the shell CLI + installer:
@@ -46,9 +48,13 @@ func ReadAgentFile(path string) string {
 	return strings.TrimSpace(string(b))
 }
 
-// SaveAgent writes the chosen agent id to the agent file with mode 0600 (directory 0700),
+// SaveAgent writes the chosen agent id to an owner-only file in an owner-only directory,
 // creating parents as needed - mirrors SaveKey. An empty id removes the pin (so a later
 // reuse-most-recent default applies) rather than persisting a blank.
+//
+// The agent id is not a secret the way the key is, but it names the /128 this host answers
+// as, and a file that tells every account on the box which identity to impersonate is a
+// reconnaissance gift. It rides the same writer for the same reason.
 func SaveAgent(path, agent string) error {
 	if path == "" {
 		path = DefaultAgentFile()
@@ -62,10 +68,10 @@ func SaveAgent(path, agent string) error {
 		return nil
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := secfile.MkdirAll(dir); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(agent), 0o600)
+	return secfile.WriteFile(path, []byte(agent))
 }
 
 // KeySource describes where a resolved credential came from - surfaced in `config`/
@@ -96,7 +102,7 @@ func (c Credential) IsZero() bool { return c.Value == "" }
 // KeyLadderOptions carries the explicit, highest-precedence inputs (the flags) plus a
 // switch to disable the interactive prompt (for non-TTY / scriptable runs).
 type KeyLadderOptions struct {
-	FlagKey    string // --key  (an owner key, sent as X-API-Key)
+	FlagKey    string // --key (an owner key, sent as X-API-Key)
 	FlagBearer string // --bearer (an et_ monitor token, sent as Authorization: Bearer)
 	KeyFile    string // override the on-disk key path; empty => DefaultKeyFile()
 	AllowEnv   bool   // consult WHISPER_API_KEY / WHISPER_KEY (default true)
@@ -109,12 +115,12 @@ type KeyLadderOptions struct {
 // ResolveCredential walks the key ladder in strict precedence order and returns the
 // first credential it finds:
 //
-//  1. --bearer flag        (et_ monitor token -> Authorization: Bearer)
-//  2. --key flag           (owner key        -> X-API-Key)
-//  3. WHISPER_API_KEY env
-//  4. WHISPER_KEY env      (the alias the shell CLI also honoured)
-//  5. ~/.config/whisper/key  (mode-600 file)
-//  6. interactive prompt   (only when opts.Prompt != nil AND it yields a value)
+// 1. --bearer flag (et_ monitor token -> Authorization: Bearer)
+// 2. --key flag (owner key -> X-API-Key)
+// 3. WHISPER_API_KEY env
+// 4. WHISPER_KEY env (the alias the shell CLI also honoured)
+// 5. ~/.config/whisper/key (mode-600 file)
+// 6. interactive prompt (only when opts.Prompt != nil AND it yields a value)
 //
 // Conservative+liberal: try every place a key could legitimately live; prompt only
 // when one is offered, never an opaque hang. Returns a SourceNone credential (not an
@@ -162,15 +168,21 @@ func ResolveCredential(opts KeyLadderOptions) (Credential, error) {
 	return Credential{Source: SourceNone}, nil
 }
 
-// SaveKey writes key to the key file with mode 0600 (the directory mode 0700),
-// creating parents as needed - used by `whisper login`.
+// SaveKey writes key to the key file as an owner-only file in an owner-only
+// directory, creating parents as needed - used by `whisper login`.
+//
+// This is the one file on the machine that holds a live API key, so the write
+// goes through secfile rather than through os.WriteFile at 0o600: the
+// mode argument is the whole control on unix and controls nothing at all on
+// Windows, where the file would otherwise inherit the containing directory's
+// DACL and, under %ProgramData%, be readable by every interactive account.
 func SaveKey(path, key string) error {
 	if path == "" {
 		path = DefaultKeyFile()
 	}
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := secfile.MkdirAll(dir); err != nil {
 		return err
 	}
-	return os.WriteFile(path, []byte(strings.TrimSpace(key)), 0o600)
+	return secfile.WriteFile(path, []byte(strings.TrimSpace(key)))
 }

@@ -140,11 +140,11 @@ func TestDNSKeys_MalformedRecordsAreSkippedValidOnesKept(t *testing.T) {
 	idB64, wantKid := p256SpkiB64(t)
 	edB64, _ := ed25519SpkiB64(t)
 	publishAnchorTXT(t, h, "_whisper-identity."+zone, []string{
-		"v=whisper1; k=p256; p=!!!not-base64!!!",   // undecodable p
-		"v=whisper2; k=p256; p=" + idB64,           // wrong version
-		"v=whisper1; k=p256",                       // missing p
-		"v=whisper1; k=p256; p=" + edB64,           // WRONG algorithm under k=p256
-		"v=whisper1;  K=P256 ;  p=" + idB64 + "  ", // liberal spacing/case -- the ONE valid record
+		"v=whisper1; k=p256; p=!!!not-base64!!!", // undecodable p
+		"v=whisper2; k=p256; p=" + idB64,         // wrong version
+		"v=whisper1; k=p256",                     // missing p
+		"v=whisper1; k=p256; p=" + edB64,         // WRONG algorithm under k=p256
+		"v=whisper1; K=P256 ; p=" + idB64 + " ",  // liberal spacing/case -- the ONE valid record
 	})
 	keys, note := fetchDNSAnchoredKeys(context.Background(), h.validator(), zone)
 	if keys == nil {

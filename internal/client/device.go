@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -16,8 +17,8 @@ import (
 // device.go implements the CLIENT half of the OAuth 2.0 Device Authorization Grant
 // (RFC 8628) against the Whisper console:
 //
-//	POST <console>/api/device/authorize  (no auth) -> DeviceAuth
-//	POST <console>/api/device/token      (no auth) -> DeviceToken (polled)
+//	POST <console>/api/device/authorize (no auth) -> DeviceAuth
+//	POST <console>/api/device/token (no auth) -> DeviceToken (polled)
 //
 // It carries NO API key - that is the whole point: the device flow is how a user with
 // only a browser obtains a key. Neither the device_code nor the issued api_key is ever
@@ -28,9 +29,8 @@ import (
 // overall flow lifetime is governed by the server-supplied expires_in deadline, not this.
 const DeviceClientTimeout = 20 * time.Second
 
-// DeviceAuth is the response of POST /api/device/authorize. The fields mirror RFC 8628
-//
-//	plus the console's verification_uri_complete convenience field.
+// DeviceAuth is the response of POST /api/device/authorize. The fields mirror
+// RFC 8628 §3.2 plus the console's verification_uri_complete convenience field.
 type DeviceAuth struct {
 	// DeviceCode is the secret the client polls with. NEVER log it.
 	DeviceCode string `json:"device_code"`
@@ -101,6 +101,7 @@ func DeviceHTTPClient() *http.Client {
 			ForceAttemptHTTP2:     true,
 			TLSHandshakeTimeout:   10 * time.Second,
 			ExpectContinueTimeout: 1 * time.Second,
+			DialContext:           guardedDial(&net.Dialer{Timeout: 10 * time.Second}),
 		},
 	}
 }

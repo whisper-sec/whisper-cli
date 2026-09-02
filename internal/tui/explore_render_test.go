@@ -153,7 +153,7 @@ func TestExploreOrnamentToggle(t *testing.T) {
 	}
 }
 
-// TestExploreNavIsSynchronous exercises the Phase-1 key handling: cursor moves, pane
+// TestExploreNavIsSynchronous exercises the key handling: cursor moves, pane
 // switch, edge-type step, and a linked walk-in / back, all synchronous with no network.
 func TestExploreNavIsSynchronous(t *testing.T) {
 	a := newExploreApp(t, 100, 34, false, fixtureCloudflare())
@@ -358,7 +358,7 @@ var ansiRe = regexp.MustCompile("\x1b\\[[0-9;]*m")
 
 // TestExploreDumpScreenshots writes the cloudflare + mega-fanout frames at 100 cols to the
 // scratchpad (plain text, ANSI stripped) so the real prototype output can be shown to
-// Kaveh. It is a dump helper, not an assertion; it only runs when WHISPER_EXPLORE_DUMP is
+// an operator. It is a dump helper, not an assertion; it only runs when WHISPER_EXPLORE_DUMP is
 // set to a target directory.
 func TestExploreDumpScreenshots(t *testing.T) {
 	dir := os.Getenv("WHISPER_EXPLORE_DUMP")

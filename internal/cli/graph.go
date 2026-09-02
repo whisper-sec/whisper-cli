@@ -49,7 +49,9 @@ func newGraphCmd() *cobra.Command {
 	for _, e := range catalog.All() {
 		cmd.AddCommand(newGraphRecipeCmd(e))
 	}
-	return cmd
+	// An unrecognised verb here used to print help and exit 0, so a typo in a script
+	// reported success. asParent makes it a named, non-zero usage error.
+	return asParent(cmd)
 }
 
 // newGraphListCmd prints the whole catalog: id, mode, title, docs URL.

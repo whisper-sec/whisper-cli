@@ -34,15 +34,15 @@ func isProjectNotFound(err error) bool {
 //
 // Env injected (lower + UPPER, since tools differ on case):
 //
-//	ALL_PROXY / all_proxy            = socks5h://127.0.0.1:<port>
-//	HTTPS_PROXY / https_proxy        = socks5h://127.0.0.1:<port>
-//	HTTP_PROXY / http_proxy          = socks5h://127.0.0.1:<port>
-//	NODE_USE_ENV_PROXY               = 1   (Node ≥20 honours *_PROXY only with this)
+//	ALL_PROXY / all_proxy = socks5h://127.0.0.1:<port>
+//	HTTPS_PROXY / https_proxy = socks5h://127.0.0.1:<port>
+//	HTTP_PROXY / http_proxy = socks5h://127.0.0.1:<port>
+//	NODE_USE_ENV_PROXY = 1 (Node ≥20 honours *_PROXY only with this)
 //
 // Coverage note: env-injection catches curl, git, Node/undici, and every well-behaved
 // tool that honours *_PROXY. A tool that IGNORES *_PROXY (a raw socket dialer) is not
-// caught by env alone - a transparent TUN for those is (deliberately NOT built
-// here; we keep lean and rootless).
+// caught by env alone - a transparent TUN for those is a later step (deliberately NOT built
+// here; we keep this path lean and rootless).
 
 func newRunCmd() *cobra.Command {
 	var agent, agentFile, tier string
@@ -104,7 +104,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 	if err != nil {
 		return err
 	}
-	sel := resolveAgentSelector(agent, agentFile)
+	sel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
 	selTier := strings.TrimSpace(tier)
 	// Project-aware (keystone of `whisper init python`): when the user gave NO explicit
 	// --agent / --agent-file, and we're inside a `whisper init`'d project, prefer THAT project's
@@ -118,6 +118,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 		case derr == nil:
 			if strings.TrimSpace(cfg.Agent) != "" {
 				sel = cfg.Agent
+				selFromFile = false // explicit project state, not the persisted file
 				if selTier == "" {
 					selTier = cfg.Tier
 				}
@@ -133,7 +134,17 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 			}
 		}
 	}
-	// detect-and-reuse: when a long-lived `whisper connect` daemon on this host already
+	// D7: the shared resolver - `--agent <name>` (and a name-spelled project agent)
+	// resolves to the /128 op:connect understands, exactly like connect. D9: a stale
+	// persisted-FILE selector falls back to the server default with one calm note
+	// instead of poisoning every zero-config run.
+	cxa, cancela := ctx()
+	sel, rerr := resolveAgentArg(c, cxa, sel, selFromFile, agentFile)
+	cancela()
+	if rerr != nil {
+		return rerr
+	}
+	// Detect-and-reuse: when a long-lived `whisper connect` daemon on this host already
 	// serves the target /128, route the child through ITS live proxy instead of opening a
 	// competing op:connect - the server binds ONE peer per /128, so a second session would
 	// replace (and on our exit, remove) the daemon's peer and kill its tunnel for good.
@@ -163,7 +174,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 		if werr != nil {
 			return werr
 		}
-		// alongside it, the agent-held identity keypair (routed tier only).
+		// Alongside it, the agent-held identity keypair (routed tier only).
 		idKey, ierr := prepareIdentityKey(selTier, args, sel)
 		if ierr != nil {
 			return ierr

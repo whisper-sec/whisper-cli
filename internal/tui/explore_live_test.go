@@ -10,7 +10,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
-// These are the Phase 2 unit tests: the embedded catalog, the live row -> deck
+// These are the live-pass unit tests: the embedded catalog, the live row -> deck
 // mappers, the band normaliser, and the focusToken fold discipline. All hermetic
 // (no network); the live path itself is exercised by the env-guarded e2e test.
 
@@ -149,8 +149,8 @@ func TestCuratePropsKeepsFactsDropsNoise(t *testing.T) {
 	if _, ok := out["id"]; ok {
 		t.Error("internal ids must be dropped")
 	}
-	if out["threatScore"] != "6" {
-		t.Errorf("a positive score must survive, trimmed: %v", out["threatScore"])
+	if out["threatScore"] != "6 (evidence)" {
+		t.Errorf("a positive raw score must survive as EVIDENCE, trimmed: %v", out["threatScore"])
 	}
 	if out["registrationDate"] != "2010-07-14" {
 		t.Errorf("epoch-ms dates must render readable, got %v", out["registrationDate"])
@@ -260,8 +260,11 @@ func TestReproCypherIsInjectionSafe(t *testing.T) {
 		byName[cv.Name] = cv
 	}
 	out := reproCypher(byName["assess"], "evil']) RETURN 1 //")
-	if strings.Contains(out, "']) RETURN 1 //") && !strings.Contains(out, "''") {
+	if strings.Contains(out, `evil']`) {
 		t.Fatalf("hostile value escaped the literal: %q", out)
+	}
+	if !strings.Contains(out, `evil\']`) {
+		t.Fatalf("hostile value is not escaped in place: %q", out)
 	}
 }
 

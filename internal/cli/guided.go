@@ -15,15 +15,15 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
-// guided.go is the linear "front door" that bare `whisper` runs . It is the only
+// guided.go is the linear "front door" that bare `whisper` runs. It is the only
 // path a non-technical user ever sees: resolve a key, look at their agents, then connect.
 //
 //	resolve key
-//	  └─ none + TTY    → login (device flow or paste key); save 600
+//	  └─ none + TTY → login (device flow or paste key); save 600
 //	  └─ none + no-TTY → friendly "set WHISPER_API_KEY or run: whisper login" → the ONLY hard exit
 //	op:list
 //	  ├─ 0 agents → create + MANDATORY name → connect → verify
-//	  ├─ 1 agent  → quick-confirm "Use <name>? [Y/n]" (Enter = yes) → connect → verify
+//	  ├─ 1 agent → quick-confirm "Use <name>? [Y/n]" (Enter = yes) → connect → verify
 //	  └─ N agents → pick-or-create menu → connect → verify
 //
 // The flow ends in the real shared connect+verify: it brings the chosen agent's egress
@@ -119,7 +119,7 @@ func runGuided(opts guidedOptions, gio guidedIO) error {
 
 // guidedClient resolves the credential for the guided flow. A missing key on a TTY runs
 // the login flow (device-flow or paste) inline, then re-resolves; a missing key with no
-// TTY is the ONE hard exit  - a friendly usage error, never a hang or a help dump.
+// TTY is the ONE hard exit - a friendly usage error, never a hang or a help dump.
 func guidedClient(opts guidedOptions, gio guidedIO) (*client.Client, error) {
 	c, err := resolveClient(false, false)
 	if err != nil {
@@ -132,6 +132,12 @@ func guidedClient(opts guidedOptions, gio guidedIO) (*client.Client, error) {
 	if !opts.tty {
 		return nil, &client.ProblemError{Status: 401, Title: "no key",
 			Detail: "no API key yet - set WHISPER_API_KEY or run: whisper login"}
+	}
+	// A managed host can switch interactive sign-in off. Bare `whisper` is the
+	// front door, so it is exactly where a user would otherwise be walked into signing
+	// into a personal tenant on a machine whose key their administrator provisions.
+	if !interactiveLoginAllowed() {
+		return nil, sysPolicyLoginRefusal()
 	}
 	// TTY: run the real login flow (browser device-flow or paste), then re-resolve.
 	fmt.Fprintln(gio.err, "whisper: let's sign you in first.")
@@ -245,7 +251,7 @@ func guidedOne(opts guidedOptions, gio guidedIO, only agentChoice) error {
 // prompt that is byte-identical to script. Entry 0 = "create a new agent".
 func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []agentChoice) error {
 	// Headless with multiple agents and no --agent: we can't guess - ask the caller to
-	// pick one explicitly (decision table). A clear usage error, never a silent default.
+	// pick one explicitly (the decision table). A clear usage error, never a silent default.
 	if !opts.tty {
 		return usageErr("you have multiple agents - pass --agent <id|name> to choose one")
 	}
@@ -337,7 +343,19 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 	// of opening a competing op:connect that would clobber (and on exit, kill) the daemon's
 	// server-side peer. The reused session's Stop() is a no-op (local==nil), so neither the
 	// quiet/headless teardown below nor a TTY hold can touch the daemon's tunnel.
-	sel := firstNonBlank(choice.addr, choice.name)
+	// D7: a choice may carry only a NAME (an explicit --agent on the guided front
+	// door, or an op:list row with no address column) - resolve it through the
+	// SHARED resolver so op:connect gets the /128/id it understands. The common
+	// picker path (addr set) passes through with zero extra round-trips. The
+	// choice is always explicit here (picked or flagged), never the persisted
+	// file, so the stale-file fallback does not apply.
+	rawSel := firstNonBlank(choice.addr, choice.name)
+	cxa, cancela := ctx()
+	sel, rerr := resolveAgentArg(c, cxa, rawSel, false, opts.agentFile)
+	cancela()
+	if rerr != nil {
+		return rerr
+	}
 	cxr, cancelr := ctx()
 	reused, reuse := findLiveSession(cxr, c, sel)
 	cancelr()

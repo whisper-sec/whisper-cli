@@ -31,9 +31,9 @@ import (
 // THE bug it guards: StartLocalProxy used to bind its teardown to the caller's SHORT
 // control-plane ctx (`go func(){ <-ctx.Done(); p.Stop() }()`), and the callers cancel that
 // ctx the instant op:connect + verify return - so every persistent path got a DEAD proxy:
-//   - whisper run / claude: the proxy was torn down before the child ever ran.
-//   - the guided hold: holdUntilSignal parked forever on a dead tunnel.
-//   - whisper connect: the 30s control-ctx timeout killed the held-open egress.
+// - whisper run / claude: the proxy was torn down before the child ever ran.
+// - the guided hold: holdUntilSignal parked forever on a dead tunnel.
+// - whisper connect: the 30s control-ctx timeout killed the held-open egress.
 //
 // These tests back the session with a REAL egress.StartLocalProxy (against a fake CONNECT
 // egress), drive the actual caller code (runWithEgress, connectVia), CANCEL the control

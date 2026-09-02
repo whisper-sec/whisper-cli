@@ -50,38 +50,48 @@ func NewValidator(res Resolver, anchors []AnchorDS, now time.Time) *Validator {
 // any break: no signed answer, an expired/premature signature, a bad signature, an unsigned
 // (insecure) delegation, or a broken DS chain -- i.e. anything we cannot prove trustlessly.
 func (v *Validator) ValidateRRSet(ctx context.Context, name string, qtype uint16) ([]dns.RR, error) {
+	rrs, _, err := v.ValidateRRSetSigned(ctx, name, qtype)
+	return rrs, err
+}
+
+// ValidateRRSetSigned is ValidateRRSet plus the RRSIG that actually verified. Callers that
+// must reason about HOW the answer was signed -- the per-agent key, where an answer
+// synthesized from a WILDCARD (RRSIG labels < the owner's label count, RFC 4035 5.3.1) must be
+// refused so a future *.<zone> TXT can never answer for a specific agent -- need the signature
+// itself, not just the records it covered.
+func (v *Validator) ValidateRRSetSigned(ctx context.Context, name string, qtype uint16) ([]dns.RR, *dns.RRSIG, error) {
 	name = dns.CanonicalName(name)
 	msg, err := v.res.Query(ctx, name, qtype)
 	if err != nil {
-		return nil, fmt.Errorf("dnssec: fetching %s %s: %w", dns.TypeToString[qtype], name, err)
+		return nil, nil, fmt.Errorf("dnssec: fetching %s %s: %w", dns.TypeToString[qtype], name, err)
 	}
 	if msg == nil || msg.Rcode != dns.RcodeSuccess {
 		rc := dns.RcodeToString[dns.RcodeServerFailure]
 		if msg != nil {
 			rc = dns.RcodeToString[msg.Rcode]
 		}
-		return nil, fmt.Errorf("dnssec: %s %s returned %s (no signed answer to validate)",
+		return nil, nil, fmt.Errorf("dnssec: %s %s returned %s (no signed answer to validate)",
 			dns.TypeToString[qtype], name, rc)
 	}
 	rrset := rrsOfType(msg.Answer, name, qtype)
 	if len(rrset) == 0 {
-		return nil, fmt.Errorf("dnssec: no %s record for %s", dns.TypeToString[qtype], name)
+		return nil, nil, fmt.Errorf("dnssec: no %s record for %s", dns.TypeToString[qtype], name)
 	}
 	sigs := rrsigsCovering(msg.Answer, name, qtype)
 	if len(sigs) == 0 {
-		return nil, fmt.Errorf("dnssec: %s %s is UNSIGNED (no RRSIG) -- cannot prove trustlessly",
+		return nil, nil, fmt.Errorf("dnssec: %s %s is UNSIGNED (no RRSIG) -- cannot prove trustlessly",
 			dns.TypeToString[qtype], name)
 	}
 	for _, sig := range sigs {
 		zoneKeys, err := v.keyForZone(ctx, sig.SignerName)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if err := v.verifyWithKeys(sig, rrset, zoneKeys); err == nil {
-			return rrset, nil
+			return rrset, sig, nil
 		}
 	}
-	return nil, fmt.Errorf("dnssec: no RRSIG over %s %s verified under its signing zone's DNSKEY",
+	return nil, nil, fmt.Errorf("dnssec: no RRSIG over %s %s verified under its signing zone's DNSKEY",
 		dns.TypeToString[qtype], name)
 }
 
@@ -123,7 +133,7 @@ func (v *Validator) keyForZone(ctx context.Context, zone string) ([]*dns.DNSKEY,
 	}
 
 	// 3) Find a DNSKEY whose computed DS matches a validated DS, and confirm that key
-	//    self-signs the DNSKEY RRset (RFC 4035 §5.2) -- the strong link parent->child.
+	// self-signs the DNSKEY RRset (RFC 4035 §5.2) -- the strong link parent->child.
 	for _, ds := range validDS {
 		for _, k := range keys {
 			cand := k.ToDS(ds.DigestType)

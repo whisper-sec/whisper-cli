@@ -10,10 +10,12 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/idkey"
 )
 
 // TestResolveAgentSelector covers the op:connect agent-selection precedence:
@@ -62,6 +64,13 @@ func TestResolveAgentSelector(t *testing.T) {
 // captureStd redirects os.Stdout + os.Stderr around fn and returns what each captured.
 // renderConnect writes straight to the process streams (the human/machine split), so we
 // capture the real fds to assert the lean contract exactly.
+//
+// Both pipes are DRAINED CONCURRENTLY, which is not a nicety: a pipe holds only what the
+// OS gives it, and fn blocks forever once it writes more than that with nobody reading.
+// Linux hands out 64 KiB and hid this for the life of the helper; Windows hands out far
+// less, and the first native run of this package deadlocked on a 5337-byte JSON
+// payload in TestDeepenCLI_GraphListCmd_JSONAndTable, taking the whole suite to the
+// 15-minute panic. Read while fn writes, then close and wait.
 func captureStd(t *testing.T, fn func()) (stdout, stderr string) {
 	t.Helper()
 	origOut, origErr := os.Stdout, os.Stderr
@@ -70,12 +79,17 @@ func captureStd(t *testing.T, fn func()) (stdout, stderr string) {
 	os.Stdout, os.Stderr = wOut, wErr
 	defer func() { os.Stdout, os.Stderr = origOut, origErr }()
 
+	var bo, be strings.Builder
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); _, _ = io.Copy(&bo, rOut) }()
+	go func() { defer wg.Done(); _, _ = io.Copy(&be, rErr) }()
+
 	fn()
 	_ = wOut.Close()
 	_ = wErr.Close()
-	bo, _ := io.ReadAll(rOut)
-	be, _ := io.ReadAll(rErr)
-	return string(bo), string(be)
+	wg.Wait()
+	return bo.String(), be.String()
 }
 
 // connectResult is a tiny op:connect result with the load-bearing fields (incl. the
@@ -174,6 +188,9 @@ func TestConnect_BearerNeverInOutput(t *testing.T) {
 			srv := recordingServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:9::abcd"}}, &seen)
 			defer srv.Close()
 			defer stubEgressTail(t)()
+			// The AUTO default's Tier-1 attempt mints a real identity key - keep it in a
+			// temp dir, never the user's real one.
+			defer idkey.SetIdentityDirForTest(t.TempDir())()
 
 			savedG := g
 			g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", quiet: mode == "quiet", jsonOut: mode == "json", timeout: 5 * time.Second}
@@ -326,6 +343,7 @@ func TestConnect_FullCommand_NestedEnvelope(t *testing.T) {
 	}))
 	defer srv.Close()
 	defer stubEgressTail(t)()
+	defer idkey.SetIdentityDirForTest(t.TempDir())() // the AUTO Tier-1 attempt mints a real identity key
 
 	savedG := g
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}

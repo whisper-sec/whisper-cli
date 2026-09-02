@@ -16,16 +16,16 @@ func TestAgentDomain(t *testing.T) {
 	cases := []struct {
 		in, want string
 	}{
-		{"scout.agents.whisper.online.", "agents.whisper.online"},    // hosted, trailing dot
-		{"scout.agents.whisper.online", "agents.whisper.online"},     // hosted, no dot
-		{"bot.example.com.", "example.com"},                          // BYOD
-		{"a.b.c.d.example.co.uk", "b.c.d.example.co.uk"},             // deep label
-		{"  scout.agents.whisper.online  ", "agents.whisper.online"}, // surrounding space
-		{"example.com.", "com"},                                      // 2-label apex → its TLD parent
-		{"localhost", "localhost"},                                   // no dot → itself (it IS the zone)
-		{"", ""},                                                     // empty in → empty out
-		{".", ""},                                                    // bare root
-		{"trailing.", "trailing"},                                    // single label + dot
+		{"scout.agents.whisper.online.", "agents.whisper.online"},  // hosted, trailing dot
+		{"scout.agents.whisper.online", "agents.whisper.online"},   // hosted, no dot
+		{"bot.example.com.", "example.com"},                        // BYOD
+		{"a.b.c.d.example.co.uk", "b.c.d.example.co.uk"},           // deep label
+		{" scout.agents.whisper.online ", "agents.whisper.online"}, // surrounding space
+		{"example.com.", "com"},                                    // 2-label apex → its TLD parent
+		{"localhost", "localhost"},                                 // no dot → itself (it IS the zone)
+		{"", ""},                                                   // empty in → empty out
+		{".", ""},                                                  // bare root
+		{"trailing.", "trailing"},                                  // single label + dot
 	}
 	for _, c := range cases {
 		if got := agentDomain(c.in); got != c.want {

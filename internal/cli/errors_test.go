@@ -24,7 +24,7 @@ func TestFriendlyMapsKnownProblems(t *testing.T) {
 		{"401 rejected key", &client.ProblemError{Status: 401, Detail: "invalid api key"}, "whisper login"},
 		{"403 forbidden", &client.ProblemError{Status: 403, Title: "FORBIDDEN", Detail: "scope missing"}, "whisper login"},
 		{"404 not owned", &client.ProblemError{Status: 404, Detail: "agent xyz not found"}, "isn't in your account"},
-		// a local no-config 404 is NOT an agent lookup - it shows its own
+		// A local no-config 404 is NOT an agent lookup - it shows its own
 		// actionable detail, never the "not in your account" false trail.
 		{"404 local no config", &client.ProblemError{Status: 404, Detail: "no .whisper/config found here - run `whisper init claude` first"}, "whisper init claude"},
 		{"503 egress disabled by type", &client.ProblemError{Status: 503, Type: "EGRESS_DISABLED", Detail: "off"}, "egress isn't enabled"},

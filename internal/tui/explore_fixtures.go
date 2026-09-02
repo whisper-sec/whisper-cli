@@ -3,7 +3,7 @@
 
 package tui
 
-// Realistic FIXTURE decks for EXPLORE Phase 1: they feed the golden render tests AND the
+// Realistic FIXTURE decks for EXPLORE: they feed the golden render tests AND the
 // live tab (so the frame is beautiful and correct at every width before any network code
 // exists). Every value here is invented for the prototype; nothing is fetched.
 
@@ -75,7 +75,7 @@ func fixtureCloudflare() deckState {
 // --- the DEFAULT landing: whisper.security ----------------------------------------
 // The keyless EXPLORE demo opens here - our own front door, dog-fooding the graph on the
 // domain that serves it. RESOLVES_TO links onto the mega fan-out deck so the guided
-// Phase-1 walk (enter on the first neighbour) still tells the whole story.
+// A walk (enter on the first neighbour) still tells the whole story.
 
 func fixtureWhisperSecurity() deckState {
 	focus := graphNode{
@@ -254,9 +254,9 @@ func fixtureVariantsCard(target string) resultCard {
 	}
 }
 
-// fixtureVerbResult returns the Phase-1 RESULT for a catalog verb run on the focus. assess
+// fixtureVerbResult returns the RESULT for a catalog verb run on the focus. assess
 // and variants use the rich fixtures; flows + other verbs render an honest placeholder
-// (Phase 3 runs the 14 direct verbs live and deep-links the 15 flows).
+// (running the 14 direct verbs live and deep-linking the 15 flows comes later).
 func fixtureVerbResult(cv catalogVerb, focus graphNode) resultCard {
 	switch cv.Name {
 	case "assess":
@@ -280,7 +280,7 @@ func fixtureVerbResult(cv catalogVerb, focus graphNode) resultCard {
 	}
 }
 
-// fixtureWalk links the fixture decks so a Phase-1 walk is a real demo: walking
+// fixtureWalk links the fixture decks so a walk is a real demo: walking
 // RESOLVES_TO from cloudflare.com onto 104.16.132.229 lands on the mega fan-out deck.
 func fixtureWalk(value string) (deckState, bool) {
 	switch value {

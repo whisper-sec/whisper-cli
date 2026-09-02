@@ -5,7 +5,7 @@ welcome - bug reports, fixes, docs, and features.
 
 ## Getting started
 
-Requires **Go 1.24+**.
+Requires **Go 1.25+**.
 
 ```sh
 git clone https://github.com/whisper-sec/whisper-cli

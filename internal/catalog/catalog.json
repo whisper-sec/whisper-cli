@@ -871,7 +871,7 @@
           "v": "api.openai.com"
         }
       },
-      "access": "keyed",
+      "access": "keyless",
       "playgroundTryable": true,
       "minTier": "free",
       "resultShape": "table",
@@ -921,7 +921,7 @@
           "v": "8.8.8.8"
         }
       },
-      "access": "keyed",
+      "access": "keyless",
       "playgroundTryable": true,
       "minTier": "free",
       "resultShape": "table",
@@ -1058,7 +1058,7 @@
         },
         "altForm": "CALL explain($v) is the same engine, bare form (no whisper. prefix, no YIELD); it returns the fuller column set: indicator, type, available, cached, found, score, level, explanation, factors, sources, advisory."
       },
-      "access": "keyed",
+      "access": "keyless",
       "playgroundTryable": true,
       "minTier": "free",
       "resultShape": "table",

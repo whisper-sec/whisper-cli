@@ -48,11 +48,11 @@ type Config struct {
 	Port          int    `json:"port"`           // the deterministic local loopback proxy port
 	FQDN          string `json:"fqdn,omitempty"` // the agent's canonical name (display only)
 
-	// The endpoint sections, read by a build that has an endpoint half. Their types are
-	// defined in endpoint.go, the one file in this package that differs between such a
-	// build and this one: this build does not interpret these sections, it carries them
-	// verbatim so a config written by the full product round-trips unchanged. Nothing
-	// else in this file reads them.
+	// The endpoint sections, read by the supervised service daemon. Their types are
+	// defined in endpoint.go, which is the one file in this package that differs between
+	// a build with an endpoint half and a build without one: a build without one does not
+	// interpret these sections, it carries them verbatim so a config written by the full
+	// product round-trips unchanged. Nothing else in this file reads them.
 	Sensor   *SensorConfig   `json:"sensor,omitempty"`
 	Enforce  *EnforceConfig  `json:"enforce,omitempty"`
 	Response *ResponseConfig `json:"response,omitempty"`

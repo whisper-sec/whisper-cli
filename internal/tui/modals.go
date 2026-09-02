@@ -15,8 +15,8 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/model"
 )
 
-// validateAgentName is the huh validator backing the create modal's mandatory name
-// (hole b): it REJECTS an empty/blank/whitespace name with a friendly message so the
+// validateAgentName is the huh validator backing the create modal's mandatory name:
+// it REJECTS an empty/blank/whitespace name with a friendly message so the
 // modal's "(required)" is finally true. It mirrors the CLI's createAgent guard - one rule,
 // both surfaces. Returns nil for any non-blank name (the server polices reserved/premium).
 func validateAgentName(s string) error {
@@ -197,7 +197,7 @@ func (a *App) onWriteResult(m writeResultMsg) (tea.Model, tea.Cmd) {
 }
 
 // renderWriteCard formats a successful write's result. For op:register it loudly flags
-// the once-shown api_key (write-once).
+// the once-shown api_key, which is shown once and never again.
 func renderWriteCard(m writeResultMsg) string {
 	var b strings.Builder
 	switch m.op {

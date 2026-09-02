@@ -18,7 +18,7 @@ func (a *App) handleKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	// 2. If a view is in a text-input sub-mode (e.g. the LOGS filter / POLICY entry),
-	//    let it consume keys before the global single-letter shortcuts.
+	// let it consume keys before the global single-letter shortcuts.
 	if a.viewCapturesInput() {
 		return a.routeToView(k)
 	}

@@ -378,7 +378,7 @@ func (v *monitorView) panelLines(iw, ih int) []string {
 	var lines []string
 
 	// 1. Fleet aggregates - the totals row leads with the numbers that matter, TOTAL
-	//    CONNECTIONS among them, plus the live-session deltas underneath.
+	// CONNECTIONS among them, plus the live-session deltas underneath.
 	t := v.app.fleetTotals()
 	lines = append(lines, truncate(fmt.Sprintf("%s %s %s  %s %s  %s %s %s  %s ↑%s ↓%s",
 		th.Accent.Render("Σ"),

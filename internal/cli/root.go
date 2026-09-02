@@ -6,7 +6,7 @@
 // result} envelope, and render EITHER a human table (default) OR the verbatim envelope
 // (--json). A failing op (ok:false) exits non-zero so scripts can branch on it.
 //
-// The full-screen Bubble Tea TUI is a SEPARATE surface (added in a later build step);
+// The full-screen Bubble Tea TUI is a SEPARATE surface;
 // running `whisper` with no subcommand on a TTY will launch it. This package is the
 // automation layer: it never needs a TTY and never blocks on one.
 package cli
@@ -93,6 +93,17 @@ func NewRootCommand() *cobra.Command {
 		SilenceUsage:  true, // a runtime error is ours to render cleanly, not a usage dump
 		SilenceErrors: true, // we print errors ourselves (helpful detail, right exit code)
 		Args:          cobra.NoArgs,
+		// PersistentPreRunE runs for EVERY subcommand (nothing below defines one, and
+		// cobra runs only the nearest), so this is the single place the MDM-managed
+		// settings from `whisper whale syspolicy` reach the rest of the binary. It is
+		// deliberately fail-open: a policy store that cannot be read leaves the built-in
+		// defaults in place rather than taking the CLI down with it, and `whale syspolicy
+		// list` is where that failure is reported in full.
+		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+			p, _ := resolveSysPolicy(readSysPolicyStore())
+			applySysPolicy(p)
+			return nil
+		},
 		// Bare `whisper` is THE guided front door: resolve a key (login if none on
 		// a TTY), list the agents, branch 0/1/N, then connect+verify. The dashboard moved
 		// to `whisper dash` / `whisper monitor` - bare `whisper` never dumps cobra help as
@@ -135,6 +146,7 @@ func NewRootCommand() *cobra.Command {
 		newListCmd(),
 		newAgentCmd(),
 		newCreateCmd(),
+		newEnrollCmd(),
 		newDeviceCmd(),
 		newKillCmd(),
 		newConnectCmd(),
@@ -152,6 +164,7 @@ func NewRootCommand() *cobra.Command {
 		newQueryCmd(),
 		newGraphCmd(),
 		newPolicyCmd(),
+		newResolverCmd(),
 		newDomainCmd(),
 		newTokenCmd(),
 		newMonitorCmd(),
@@ -165,9 +178,24 @@ func NewRootCommand() *cobra.Command {
 		newLedgerCmd(),
 		newLoginCmd(),
 		newConfigCmd(),
+		newWhaleCmd(),
+		newAlertsCmd(),
+		newPanelCmd(),
 	)
+	// The endpoint half of the surface registers itself through this hook rather than
+	// being named here. A build that carries no endpoint half leaves the hook empty
+	// and simply has no endpoint commands: nothing is stubbed, and nothing has to be
+	// edited out of this file.
+	for _, newCmd := range endpointCommands {
+		root.AddCommand(newCmd())
+	}
 	return root
 }
+
+// endpointCommands is the endpoint half of the command surface. It is EMPTY unless a
+// build supplies one, and ranging over an empty slice is the whole of that behaviour:
+// the commands are absent, not stubbed. See the comment at the call site above.
+var endpointCommands []func() *cobra.Command
 
 // newDashCmd opens the full-screen dashboard explicitly. Bare `whisper` used to do this;
 // it now runs the guided flow, so the dashboard is opt-in via `whisper dash` (alias
@@ -227,9 +255,12 @@ func newExploreCmd() *cobra.Command {
 
 // Execute runs the root command and maps the result to a process exit code:
 //
-//	0  success
-//	1  a control-plane / runtime failure (ok:false, transport, bad args we surfaced)
-//	2  a usage error (unknown flag/subcommand - Cobra's own)
+//	0 success
+//	1 a control-plane / runtime failure (ok:false, transport, bad args we surfaced)
+//	2 a usage error (unknown flag/subcommand - Cobra's own)
+//	3+ a VERDICT a command was asked to gate on (see alertsExitGate): the command ran
+//	   perfectly and the answer is the exit code. Kept distinct from 1 so a script can
+//	   tell "the gate tripped" from "we could not tell", which are different decisions.
 func Execute() int {
 	migrateLegacyConfigDir()
 	root := NewRootCommand()
@@ -237,10 +268,14 @@ func Execute() int {
 	if err == nil {
 		return 0
 	}
-	// A usage error (unknown command/flag) is exit 2; everything else is 1.
+	// A usage error (unknown command/flag) is exit 2; a command that asked for a specific
+	// verdict code gets it; everything else is 1.
 	code := 1
 	if isUsageError(err) {
 		code = 2
+	}
+	if want, ok := exitCodeOf(err); ok {
+		code = want
 	}
 	fmt.Fprintf(os.Stderr, "whisper: %s\n", friendly(err))
 	return code
@@ -278,7 +313,7 @@ func resolveClient(needKey, promptOK bool) (*client.Client, error) {
 		AllowEnv:   true,
 		AllowFile:  true,
 	}
-	if promptOK && isInteractive() {
+	if keyLadderPromptAllowed(promptOK, isInteractive()) {
 		opts.Prompt = promptForKey
 	}
 	cred, err := client.ResolveCredential(opts)
@@ -288,7 +323,7 @@ func resolveClient(needKey, promptOK bool) (*client.Client, error) {
 	if needKey && cred.IsZero() {
 		return nil, &client.ProblemError{Status: 401, Title: "no key",
 			Detail: "no API key - run 'whisper login', set WHISPER_API_KEY, or pass --key " +
-				"(get one at https://console.whisper.security/settings)"}
+				"(get one at https://console.whisper.online/settings)"}
 	}
 	return client.New(client.Config{
 		ControlURL: g.controlURL,
@@ -299,6 +334,19 @@ func resolveClient(needKey, promptOK bool) (*client.Client, error) {
 		Cred:       cred,
 		Timeout:    g.timeout,
 	}), nil
+}
+
+// keyLadderPromptAllowed decides whether the last rung of the key ladder - asking the
+// person at the keyboard - may run. It is a predicate rather than an inline condition so
+// the policy half of it can be asserted directly: interactivity depends on the real
+// stdin, which a test cannot forge.
+//
+// The prompt is an interactive sign-in, so it is one of the three places
+// AllowInteractiveLogin is honoured (the others are `whisper login` and the guided front
+// door). On a managed host whose key the administrator provisions, prompting for one
+// would be asking the wrong question.
+func keyLadderPromptAllowed(promptOK, interactive bool) bool {
+	return promptOK && interactive && interactiveLoginAllowed()
 }
 
 // ctx returns a context bounded by the global timeout (for non-streaming calls).

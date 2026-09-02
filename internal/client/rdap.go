@@ -16,7 +16,7 @@ import (
 type RDAPKind string
 
 const (
-	RDAPIP     RDAPKind = "ip"     // /ip/<v6>     - the /128 object
+	RDAPIP     RDAPKind = "ip"     // /ip/<v6> - the /128 object
 	RDAPDomain RDAPKind = "domain" // /domain/<fqdn> - the forward-name object
 )
 

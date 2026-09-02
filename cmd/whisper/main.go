@@ -2,12 +2,12 @@
 // Copyright (c) 2026 viaGraph B.V. (Whisper Security)
 
 // Command whisper is the v2 Whisper CLI: a fully scriptable Cobra surface today, and
-// (added in a later build step) a btop/k9s-grade full-screen TUI when run on a
+// a btop/k9s-grade full-screen TUI when run on a
 // terminal with no subcommand. Both ride the ONE internal/client package.
 //
 // Distribution: cross-compiled static binaries (linux/darwin x amd64/arm64),
 // published to GitHub Releases and served by cli.whisper.online for
-// `curl cli.whisper.online | sh`.
+// `curl -fsSL https://cli.whisper.online | sh`.
 package main
 
 import (

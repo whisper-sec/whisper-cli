@@ -26,17 +26,21 @@ func newConnectCmd() *cobra.Command {
 	var port int
 	cmd := &cobra.Command{
 		Use:   "connect",
-		Short: "Connect egress bound to your /128 (Tier-1.5 SOCKS5 proxy, or Tier-1 WireGuard)",
+		Short: "Connect egress bound to your /128 (auto: Tier-1 WireGuard, falling back to Tier-1.5 SOCKS5)",
 		Long: "Bring up a local, no-config egress bound to an existing agent's /128 and hold it\n" +
 			"open. It prints ONE bearer/key-free local proxy string (socks5h://127.0.0.1:<port>)\n" +
 			"- point ALL_PROXY / http_proxy at it and every connection leaves from your /128.\n\n" +
 			"Tiers (--tier):\n" +
-			"  socks5  (default)  Tier-1.5: a userspace SOCKS5/HTTPS egress, source-bound to your\n" +
-			"                     /128 - no root, works everywhere.\n" +
+			"  auto    (default)  Negotiate the best tier: try Tier-1 (WireGuard) first, and on\n" +
+			"                     ANY failure fall back to Tier-1.5 (SOCKS5) automatically. The\n" +
+			"                     success line names the tier you landed on.\n" +
 			"  wireguard          Tier-1: a ROUTED Whisper /128 over a userspace WireGuard tunnel\n" +
 			"                     (wireguard-go netstack - still no root, no kernel wg, no TUN).\n" +
 			"                     Your key is generated locally and never leaves this host; the\n" +
-			"                     same local SOCKS5 endpoint fronts it, so tools need no change.\n\n" +
+			"                     same local SOCKS5 endpoint fronts it, so tools need no change.\n" +
+			"  socks5             Tier-1.5: a userspace SOCKS5/HTTPS egress, source-bound to your\n" +
+			"                     /128 - no root, works everywhere.\n" +
+			"An explicit --tier is forced exactly as asked - no auto-downgrade.\n\n" +
 			"Which identity it binds: --agent <id|/128> pins a specific one; else the\n" +
 			"agent persisted in ~/.config/whisper/agent (written when you pick/create one);\n" +
 			"else, if you already have an agent, the server's reuse-most-recent default.\n\n" +
@@ -53,12 +57,11 @@ func newConnectCmd() *cobra.Command {
 				return runEnsure(configFile, port)
 			}
 
+			// The tier itself is decided below (auto vs forced); args carries everything
+			// tier-independent - each attempt adds its own tier + keys on a copy.
 			args := map[string]any{}
-			if tier != "" {
-				args["tier"] = tier
-			}
 			// --name / --label both mean the agent's human name → the server LABEL,
-			// consistent with `whisper create` . --name wins; --label is the legacy
+			// consistent with `whisper create`. --name wins; --label is the legacy
 			// spelling. (It is NOT a separate friendly_name field - that left the agent
 			// unnamed.)
 			chosenName := firstNonBlank(name, label)
@@ -80,12 +83,13 @@ func newConnectCmd() *cobra.Command {
 			} else if strings.TrimSpace(ecuSerial) != "" {
 				return usageErr("--ecu-serial needs --vin (the ECU is identified within its vehicle)")
 			}
-			// agent selection, in precedence order (highest first):
-			//   1. --agent <id|/128>   explicit flag (overrides everything)
-			//   2. ~/.config/whisper/agent   the agent persisted by a prior pick/create
-			//   3. (absent)            ⇒ no selector ⇒ server reuse-most-recent default
+			// Agent selection, in precedence order (highest first):
+			// 1. --agent <id|/128> explicit flag (overrides everything)
+			// 2. ~/.config/whisper/agent the agent persisted by a prior pick/create
+			// 3. (absent) ⇒ no selector ⇒ server reuse-most-recent default
 			// Empty at every rung ⇒ omit the arg entirely (the zero-config common case).
-			sel := resolveAgentSelector(agent, agentFile)
+			// Provenance (flag vs file) gates the D9 stale-file fallback below.
+			sel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
 
 			c, err := resolveClient(true, false)
 			if err != nil {
@@ -96,10 +100,11 @@ func newConnectCmd() *cobra.Command {
 			// name (what `whisper list` shows, and what a caller naturally reaches for,
 			// e.g. --agent scout) needs resolving client-side first (Postel: liberal in
 			// what we accept). A /128 selector, an id, or "" (no selector) pass straight
-			// through with zero extra round-trips.
+			// through with zero extra round-trips. Shared with ip/run/guided/daemon (D7);
+			// a stale persisted-FILE name falls back to the server default (D9).
 			if sel != "" {
 				cxSel, cancelSel := ctx()
-				resolved, rerr := resolveConnectAgent(c, cxSel, sel)
+				resolved, rerr := resolveAgentArg(c, cxSel, sel, selFromFile, agentFile)
 				cancelSel()
 				if rerr != nil {
 					return rerr
@@ -109,7 +114,7 @@ func newConnectCmd() *cobra.Command {
 
 			// When connect has NO selector it would otherwise let the server auto-allocate
 			// a /128 - and on a fresh account that /128 would be UNNAMED, bypassing the
-			// mandatory-name rule . Guard it: if the caller has no agent yet, mint a
+			// mandatory-name rule. Guard it: if the caller has no agent yet, mint a
 			// NAMED one through the SAME requireName/createAgent path as create, then bind
 			// egress to it. Existing agents are untouched (zero-config reuse stays).
 			if sel == "" {
@@ -142,57 +147,31 @@ func newConnectCmd() *cobra.Command {
 				args["agent"] = sel
 			}
 
-			// --tier wireguard: mint a local WG keypair and inject ONLY the public half
-			// into the op:connect args (the server registers us as a peer; our private key never
-			// leaves this host). No-op for socks5/anyip; wgKey threads our private key into the
-			// userspace tunnel bring-up below.
-			wgKey, werr := prepareWireGuard(tier, args)
-			if werr != nil {
-				return werr
-			}
-			// alongside the WG keypair, load-or-mint the agent-held IDENTITY keypair (routed
-			// tier only) and inject its public SPKI as identity_public_key - the server pins THIS
-			// key, verbatim, and never derives one for this /128. `sel` (already resolved above) is
-			// the persistence handle so a reconnect for the SAME agent reuses the SAME key.
-			idKey, ierr := prepareIdentityKey(tier, args, sel)
-			if ierr != nil {
-				return ierr
-			}
-			keys := &connectKeys{wg: wgKey, identity: idKey}
-
+			// The tier decision (the robustness default): NO --tier (or --tier auto)
+			// negotiates the best tier - Tier-1 (WireGuard) first under a short bound,
+			// auto-downgrading to Tier-1.5 (SOCKS5) on ANY failure; the success line then
+			// names the tier it landed on. An EXPLICIT --tier forces exactly that tier -
+			// no downgrade, a clear error if it cannot. Both modes run the SAME
+			// connectTierAttempt body: per-tier key prep (WG keypair + identity
+			// key, public halves only on the wire), op:connect, local bring-up, verify -
+			// and never surface a secret (the sanitized renderConnect runs after).
+			//
 			// cx is the SHORT control ctx - it bounds op:connect + the one-shot verify and
 			// is cancelled on return. It is NOT the proxy's lifetime: the proxy is
 			// Background-rooted and ends ONLY on Stop() (see egress.StartLocalProxy), so the
 			// 30s timeout firing here can never tear down a held-open connect.
+			//
+			// --port pins the local loopback port (0 ⇒ a free one); the attempt routes it
+			// through connectAndVerifyOnPort directly (a pinned port binds a REAL socket
+			// the connectAndVerify test stubs must not shadow).
 			cx, cancel := ctx()
 			defer cancel()
-			env, err := c.Agents(cx, "connect", args)
-			if err != nil {
-				return err
-			}
-			// Check ONLY for a control-plane error here - do NOT fall through to the shared
-			// renderEnvelope --json dump: the raw op:connect envelope carries the et_ bearer
-			// (egress tier) or the minted WG private key, so dumping it would LEAK a credential
-			// (and skip actually connecting). connect's own --json (renderConnect) emits a
-			// sanitized, secret-free shape after the proxy/tunnel is up.
-			if perr := envelopeError(env); perr != nil {
-				return perr
-			}
-			// op:connect returns the transport as INTERNAL values: the et_ bearer + egress
-			// endpoint (Tier-1.5), or the WireGuard config + (zero-key) private key (Tier-1).
-			// We bring up the local proxy/tunnel, fold verify in (echo through it → assert ==
-			// the agent /128), then print ONE success line. No secret ever appears in output,
-			// env, or a persisted file.
-			//
-			// --port pins the local loopback port (0 ⇒ a free one). A pinned port goes through
-			// connectAndVerifyOnPort directly (the connectAndVerify var is the test stub seam;
-			// a pinned port binds a REAL socket those stubs must not shadow).
 			var sess *egressSession
 			var cerr error
-			if port > 0 {
-				sess, cerr = connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, port)
+			if isAutoTier(tier) {
+				sess, cerr = negotiateConnect(cx, c, args, sel, port)
 			} else {
-				sess, cerr = connectAndVerify(cx, c, env.Result, displayName(env.Result), keys)
+				sess, cerr = connectTierAttempt(cx, c, args, tier, sel, port)
 			}
 			if cerr != nil {
 				return cerr
@@ -207,7 +186,7 @@ func newConnectCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&tier, "tier", "", "egress tier: socks5 (default) | wireguard (routed /128, userspace) | anyip")
+	cmd.Flags().StringVar(&tier, "tier", "", "egress tier: auto (default: wireguard, falling back to socks5) | wireguard | socks5 | anyip - an explicit tier is forced, no downgrade")
 	cmd.Flags().StringVar(&label, "label", "", "legacy alias for --name (--name wins)")
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in)")
 	cmd.Flags().StringVar(&name, "name", "", "the agent's human name (required to create one; maps to the server label)")
@@ -254,11 +233,11 @@ func runEnsure(configFile string, portOverride int) error {
 // the explicit --agent flag wins; else the persisted agent file (written by install.sh);
 // else "" (no selector ⇒ the server's reuse-most-recent default). Trimmed; an empty flag
 // AND an absent/blank file yield "" so the arg is omitted entirely - zero-config by default.
+// Thin wrapper over resolveAgentSelectorSource (agent_resolve.go), which additionally
+// reports the flag-vs-file provenance the D9 stale-file fallback needs.
 func resolveAgentSelector(flagAgent, agentFile string) string {
-	if v := strings.TrimSpace(flagAgent); v != "" {
-		return v
-	}
-	return client.ReadAgentFile(agentFile)
+	sel, _ := resolveAgentSelectorSource(flagAgent, agentFile)
+	return sel
 }
 
 // resolveConnectAgent turns a raw connect selector into what op:connect actually
@@ -308,11 +287,11 @@ func resolveConnectAgent(c *client.Client, cx context.Context, sel string) (stri
 }
 
 // renderConnect prints the lean, Scandinavian result of a verified connect:
-// by default ONE human line on stderr - `Connected as <name> - <addr>  ✓ verified` -
+// by default ONE human line on stderr - `Connected as <name> - <addr> ✓ verified` -
 // and NOTHING on stdout. --quiet prints ONLY the bearer-free local endpoint
 // (socks5h://127.0.0.1:<port>) on stdout. --verbose adds the local-endpoint detail
 // (NO server proxy strings - they carry the bearer, so they are NEVER rendered: the
-// connection_string/http_proxy/socks5_endpoint fields are deliberately dropped,
+// connection_string/http_proxy/socks5_endpoint fields are deliberately dropped, for
 // bearer hygiene).
 func renderConnect(sess *egressSession, verbose bool) {
 	if g.jsonOut {
@@ -324,6 +303,9 @@ func renderConnect(sess *egressSession, verbose bool) {
 			"address":  sess.addr,
 			"verified": sess.verified,
 			"tier":     orVal(sess.tier, "socks5"),
+		}
+		if sess.negotiated {
+			out["negotiated"] = true // AUTO mode picked the tier (scripts can tell forced from landed)
 		}
 		if h, ok := sess.tunnelHealthy(); ok {
 			out["tunnel_healthy"] = h
@@ -358,7 +340,7 @@ func renderConnect(sess *egressSession, verbose bool) {
 	}
 }
 
-// connectTierLabel renders an honest, human label for the active tier (framing):
+// connectTierLabel renders a plain, human label for the active tier:
 // WireGuard is a routed Whisper /128 over a userspace tunnel; socks5/anyip is the source-bound
 // egress. Never overclaims - the label matches what the transport actually is.
 func connectTierLabel(tier string) string {
@@ -398,7 +380,7 @@ func displayName(res *client.Result) string {
 // It is a package var so a command test can replace it with an immediate, non-blocking
 // teardown (a test must not park on a real signal).
 //
-// a held-open session is registered in the local session registry for its whole hold, so
+// A held-open session is registered in the local session registry for its whole hold, so
 // a one-shot (`whisper ip`/`run`/`claude`) detects it and REUSES the running proxy instead of
 // opening a competing op:connect that would clobber (and on exit, kill) this session's
 // server-side peer. Owner-guarded: a REUSED session (local==nil) is neither written nor cleared.

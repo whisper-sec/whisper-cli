@@ -15,7 +15,7 @@ import (
 )
 
 // pollInterval is the op:logs fallback cadence while the SSE stream is down (the hybrid
-// ). 2s is responsive without hammering warm storage; the live tail pre-empts it.
+// feed). 2s is responsive without hammering warm storage; the live tail pre-empts it.
 const pollInterval = 2 * time.Second
 
 // liveTitle is the live monitor panel's header: a pulsing heartbeat dot + the source/

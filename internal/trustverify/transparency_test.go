@@ -32,7 +32,7 @@ type txFixture struct {
 	esKid     string
 	address   string
 
-	// the raw key material, retained so tests can present the SAME keys as a
+	// The raw key material, retained so tests can present the SAME keys as a
 	// DNSSEC-anchored set (or a DIFFERENT set, for the fail-closed negatives).
 	esJWK    JWK
 	esSpki   []byte // X.509 SPKI DER of the ES256 root key (for _whisper-identity TXT)
@@ -87,6 +87,9 @@ func buildTxFixtureFor(t *testing.T, addr string) txFixture {
 	kh.Write(edPub)
 	keyID := kh.Sum(nil)
 	blob := append(append([]byte{}, keyID[:4]...), ed25519.Sign(edPriv, []byte(body))...)
+	// The signature line prefix is U+2014 EM DASH, mandated by the C2SP signed-note format.
+	// It is a wire constant, not prose: an automated em-dash scrub over this tree would
+	// silently turn every valid checkpoint into an unverifiable one. Leave it exactly as is.
 	note := body + "\n— " + origin + " " + base64.StdEncoding.EncodeToString(blob) + "\n"
 
 	obj := fmt.Sprintf(`{"object":"identity-transparency","address":"%s","count":1,`+

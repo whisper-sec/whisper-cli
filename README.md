@@ -24,13 +24,13 @@ verifies its SHA-256 (and its PGP signature when `gpg` is present), and puts it 
 `PATH`:
 
 ```sh
-curl get.whisper.online | sh
+curl -fsSL https://get.whisper.online | sh
 ```
 
 Windows (PowerShell):
 
 ```powershell
-irm get.whisper.online/install.ps1 | iex
+irm https://get.whisper.online/install.ps1 | iex
 ```
 
 Homebrew (macOS/Linux):
@@ -99,11 +99,13 @@ Or download the binary for your platform from the
 [Releases page](https://github.com/whisper-sec/whisper-cli/releases/latest), make it
 executable, and put it on your `PATH`.
 
-> The installers (`scripts/install.sh`, `scripts/install.ps1`) are the exact scripts
-> `get.whisper.online` serves - published here so the whole install path is inspectable.
-> They download `whisper-<os>-<arch>` (plus `.sha256` and `.asc`) from this repo's
-> releases; SHA-256 is a hard gate (a mismatch aborts the install), and the PGP check is
-> an extra layer. Point `WHISPER_CLI_BASE` at any mirror to override the source.
+> The installers (`scripts/install.sh`, `scripts/install.ps1`) are published here so the
+> whole install path is inspectable. They are the same scripts `get.whisper.online` serves,
+> differing only in where they download from by default: these fetch
+> `whisper-<os>-<arch>` (plus `.sha256` and `.asc`) from this repo's releases, the served
+> copy fetches the same binaries from `cli.whisper.online/dl`. Either way SHA-256 is a hard
+> gate - a mismatch aborts the install - and the PGP check is an extra layer. Point
+> `WHISPER_CLI_BASE` at any mirror to override the source.
 
 ### Verify the download
 
@@ -204,7 +206,7 @@ or `--key`). The graph endpoint itself is two-tier: the direct read verbs
 `db.schema`, ...) also answer keyless and rate-limited - no account needed:
 
 ```sh
-curl -s https://graph.whisper.security/api/query \
+curl -s https://graph.whisper.online/api/query \
   -H 'content-type: application/json' \
   -d '{"query":"CALL whisper.assess([\"8.8.8.8\"])"}'
 ```
@@ -290,7 +292,7 @@ Multi-arch (amd64/arm64), distroless, ~18 MB.
 
 ## Build from source
 
-Requires Go 1.24+.
+Requires Go 1.25+.
 
 ```sh
 git clone https://github.com/whisper-sec/whisper-cli
@@ -308,15 +310,34 @@ as the release assets):
 ```
 
 `platforms.txt` is the single source of truth for the target matrix - shared by
-`build-all.sh`, the release workflow, and the installers.
+`build-all.sh` and the installers.
+
+### Source here, binaries there
+
+This repository is the Whisper **client**: identity, egress, connect, verify, the
+security-graph surface and the TUI. It is MIT, and what you build from it is that client.
+
+The published binaries are not only that. `whisper` also carries Whisper's **endpoint
+sensor** - the `service`, `sensor` and `posture` commands - and the sensor is not open
+source today. It ships as a binary and its sources stay closed, so a binary from a release,
+from `curl -fsSL https://get.whisper.online | sh`, or from apt, dnf, apk, brew or scoop has those
+commands. Anything BUILT from this tree does not: `go install`, a local `go build`, and the
+snap, which snapcraft builds from source.
+
+Two consequences worth stating plainly. The MIT licence covers the source in this
+repository, not the additional closed component in the published binaries. And if you
+want the endpoint sensor, install a released binary rather than building from source.
 
 ### Platforms
 
-| OS \ Arch | amd64 | arm64 |
-|-----------|:-----:|:-----:|
-| linux     |   ✓   |   ✓   |
-| darwin    |   ✓   |   ✓   |
-| windows   |   ✓   |   ✓   |
+| OS \ Arch | amd64 | arm64 | arm | riscv64 | mips | mipsle | 386 |
+|-----------|:-----:|:-----:|:---:|:-------:|:----:|:------:|:---:|
+| linux     |   ✓   |   ✓   |  ✓  |    ✓    |  ✓   |   ✓    |  ✓  |
+| darwin    |   ✓   |   ✓   |     |         |      |        |     |
+| windows   |   ✓   |   ✓   |     |         |      |        |     |
+
+`linux-arm` is 32-bit ARMv7. Every target is a static, CGO-free build, and every one is
+signed with the AS219419 release key.
 
 ---
 
@@ -341,7 +362,9 @@ To report a security issue, see [SECURITY.md](SECURITY.md).
 
 ## License
 
-[MIT](LICENSE) © 2026 viaGraph B.V. (Whisper Security).
+[MIT](LICENSE) © 2026 viaGraph B.V. (Whisper Security) - for the source in this
+repository. The published binaries additionally contain the closed-source endpoint
+sensor; see [Source here, binaries there](#source-here-binaries-there).
 
 The embedded Mozilla CA certificate list
 (`internal/client/cabundle/mozilla-cacert.pem`) is distributed under the Mozilla Public

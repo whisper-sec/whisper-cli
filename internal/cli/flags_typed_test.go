@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/idkey"
 )
 
 // The typed-identity flags register an object under a domain-specific identifier it
@@ -191,6 +193,7 @@ func TestConnect_Vin_SetsNamedArgs(t *testing.T) {
 	srv := recordingServer(t, []agentChoice{{name: "car", addr: "2a04:2a01:1::1"}}, &seen)
 	defer srv.Close()
 	defer stubEgressTail(t)()
+	defer idkey.SetIdentityDirForTest(t.TempDir())() // the AUTO Tier-1 attempt mints a real identity key
 
 	savedG := g
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", quiet: true, timeout: 5 * time.Second}

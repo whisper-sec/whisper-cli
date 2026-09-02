@@ -24,7 +24,9 @@ func newPolicyCmd() *cobra.Command {
 		Short: "Read or set your per-tenant DNS resolver policy (op:policy)",
 		Long: "Set the caller's per-tenant DNS policy (op:policy). With NO flags it READS the\n" +
 			"current policy back. --default allow|deny sets the default action; repeat --block\n" +
-			"/--allow for list entries (max 1000 combined). --mode picks how names resolve\n" +
+			"/--allow for list entries (max 1000 combined). A list entry is a domain and covers\n" +
+			"that domain and every subdomain of it, so evil.com already covers a.evil.com; the\n" +
+			"*.evil.com spelling is accepted and means the same rule. --mode picks how names resolve\n" +
 			"(graph-only | hybrid | always-forward); --retention sets how many days ordinary\n" +
 			"DNS/query logs are kept (0-3650). Only the flags you pass are changed - anything\n" +
 			"you leave off keeps its current value.",

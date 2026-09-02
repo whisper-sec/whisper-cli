@@ -5,7 +5,7 @@ package tui
 
 import "testing"
 
-// TestValidateAgentName covers the create-modal mandatory-name validator (hole b):
+// TestValidateAgentName covers the create-modal mandatory-name validator:
 // the "(required)" label is now TRUE - an empty/blank/whitespace name is rejected, any
 // non-blank name is accepted (the server polices reserved/premium names beyond this).
 func TestValidateAgentName(t *testing.T) {

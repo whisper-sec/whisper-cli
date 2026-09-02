@@ -8,6 +8,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/whisper-sec/whisper-cli/internal/catalog"
 )
 
 // drive runs the MCP server over a canned newline-delimited input and returns the decoded
@@ -58,15 +60,27 @@ func TestMCP_Initialize(t *testing.T) {
 	}
 }
 
-// TestMCP_ToolsList: WITHOUT a key, tools/list returns exactly the keyless tools, each with an
-// inputSchema - the control tools are NOT advertised (graceful two-tier).
+// TestMCP_ToolsList: WITHOUT a key, tools/list returns exactly the keyless tier - the
+// verify/RDAP pair plus the catalog's keyless public graph reads - each with an
+// inputSchema. The control tools and the keyed graph surface are NOT advertised
+// (graceful two-tier).
 func TestMCP_ToolsList(t *testing.T) {
 	pinKeyState(t, "", "")
 	r := drive(t, `{"jsonrpc":"2.0","id":2,"method":"tools/list"}`)
 	res, _ := r[0]["result"].(map[string]any)
 	tools, _ := res["tools"].([]any)
-	if len(tools) != 2 {
-		t.Fatalf("expected 2 keyless tools without a key, got %d", len(tools))
+	keylessRecipes := 0
+	for _, e := range catalog.All() {
+		if e.IsKeyless() {
+			keylessRecipes++
+		}
+	}
+	if keylessRecipes == 0 {
+		t.Fatal("the catalog has no keyless recipes, so this test would pass on an empty tier")
+	}
+	if want := 2 + keylessRecipes; len(tools) != want {
+		t.Fatalf("expected %d keyless tools without a key (verify + rdap + %d public graph reads), got %d",
+			want, keylessRecipes, len(tools))
 	}
 	names := map[string]bool{}
 	for _, ti := range tools {
@@ -75,15 +89,21 @@ func TestMCP_ToolsList(t *testing.T) {
 		if _, ok := tm["inputSchema"].(map[string]any); !ok {
 			t.Fatalf("tool %v missing inputSchema", tm["name"])
 		}
-	}
-	for _, want := range []string{"whisper_verify", "whisper_rdap"} {
-		if !names[want] {
-			t.Fatalf("missing tool %q (have %v)", want, names)
+		if d, _ := tm["description"].(string); strings.TrimSpace(d) == "" {
+			t.Fatalf("tool %v has no description (agent-unfriendly)", tm["name"])
 		}
 	}
-	for _, banned := range []string{"whisper_register", "whisper_list", "whisper_policy", "whisper_logs", "whisper_revoke", "whisper_egress_config"} {
+	for _, want := range []string{"whisper_verify", "whisper_rdap", "whisper_assess", "whisper_identify", "whisper_explain"} {
+		if !names[want] {
+			t.Fatalf("missing keyless tool %q (have %v)", want, names)
+		}
+	}
+	for _, banned := range []string{
+		"whisper_register", "whisper_list", "whisper_policy", "whisper_logs", "whisper_revoke", "whisper_egress_config",
+		"whisper_graph_query", "whisper_typosquat", "whisper_dbSchema", "query", "text2cypher",
+	} {
 		if names[banned] {
-			t.Fatalf("control tool %q must not be listed without a key", banned)
+			t.Fatalf("keyed tool %q must not be listed without a key", banned)
 		}
 	}
 }

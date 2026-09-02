@@ -78,6 +78,18 @@ type Options struct {
 	// /checkpoint/key are DEMOTED to cross-checks and steps 3-4 become fully trustless.
 	KeyAnchorZone string
 
+	// AgentKeyDenyKIDs are kids that must NEVER be accepted as an agent's own
+	// verification key, on top of the fleet trust-root kids the verifier discovers for itself.
+	// Every kid listed here only ever removes a key from consideration.
+	//
+	// It doubles as the OFFLINE form of that denylist. Agent-key resolution fails closed when it
+	// cannot consult a fleet trust-root anchor at all (an attacker who cannot forge the anchor can
+	// still drop the query for it), so an operator running against a deployment that publishes no
+	// _whisper-identity anchor names the fleet kids here instead. That is the only sense in which
+	// this field lets a verification proceed, and it does so by supplying the check, not by
+	// skipping it.
+	AgentKeyDenyKIDs []string
+
 	SkipTransparency bool
 	SkipIdentityDoc  bool
 
@@ -104,7 +116,7 @@ func Verify(ctx context.Context, target string, opts Options) (*Report, error) {
 	rep := &Report{Target: target}
 
 	// --- Step 1: DNSSEC -- establish + cross-check (addr, fqdn) and the TLSA pin(s) -------
-	// pins carries EVERY published 3 1 1 association (a rotation overlap publishes two).
+	// Pins carries EVERY published 3 1 1 association (a rotation overlap publishes two).
 	addr, fqdn, pins, dnssecCheck := resolveAndValidate(ctx, v, target)
 	rep.Checks = append(rep.Checks, dnssecCheck)
 	if dnssecCheck.Status == StatusPass {

@@ -20,29 +20,39 @@ import (
 func (t *Tunnel) monitor() {
 	tick := time.NewTicker(t.healthEvery)
 	defer tick.Stop()
+	// The monitor owns the published path record (pathstate.go): it is the only place that has
+	// just read the device, so it is the only place entitled to write down what the paths ARE.
+	// It is also therefore the right place to remove the record when the tunnel goes away.
+	defer t.clearPaths()
 
 	// Backoff between forced reconnects when the tunnel stays dead. Reset to base on recovery.
 	const baseBackoff = 2 * time.Second
 	const maxBackoff = 60 * time.Second
 	backoff := baseBackoff
 	var nextReconnect time.Time // earliest time we may force the next reconnect
+	var stall stallTracker      // counts consecutive failed re-handshakes, so the note can escalate
 
 	for {
 		select {
 		case <-t.stop:
 			return
 		case <-tick.C:
-			last, ok := t.readHandshake()
+			handshakes, ok := t.readHandshakes()
 			now := time.Now()
+			last := handshakes[t.cfg.ServerPublicKeyHex]
 			if ok {
 				t.mu.Lock()
 				t.lastH = last
 				t.mu.Unlock()
+				// the same device read decides the direct-peer promote/demote. One
+				// loop, one observation - two loops could disagree about what the device said.
+				t.reconcileDirectPeers(now, handshakes)
 			}
 			// Healthy: a handshake within deadAfter. Reset the backoff and move on.
 			if ok && !last.IsZero() && now.Sub(last) < t.deadAfter {
 				backoff = baseBackoff
 				nextReconnect = time.Time{}
+				stall.recovered()
 				continue
 			}
 			// Dead (or never handshaked past the grace window): force a reconnect, throttled by
@@ -60,6 +70,12 @@ func (t *Tunnel) monitor() {
 				t.mu.Unlock()
 				t.note("whisper: WireGuard tunnel idle - re-handshaking (attempt %d)…", n)
 			}
+			// Counting attempts is a symptom, and after a few of them repeating the count is
+			// just the same non-answer in a louder voice. Say the two things it actually is,
+			// once, and what to do about each. See stallTracker.
+			if say, ok := stall.attemptFailed(); ok {
+				t.note("%s", say)
+			}
 			nextReconnect = now.Add(backoff)
 			if backoff < maxBackoff {
 				backoff *= 2
@@ -71,33 +87,71 @@ func (t *Tunnel) monitor() {
 	}
 }
 
-// readHandshake reads the peer's last-handshake time from the device's UAPI dump. It returns
-// (zero,false) when the device cannot be read; (t,true) where t is the handshake time (which
-// may be the zero time if no handshake has happened yet - the caller treats zero as unhealthy).
-// The dump can name the peer's public key (not a secret) but NO private material, and we parse
-// only the two handshake-time fields, so nothing sensitive is retained or logged.
-func (t *Tunnel) readHandshake() (time.Time, bool) {
+// readHandshakes reads the last-handshake time of EVERY peer from the device's UAPI dump, keyed
+// by that peer's public key in hex. It returns (nil,false) when the device cannot be read;
+// otherwise (map,true), where a peer that has never handshaked carries the ZERO time - which is
+// an answer ("not yet"), not an absence.
+//
+// It is per-peer rather than whole-dump because direct paths put a second peer on this device. The
+// dump is a flat list of key=value lines with each peer's section introduced by its own
+// `public_key=`, so a scan that ignored those boundaries would report the LAST peer's handshake
+// as the tunnel's - which for a healthy box and a dead direct peer would read as a dead tunnel
+// and drive a pointless reconnect of a link that was fine.
+//
+// The dump names public keys (not secrets) and DOES carry `private_key=`; we key on the former
+// and parse only the two handshake-time fields, so no private material is retained or logged.
+func (t *Tunnel) readHandshakes() (map[string]time.Time, bool) {
 	dump, err := t.dev.IpcGet()
 	if err != nil {
-		return time.Time{}, false
+		return nil, false
 	}
+	return parseHandshakeDump(dump), true
+}
+
+// parseHandshakeDump is the parse itself, separated from the device read so it can be tested
+// against a recorded dump rather than only against a live tunnel: a test that needs a real
+// device to run is a test nobody runs.
+func parseHandshakeDump(dump string) map[string]time.Time {
+	out := map[string]time.Time{}
+	var cur string
 	var secs, nsec int64
+	flush := func() {
+		if cur == "" {
+			return
+		}
+		if secs == 0 && nsec == 0 {
+			out[cur] = time.Time{}
+		} else {
+			out[cur] = time.Unix(secs, nsec)
+		}
+	}
 	for _, line := range strings.Split(dump, "\n") {
 		k, v, ok := strings.Cut(line, "=")
 		if !ok {
 			continue
 		}
 		switch k {
+		case "public_key":
+			flush() // close the section we were in before starting the next one
+			cur, secs, nsec = strings.TrimSpace(v), 0, 0
 		case "last_handshake_time_sec":
 			secs, _ = strconv.ParseInt(v, 10, 64)
 		case "last_handshake_time_nsec":
 			nsec, _ = strconv.ParseInt(v, 10, 64)
 		}
 	}
-	if secs == 0 && nsec == 0 {
-		return time.Time{}, true // device readable, but no handshake yet (unhealthy until one lands)
+	flush()
+	return out
+}
+
+// readHandshake is the box peer's handshake alone - the one the tunnel's own health rides on. A
+// direct peer going quiet must never look like the tunnel going quiet.
+func (t *Tunnel) readHandshake() (time.Time, bool) {
+	all, ok := t.readHandshakes()
+	if !ok {
+		return time.Time{}, false
 	}
-	return time.Unix(secs, nsec), true
+	return all[t.cfg.ServerPublicKeyHex], true
 }
 
 // note emits a safe one-line operational message via the configured logger (nil ⇒ silent).
@@ -106,4 +160,52 @@ func (t *Tunnel) note(format string, args ...any) {
 	if t.logf != nil {
 		t.logf(format, args...)
 	}
+}
+
+// stallNoteAfter is how many consecutive failed re-handshakes go by before the monitor stops
+// counting and starts explaining. Three is the first count at which "it will probably come
+// back" has stopped being a fair reading: with the capped backoff below that is roughly the
+// first ten seconds, so the sentence arrives while the person is still watching, and not so
+// early that a single lost handshake triggers it.
+const stallNoteAfter = 3
+
+// stallTracker turns a run of failed re-handshakes into ONE sentence, and it is separate from
+// the monitor loop so the escalation can be tested without a live WireGuard device.
+//
+// What a person saw when the tunnel could not come up was "WireGuard tunnel idle -
+// re-handshaking (attempt 1…2…3…)" and then, from the verify step, a line about their session
+// token. Both were symptoms. The two things it really is:
+// UDP to the endpoint is not getting through, or another `whisper connect` for the SAME
+// address has taken the tunnel over - the box binds one WireGuard key to one /128, so the
+// newest connect wins and the older session is left with a local proxy that still accepts
+// connections and a tunnel that will never carry another packet. Neither is guessable from a
+// counter, and both are actionable once named.
+//
+// It speaks once per stall (said), and re-arms only after the tunnel genuinely recovers, so a
+// long outage is one sentence rather than a scroll.
+type stallTracker struct {
+	consecutive int
+	said        bool
+}
+
+// attemptFailed records one more failed re-handshake and returns the note the first time the
+// run crosses stallNoteAfter. Every later attempt in the same run returns ok=false: the
+// sentence has already been said and repeating it adds nothing.
+func (s *stallTracker) attemptFailed() (string, bool) {
+	s.consecutive++
+	if s.said || s.consecutive < stallNoteAfter {
+		return "", false
+	}
+	s.said = true
+	return "whisper: the WireGuard tunnel still has no handshake after " +
+		strconv.Itoa(s.consecutive) + " attempts, so this session is not carrying traffic. " +
+		"Either UDP to the Whisper endpoint is blocked on this network, or another `whisper connect` " +
+		"for the same address has taken the tunnel over - one address holds one tunnel, and the newest " +
+		"connect wins. Run `whisper connect` again to take it back, or stop the other session.", true
+}
+
+// recovered resets the run. A tunnel that handshakes again has earned the right to be counted
+// from zero, and to be explained again if it stalls a second time.
+func (s *stallTracker) recovered() {
+	s.consecutive, s.said = 0, false
 }

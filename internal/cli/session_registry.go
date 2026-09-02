@@ -140,11 +140,11 @@ func readSessionRecords() []sessionRecord {
 // /128, an id/name, or "" for the persisted/zero-config default), it returns a REUSABLE session
 // for a live, locally-held egress of the SAME /128 - or (nil, false) to proceed with a fresh
 // op:connect exactly as today. Absolutely fail-open: no registry, no match, a dead record, or a
-// selector that resolves elsewhere all fall through; a false negative only costs the pre-
+// selector that resolves elsewhere all fall through; a false negative only costs the earlier
 // behavior, never a broken run.
 //
 // The returned session has local==nil, so the caller's `defer sess.Stop()` is a no-op and the
-// daemon's tunnel/peer is untouched (the whole point of).
+// daemon's tunnel/peer is untouched, which is the whole point of reusing it.
 func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressSession, bool) {
 	recs := readSessionRecords()
 	if len(recs) == 0 {

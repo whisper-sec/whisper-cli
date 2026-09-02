@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 viaGraph B.V. (Whisper Security)
 
-// Package idkey is the client side of - the tunneled-tier AGENT-HELD identity key. It mints an
+// Package idkey is the client side of the tunneled-tier AGENT-HELD identity key. It mints an
 // EC P-256 keypair LOCALLY (mirroring wgtun.GenerateKeypair's WireGuard keypair, one level up the
 // stack), persists it 0600 under ~/.config/whisper/identity/ so it survives across reconnects, and
 // builds the self-signed DANE-EE leaf the routed tunnel serves on :443. The private key NEVER leaves
@@ -28,6 +28,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/secfile"
 )
 
 // Keypair is a freshly-generated (or loaded) EC P-256 identity keypair. The private key NEVER leaves
@@ -142,11 +144,15 @@ func load(path string) (*Keypair, error) {
 	return &Keypair{Private: priv, spkiDER: der}, nil
 }
 
-// save persists kp as a PEM EC PRIVATE KEY, mode 0600, creating the identity dir (0700) if needed.
-// The private key NEVER touches argv/env/logs - this is the ONLY place it is ever written, to a
-// single-user-readable file.
+// save persists kp as a PEM EC PRIVATE KEY that only its owner can read, creating the
+// identity dir if needed. The private key NEVER touches argv/env/logs - this is the ONLY
+// place it is ever written, to a single-user-readable file.
+//
+// Through secfile rather than a 0o600 mode argument: this is a PRIVATE KEY, and
+// on Windows a mode argument decides nothing but the read-only attribute, so the file
+// would have carried whatever DACL its directory happened to grant.
 func save(path string, kp *Keypair) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := secfile.MkdirAllFor(path); err != nil {
 		return err
 	}
 	der, err := x509.MarshalECPrivateKey(kp.Private)
@@ -154,7 +160,7 @@ func save(path string, kp *Keypair) error {
 		return err
 	}
 	block := &pem.Block{Type: "EC PRIVATE KEY", Bytes: der}
-	return os.WriteFile(path, pem.EncodeToMemory(block), 0o600)
+	return secfile.WriteFile(path, pem.EncodeToMemory(block))
 }
 
 // leafValidity is generous (mirrors the server-side per-agent leaf lifetime): DANE-EE pins the SPKI, not

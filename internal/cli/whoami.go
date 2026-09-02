@@ -11,6 +11,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/whisper-sec/whisper-cli/internal/buildid"
 	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/model"
 )
@@ -139,21 +140,41 @@ func whoamiFleet(c *client.Client) (tenant string, agents int, err error) {
 // newVersionCmd is the spelled-out `whisper version` (the flag form --version already
 // exists; an agent that types the word gets the same answer, not "unknown command").
 // --quiet prints the bare version (the load-bearing value); --json a tiny object.
+//
+// The build identity rides alongside because the version alone has been caught
+// lying: a lab host reported a June version tag from a binary built at the end
+// of August, since the version is stamped by hand and falls back to a literal
+// in the source when nobody stamps it. The revision is put there by the
+// toolchain and cannot be forgotten. It is additive on both surfaces - the
+// bare `--quiet` value stays the version and nothing else, because that is what
+// scripts read - and it is omitted entirely when unrecorded rather than printed
+// as "unknown", so what is shown is always something a reader can look up.
 func newVersionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
 		Short: "Print the whisper CLI version",
-		Long:  "Print the whisper CLI version (same answer as --version).",
-		Args:  cobraNoArgs,
+		Long: "Print the whisper CLI version (same answer as --version), plus the build " +
+			"revision it was compiled from when the toolchain recorded one.",
+		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if g.jsonOut {
 				emitJSONValue(struct {
-					Version string `json:"version"`
-				}{Version})
+					Version   string `json:"version"`
+					Build     string `json:"build,omitempty"`
+					BuildTime string `json:"build_time,omitempty"`
+				}{Version, buildid.ID(), buildid.Time()})
 				return nil
 			}
 			if g.quiet {
 				fmt.Fprintln(os.Stdout, Version)
+				return nil
+			}
+			if b := buildid.ID(); b != "" {
+				if t := buildid.Time(); t != "" {
+					fmt.Fprintf(os.Stdout, "whisper version %s (build %s, %s)\n", Version, b, t)
+				} else {
+					fmt.Fprintf(os.Stdout, "whisper version %s (build %s)\n", Version, b)
+				}
 				return nil
 			}
 			fmt.Fprintf(os.Stdout, "whisper version %s\n", Version)

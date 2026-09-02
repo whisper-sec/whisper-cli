@@ -25,7 +25,7 @@ import (
 // trustless. The wire contract (DKIM-precedent: RFC 6376 publishes signing keys as p= TXT):
 //
 //	_whisper-identity.<zone>. IN TXT "v=whisper1; k=p256; p=<base64 X.509-SPKI-DER>"
-//	_whisper-ledger.<zone>.   IN TXT "v=whisper1; k=ed25519; n=<C2SP key name>; p=<base64 X.509-SPKI-DER>"
+//	_whisper-ledger.<zone>. IN TXT "v=whisper1; k=ed25519; n=<C2SP key name>; p=<base64 X.509-SPKI-DER>"
 //
 // One TXT record per key; the RRset is the whole published key set. No derived value (kid /
 // key-id) is published -- the verifier DERIVES both itself (ES256 kid = lowercase-hex
@@ -34,16 +34,16 @@ import (
 //
 // Semantics (fail-closed where it matters, honest where it degrades):
 //
-//   - RRset DNSSEC-validates + the signing kid IS in it  → verify against the DNS key; the
-//     step is anchored in the DNSSEC root (dnssec-root).
-//   - RRset DNSSEC-validates + the signing kid is NOT in it → FAIL (fail-closed: a key
-//     outside the DNS-anchored set signed the artifact -- a fraud signal).
-//   - HTTPS-served key material DISAGREES with the DNS-anchored key for the same kid →
-//     FAIL with an explicit disagreement error (the WebPKI surface is lying).
-//   - RRset unavailable (NXDOMAIN / unsigned / resolver error) → the step falls back to the
-// pre- behavior: cryptographically verified against the HTTPS-served keys, honestly
-// labelled trust-on-pin. (A pre- server keeps verifying; a stripped answer degrades
-//     the LABEL, never fakes a proof.)
+// - RRset DNSSEC-validates + the signing kid IS in it → verify against the DNS key; the
+// step is anchored in the DNSSEC root (dnssec-root).
+// - RRset DNSSEC-validates + the signing kid is NOT in it → FAIL (fail-closed: a key
+// outside the DNS-anchored set signed the artifact -- a fraud signal).
+// - HTTPS-served key material DISAGREES with the DNS-anchored key for the same kid →
+// FAIL with an explicit disagreement error (the WebPKI surface is lying).
+// - RRset unavailable (NXDOMAIN / unsigned / resolver error) → the step falls back to the
+// earlier behavior: cryptographically verified against the HTTPS-served keys, labelled
+// trust-on-pin. (A server that publishes no anchor keeps verifying; a stripped answer
+// degrades the LABEL, never fakes a proof.)
 
 // DefaultKeyAnchorZone is the DNSSEC-signed zone under which Whisper publishes its signing
 // keys. It is a convention, not a trust decision -- the records only count once the RRSIG
@@ -152,7 +152,7 @@ func txtStrings(rrs []dns.RR) []string {
 // is not a valid whisper1/p256 key is skipped (never trusted, never fatal).
 func parseIdentityKeyTXT(s string) (JWK, bool) {
 	tags := parseTagList(s)
-	if tags["v"] != "whisper1" || !strings.EqualFold(tags["k"], "p256") {
+	if tags["v"] != whisperKeyVersion || !strings.EqualFold(tags["k"], "p256") {
 		return JWK{}, false
 	}
 	der, err := base64.StdEncoding.DecodeString(tags["p"])
@@ -181,7 +181,7 @@ func parseIdentityKeyTXT(s string) (JWK, bool) {
 // first 4 bytes of SHA-256(name ‖ '\n' ‖ 0x01 ‖ raw-ed25519-public).
 func parseLedgerKeyTXT(s string) (client.LedgerKey, bool) {
 	tags := parseTagList(s)
-	if tags["v"] != "whisper1" || !strings.EqualFold(tags["k"], "ed25519") || tags["n"] == "" {
+	if tags["v"] != whisperKeyVersion || !strings.EqualFold(tags["k"], "ed25519") || tags["n"] == "" {
 		return client.LedgerKey{}, false
 	}
 	der, err := base64.StdEncoding.DecodeString(tags["p"])

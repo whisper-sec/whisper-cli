@@ -11,7 +11,7 @@ binary you get:
 - `whisper-<os>-<arch>.asc` - a detached PGP signature
 - `checksums.txt` - the SHA-256 of every asset in the release, in one file
 
-The one-line installer (`curl get.whisper.online | sh`) verifies the SHA-256 as a **hard
+The one-line installer (`curl -fsSL https://get.whisper.online | sh`) verifies the SHA-256 as a **hard
 gate** - a mismatch aborts the install - and additionally verifies the PGP signature when
 `gpg` is available on the host.
 

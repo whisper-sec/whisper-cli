@@ -18,10 +18,10 @@ import (
 // (the public whisper-ai server at mcp.whisper.security) inside `whisper mcp`, so an
 // agent gets the SAME named tools, resources, and prompts here as there:
 //
-//   TOOLS   query, explain_indicator, explain_schema, read_docs, list_workflows,
-//           run_workflow, text2cypher
-//   RESOURCES  whisper://schema/full, whisper://stats, whisper://quota, whisper://server
-//   PROMPTS    one gallery-driven investigation prompt per catalog workflow
+// TOOLS query, explain_indicator, explain_schema, read_docs, list_workflows,
+// run_workflow, text2cypher
+// RESOURCES whisper://schema/full, whisper://stats, whisper://quota, whisper://server
+// PROMPTS one gallery-driven investigation prompt per catalog workflow
 //
 // The cypher tools + graph-backed resources are keyed (X-API-Key); read_docs, the
 // server descriptor, and prompt discovery are keyless (public). Every tool description

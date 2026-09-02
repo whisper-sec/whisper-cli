@@ -5,19 +5,19 @@
 // Whisper egress (an upstream HTTPS-CONNECT proxy, source-bound to the agent's
 // /128) into a plain, bearer-free LOCAL endpoint a user/agent points its tools at.
 //
-// The design (the decisive, already-de-risked path):
+// The design, and it is the decisive, already-de-risked path:
 //
-//	user's tool ──socks5/http──▶ 127.0.0.1:<freeport>  (this proxy, NO auth)
+//	user's tool ──socks5/http──▶ 127.0.0.1:<freeport> (this proxy, NO auth)
 //	                                     │
 //	                            TLS to egress.whisper.online:443
-//	                                     │  HTTP CONNECT <target>
-//	                                     │  Proxy-Authorization: Basic w:<et_bearer>
+//	                                     │ HTTP CONNECT <target>
+//	                                     │ Proxy-Authorization: Basic w:<et_bearer>
 //	                                     ▼
 //	                            Whisper egress ──▶ internet, sourced from the agent /128
 //
 // Why this shape (and NOT wireproxy / WireGuard): the upstream egress ALREADY
 // mints a working et_ bearer bound to the /128 and speaks the HTTPS-CONNECT proxy
-// form on :443 (proven live). So needs no external binary and no WG peer
+// form on :443 (proven live). So this path needs no external binary and no WG peer
 // issuance - just this small goroutine-based listener. It is byte-identical across
 // Linux / macOS / Windows (pure net + crypto/tls, no cgo, no privilege, no TUN).
 //
@@ -55,7 +55,7 @@ import (
 // splice, lifetime) is parameterised over: the egress tier dials the HTTPS-CONNECT egress
 // (upstream below); the WireGuard tier (internal/wgtun) dials straight through the
 // userspace tunnel's netstack. Both reuse the SAME battle-tested front-end (half-close
-// Stop-drain, Background-rooted lifetime) - DRY, so every fix lands once.
+// Stop-drain, Background-rooted lifetime ) - DRY, so every fix lands once.
 //
 // target is always a NAME or IP literal as the local client gave it; a Dialer that egresses
 // remotely (the egress) forwards the NAME so the far side resolves it from the /128 (no
@@ -72,7 +72,7 @@ type Dialer interface {
 // with StartLocalProxy (egress tier) or StartWithDialer (any Dialer, e.g. the WG tunnel).
 // Stop() is idempotent and blocks until the listener is shut.
 //
-// LIFETIME (the load-bearing fix): the proxy's serving loop is keyed off its
+// LIFETIME, and this is the load-bearing part: the proxy's serving loop is keyed off its
 // OWN context (life/cancel below), cancelled ONLY by Stop(). It is deliberately NOT tied
 // to the short-lived control-plane context the caller used for op:connect + verify - that
 // context is cancelled the instant the control call returns, so binding the proxy to it
@@ -91,6 +91,19 @@ type Proxy struct {
 	onStop   func() // optional extra teardown (e.g. the WG device) - run once, under Stop()
 	dialer   Dialer
 	dialObs  atomic.Pointer[DialObserver] // optional per-dial tap - see SetDialObserver
+
+	// failMu guards the record of why the LAST upstream dial failed. It exists because
+	// neither wire protocol this front-end speaks can carry a reason: SOCKS5 answers with a
+	// one-byte REP code and has no text field at all, and the CONNECT path answers a bodiless
+	// 502. The dialer underneath already works out WHICH layer failed and says so in a
+	// sentence written for a person, and until this record existed that sentence was dropped
+	// on the floor, leaving the CLI to guess. It guessed the same thing every time - that the
+	// session token had been rejected - which on a Mac whose firewall was dropping UDP to the
+	// WireGuard endpoint was the wrong cause AND a remedy that could not possibly work.
+	// Keeping the last one costs a mutex and a string.
+	failMu  sync.Mutex
+	failWhy string
+	failAt  time.Time
 }
 
 // Endpoint is the load-bearing connection string: socks5h://127.0.0.1:<port>.
@@ -166,7 +179,7 @@ type Options struct {
 // returns a running *Proxy. upstreamHostPort is the egress (e.g.
 // "egress.whisper.online:443"); bearer is the et_ token (held in memory only).
 //
-// LIFETIME CONTRACT (the fix): the returned Proxy serves until Stop() - and
+// LIFETIME CONTRACT: the returned Proxy serves until Stop() - and
 // ONLY Stop(). The ctx passed here is NOT a lifetime signal: it is used solely as the
 // parent for input validation/setup. It is the caller's short-lived control-plane ctx
 // (cancelled the moment op:connect + verify return), so tying the proxy's accept loop or
@@ -381,6 +394,8 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 
 	up, err := p.dialer.Dial(ctx, target)
 	if err != nil {
+		// The REP byte below cannot carry WHY, so keep the reason where a caller can read it.
+		p.noteDialFailure(err)
 		p.notifyDial(conn.RemoteAddr(), target, true)
 		socks5Reply(conn, 0x05) // connection refused (a generic, non-leaky failure)
 		return
@@ -389,7 +404,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 	defer up.Close()
 
 	// Success. Reply with a CONCRETE bind addr 0.0.0.0:0 (ATYP=IPv4) - NOT the DOMAIN
-	// type, which makes some clients hang (the gotcha #2). After this byte the
+	// type, which makes some clients hang. After this byte the
 	// stream is a raw splice; no SOCKS codec sits in the path.
 	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0}); err != nil {
 		return
@@ -461,6 +476,9 @@ func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader)
 	}
 	up, err := p.dialer.Dial(ctx, target)
 	if err != nil {
+		// The 502 below is bodiless (a proxy must not put a page in a CONNECT reply), so the
+		// reason goes into the record instead of being lost with it.
+		p.noteDialFailure(err)
 		p.notifyDial(conn.RemoteAddr(), target, true)
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
@@ -526,7 +544,10 @@ func (u *upstream) Dial(ctx context.Context, target string) (net.Conn, error) {
 		tlsConn.Close()
 		// Map the proxy status to a non-leaky message (a 407 = the bearer was rejected).
 		if resp.StatusCode == http.StatusProxyAuthRequired {
-			return nil, errors.New("the Whisper egress rejected this session")
+			// The ONE cause for which "your session was rejected" is true, so this is the one
+			// place that remedy belongs. It used to be printed for every cause instead.
+			return nil, errors.New("the Whisper egress rejected this session's token - " +
+				"run `whisper connect` again to mint a fresh session")
 		}
 		return nil, fmt.Errorf("the Whisper egress refused the connection")
 	}
@@ -641,6 +662,31 @@ func (p *Proxy) SetDialObserver(f DialObserver) {
 		return
 	}
 	p.dialObs.Store(&f)
+}
+
+// noteDialFailure records WHY the most recent upstream dial failed, so a caller that later
+// sees its own request fail through this proxy can report the real cause instead of guessing
+// at one. The dialer's error text is already written for a person and is already non-leaky by
+// contract - it never carries the target, the bearer, or a raw netstack error - which is
+// exactly what makes it worth keeping. A nil error records nothing and clears nothing.
+func (p *Proxy) noteDialFailure(err error) {
+	if err == nil {
+		return
+	}
+	p.failMu.Lock()
+	p.failWhy, p.failAt = err.Error(), time.Now()
+	p.failMu.Unlock()
+}
+
+// LastDialFailure returns the reason the most recent upstream dial failed, and when. A zero
+// time means no dial has ever failed through this proxy: an absence, not a verdict, and a
+// caller must read it as "nothing to add" rather than "everything is fine". The time is what
+// makes the reason safe to use - a caller compares it against the moment its own request
+// started, so a failure from ten minutes ago is never reported as this one's cause.
+func (p *Proxy) LastDialFailure() (string, time.Time) {
+	p.failMu.Lock()
+	defer p.failMu.Unlock()
+	return p.failWhy, p.failAt
 }
 
 // notifyDial invokes the observer when one is installed. A nil observer is the

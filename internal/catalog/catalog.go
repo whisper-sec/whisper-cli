@@ -5,10 +5,10 @@
 // catalog.json) and exposes it to both the CLI (`whisper graph`) and the MCP server
 // (`whisper mcp`). Every entry is one runnable recipe:
 //
-//   - mode "direct": exec.cypher runs as-is against the public graph endpoint
-//     (POST /api/query with {"query","parameters"}), inputs mapped by paramName;
-//   - mode "flow":   a multi-step workflow run by slug via the console gallery/run
-//     endpoint ({"slug","inputs","params"}, Server-Sent-Events stream).
+// - mode "direct": exec.cypher runs as-is against the public graph endpoint
+// (POST /api/query with {"query","parameters"}), inputs mapped by paramName;
+// - mode "flow": a multi-step workflow run by slug via the console gallery/run
+// endpoint ({"slug","inputs","params"}, Server-Sent-Events stream).
 //
 // Each entry carries a docPath; DocsURL() joins it with the catalog's docsBase so
 // every surface (CLI help, MCP tool description) can point at the recipe's docs.
@@ -26,6 +26,23 @@ var catalogJSON []byte
 
 // Fallback endpoints, used only if an (older/trimmed) embedded catalog omits them
 // (Postel: a sane zero-config default, never a panic).
+//
+// fallbackFlowRunURL names console.whisper.security because that is the only host
+// that serves the gallery, and it is the same host client.DefaultConsoleURL dials
+// (pinned by TestFlowRunEndpointNamesTheHostTheClientDials). It was briefly moved to
+// the EDR console on the reading that any console.whisper.security path outside
+// /sign-in and /sign-up is dead. That reading held for PAGES, not for this API.
+// Measured, each real path beside a bogus sibling on the same host so the control
+// discriminates:
+//
+//	GET  console.whisper.security/api/gallery/run        405   (bogus sibling: 404 HTML)
+//	POST console.whisper.security/api/gallery/run        404 {"error":"FlowNotFound"} - the
+//	                                                     handler itself answering, keyless
+//	POST console.whisper.online/api/gallery/run          401 {"code":"UNAUTHENTICATED"}
+//	POST console.whisper.online/api/gallery/<bogus>      401, byte-identical
+//
+// The EDR console answers the same 401 for every path, so 401 there is the blanket
+// middleware and not a route. There is no gallery in that app at all.
 const (
 	fallbackDocsBase   = "https://www.whisper.security"
 	fallbackGraphURL   = "https://graph.whisper.online/api/query"
@@ -53,12 +70,17 @@ type FlowRun struct {
 }
 
 // Entry is one recipe: a named, documented, runnable unit of graph intelligence.
+// Access is the access tier: "keyless" recipes are public graph reads that need no
+// tenant and are offered to everyone; everything else is "keyed" and unlocks with an
+// API key. An entry with no access at all reads as keyed, so the safe tier is what a
+// trimmed or older catalog degrades to.
 type Entry struct {
 	ID      string  `json:"id"`
 	Title   string  `json:"title"`
 	Purpose string  `json:"purpose"`
 	Why     string  `json:"why"`
 	DocPath string  `json:"docPath"`
+	Access  string  `json:"access"`
 	Inputs  []Input `json:"inputs"`
 	Params  []Param `json:"params"`
 	Exec    Exec    `json:"exec"`
@@ -96,6 +118,12 @@ type Exec struct {
 const (
 	ModeDirect = "direct"
 	ModeFlow   = "flow"
+)
+
+// AccessKeyless / AccessKeyed are the two access tiers an Entry.Access can name.
+const (
+	AccessKeyless = "keyless"
+	AccessKeyed   = "keyed"
 )
 
 var (
@@ -173,6 +201,13 @@ func (e Entry) DocsURL() string { return DocsBase() + e.DocPath }
 
 // IsDirect reports whether the entry runs as one Cypher statement (vs a flow).
 func (e Entry) IsDirect() bool { return e.Exec.Mode == ModeDirect }
+
+// IsKeyless reports whether the recipe is on the keyless tier: a public graph read
+// that answers with no API key. Liberal about spelling (case and surrounding space),
+// conservative about the answer: anything it does not recognise is keyed.
+func (e Entry) IsKeyless() bool {
+	return strings.EqualFold(strings.TrimSpace(e.Access), AccessKeyless)
+}
 
 // CamelID is the id in lowerCamelCase ("psl-tldplusone" -> "pslTldplusone"), the
 // form the generated SDK/MCP artifacts use.

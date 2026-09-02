@@ -15,14 +15,14 @@ import (
 
 // endpointHost is the canonical consumer host that serves the Apple .mobileconfig generator
 // and the install landing page. The one-tap profile URL is derived from the minted token.
-// (Phase 1) renamed the product to "Whisper Resolver" on resolver.whisper.online; newly
+// The product was renamed to "Whisper Resolver" on resolver.whisper.online; newly
 // generated URLs point there. The legacy endpoint.whisper.online still serves the same surfaces
 // for installed clients, so URLs handed out earlier keep working.
 const endpointHost = "resolver.whisper.online"
 
 // newDeviceCmd is the parent for the consumer "device" verbs. `whisper device add` is the
 // one-call primitive: reuse the stored login, mint a RESOLVE-ONLY device
-// credential (op:register {device:true}), and hand back every form a person or an LLM
+// credential (op:register {device:true}, the first step), and hand back every form a person or an LLM
 // needs to put a phone/laptop behind Whisper - the DoH URL, the Apple one-tap profile URL,
 // the Android DoT host, and the /128 identity - in a single command.
 func newDeviceCmd() *cobra.Command {

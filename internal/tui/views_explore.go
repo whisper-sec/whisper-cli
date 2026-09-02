@@ -516,7 +516,7 @@ func (v *exploreView) peek() {
 }
 
 // walkIn descends onto the highlighted neighbour. A LIVE deck lands live (with the
-// focusToken discipline); a fixture deck keeps the Phase 1 demo behaviour.
+// focusToken discipline); a fixture deck keeps the demo behaviour.
 func (v *exploreView) walkIn() tea.Cmd {
 	if v.activePane != paneNeighbors {
 		v.paneRight()

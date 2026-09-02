@@ -19,3 +19,13 @@ darwin-amd64
 darwin-arm64
 windows-amd64
 windows-arm64
+
+# Embedded / router tier. The same CGO_ENABLED=0 static cross-compile as the six above, so
+# they need no extra toolchain. `linux-arm` is 32-bit ARMv7 (Go's default GOARM is already
+# 7); `linux-mips` is big-endian and `linux-mipsle` little-endian, which is the split most
+# OpenWrt routers land on.
+linux-arm
+linux-riscv64
+linux-mips
+linux-mipsle
+linux-386

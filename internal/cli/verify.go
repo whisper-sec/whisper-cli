@@ -26,6 +26,7 @@ import (
 func newVerifyCmd() *cobra.Command {
 	var trustless bool
 	var resolver string
+	var signature, payloadOut string
 	cmd := &cobra.Command{
 		Use:   "verify <address|fqdn>",
 		Short: "Verify an address/FQDN is a real Whisper agent (DANE + DNSSEC + reverse-DNS + JWS)",
@@ -42,10 +43,22 @@ func newVerifyCmd() *cobra.Command {
 			"                DNS (_whisper-identity/_whisper-ledger TXT) - the HTTPS-served keys are\n" +
 			"                only a cross-check. The default (no flag) uses Whisper's keyless\n" +
 			"                /verify-identity endpoint, which TRUSTS Whisper to run the chain for you.\n\n" +
+			"  --signature   verify that THIS agent's OWN KEY signed a payload. Resolves that\n" +
+			"                key from its DNSSEC-signed _whisper-agentkey.<fqdn> TXT and checks the\n" +
+			"                compact ES256 JWS against that key and no other - no API key, no HTTPS\n" +
+			"                needed, no fall-back to any fleet key. An agent that publishes no key of\n" +
+			"                its own does not verify, and neither does a payload that fails to name\n" +
+			"                its signer (an \"fqdn\"/\"signer\"/\"address\" claim): one key can be\n" +
+			"                published under two agent names, so only the signed name attributes it.\n" +
+			"                A pass proves the agent's KEY signed the bytes: the agent, or (under\n" +
+			"                hosted custody) Whisper on its behalf.\n\n" +
 			"Exit 0 = a verified Whisper agent; exit 1 = not an agent, or a trust leg did not pass.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			target := args[0]
+			if strings.TrimSpace(signature) != "" {
+				return runSignatureVerify(target, signature, payloadOut, resolver)
+			}
 			if trustless {
 				return runTrustless(target, resolver)
 			}
@@ -62,7 +75,7 @@ func newVerifyCmd() *cobra.Command {
 				return err
 			}
 			if status == 400 {
-				// a 400 is NOT a verdict - it is the server rejecting the input, with a
+				// A 400 is NOT a verdict - it is the server rejecting the input, with a
 				// helpful JSON detail. Surface THAT detail (never the misleading "not a verified
 				// agent" misread of an empty verdict). --json still gets the verbatim body first.
 				if g.jsonOut {
@@ -96,7 +109,11 @@ func newVerifyCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&trustless, "trustless", false,
 		"prove identity independently (DNSSEC root + DANE-EE + transparency); trust NO Whisper API")
 	cmd.Flags().StringVar(&resolver, "resolver", "",
-		"DNS resolver for --trustless (host or host:port); default public DNSSEC-capable resolvers")
+		"DNS resolver for --trustless/--signature (host or host:port); default public DNSSEC-capable resolvers")
+	cmd.Flags().StringVar(&signature, "signature", "",
+		"verify a compact ES256 JWS signed by this agent's own key (file, or - for stdin)")
+	cmd.Flags().StringVar(&payloadOut, "payload-out", "",
+		"with --signature: write the VERIFIED payload here (- for stdout); nothing is written unless it verified")
 	return cmd
 }
 

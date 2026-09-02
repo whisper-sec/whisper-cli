@@ -46,7 +46,7 @@ type identityDocResult struct {
 // proven by DNSSEC/DANE, so a valid signature over a mismatched claim is a FAIL. A key we
 // cannot fetch is a SKIP.
 //
-// pins carries EVERY published 3 1 1 association (a rotation overlap publishes two).
+// Pins carries EVERY published 3 1 1 association (a rotation overlap publishes two).
 // The fetch itself pins the TLS dial to pins[0] only (a soft SKIP on a transport mismatch, not a
 // FAIL -- see below); the identity_doc's OWN tlsa claim is checked for membership in the FULL set,
 // so a legitimate rotation never FAILs this step just because the doc echoes a different (but
@@ -73,7 +73,7 @@ func verifyIdentityDoc(ctx context.Context, f Fetcher, hostport, fqdn, addr stri
 	anchored := dnsKeys != nil && len(dnsKeys.JWKS) > 0
 	var keys JWKSet
 	if anchored {
-		// fail-closed: only the DNSSEC-anchored keys may sign the identity document.
+		// Fail-closed: only the DNSSEC-anchored keys may sign the identity document.
 		keys = dnsKeys.JWKS
 		if _, ok := keys[kid]; !ok {
 			return identityDocResult{status: StatusFail, detail: fmt.Sprintf(

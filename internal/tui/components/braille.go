@@ -23,10 +23,10 @@ import (
 // is the standard Unicode-braille dot numbering (NOT raster order): the low six dots are
 // 1,2,3 (left col top→bottom) and 4,5,6 (right col), with 7,8 the bottom pair.
 //
-//	dot layout:   (0,0)=•1  (1,0)=•4
-//	              (0,1)=•2  (1,1)=•5
-//	              (0,2)=•3  (1,2)=•6
-//	              (0,3)=•7  (1,3)=•8
+//	dot layout: (0,0)=•1 (1,0)=•4
+//	              (0,1)=•2 (1,1)=•5
+//	              (0,2)=•3 (1,2)=•6
+//	              (0,3)=•7 (1,3)=•8
 var brailleDot = [2][4]rune{
 	{0x01, 0x02, 0x04, 0x40}, // left column, rows top→bottom
 	{0x08, 0x10, 0x20, 0x80}, // right column

@@ -15,7 +15,7 @@ import (
 
 // This file is PURE DATA for the EXPLORE (graph-explorer) view: the DECK design
 // (Miller columns TRAIL | FOCUS | EDGES-by-type -> NEIGHBORS | preview). It carries no
-// I/O and no network; Phase 2 fills these shapes from graph.whisper.security. Everything
+// I/O and no network; the live pass fills these shapes from the graph. Everything
 // here is deterministic so the renderer is golden-testable.
 
 // graphNode is one node you can stand on or walk to. A node is MULTI-LABEL: it can be
@@ -91,7 +91,7 @@ const (
 	paneResult
 )
 
-// exploreOverlay is a modal shell stacked over the deck (Phase 1 renders them static).
+// exploreOverlay is a modal shell stacked over the deck (rendered static for now).
 type exploreOverlay int
 
 const (
@@ -422,7 +422,7 @@ func applicableCatalog(labels []string) []catalogVerb {
 
 // normalizeRef is the Postel-liberal reference parser for JUMP: it strips schemes, a
 // trailing dot, and a path, then detects the node kind. It returns the detected label and
-// the cleaned value (Phase 2 turns the label into the MATCH property key).
+// the cleaned value (the live pass turns the label into the MATCH property key).
 func normalizeRef(s string) (kind, value string) {
 	v := strings.TrimSpace(s)
 	// strip common schemes.

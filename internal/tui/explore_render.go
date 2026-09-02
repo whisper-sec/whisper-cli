@@ -487,7 +487,7 @@ func confBar(conf float64, cells int, th *theme.Theme) string {
 // --- JUMP frame (Screen 4) -------------------------------------------------------------
 
 // renderJumpFrame is the JUMP overlay shell (Postel-liberal search) with the your-agents
-// bridge (land on an agent /128 as a graph node). Phase 1 renders it static.
+// bridge (land on an agent /128 as a graph node). Rendered static for now.
 func (v *exploreView) renderJumpFrame(w, h int) string {
 	th := v.app.th
 	kind, _ := normalizeRef(v.jump.query)

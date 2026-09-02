@@ -77,7 +77,7 @@ func (c *Client) fetchEchoIP(ctx context.Context, proxyURL *url.URL) (string, er
 		ForceAttemptHTTP2:     true,
 		TLSHandshakeTimeout:   15 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
+		DialContext:           guardedDial(&net.Dialer{Timeout: 15 * time.Second}),
 	}
 	httpc := &http.Client{Transport: tr, Timeout: 25 * time.Second}
 
@@ -91,14 +91,26 @@ func (c *Client) fetchEchoIP(ctx context.Context, proxyURL *url.URL) (string, er
 
 	resp, err := httpc.Do(req)
 	if err != nil {
-		// A proxy/egress failure: a friendly, non-leaky message (the proxy URL would
-		// carry a 127.0.0.1 port only, but keep it out of the error regardless).
-		return "", fmt.Errorf("could not reach the Whisper egress to verify your address")
+		// Name the failure truthfully (never one opaque line for every cause): through the
+		// proxy, distinguish a dead LOCAL proxy from a refused UPSTREAM egress leg - a
+		// session/token rejection is NOT "could not reach", and telling the user to debug
+		// their network for an auth problem is a false trail. All messages stay non-leaky
+		// (never the proxy URL/port, never a body).
+		if proxyURL != nil {
+			return "", classifyProxiedEchoFailure(proxyURL)
+		}
+		return "", fmt.Errorf("could not reach the egress verification service - check your network and try again")
 	}
 	defer resp.Body.Close()
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 	if err != nil {
 		return "", fmt.Errorf("reading the egress verification reply failed")
+	}
+	if resp.StatusCode == http.StatusProxyAuthRequired {
+		// 407 is an AUTH verdict, not unavailability: the egress rejected this session's
+		// token. Say so, with the remediation (a fresh connect mints a fresh session).
+		return "", &ProblemError{Status: http.StatusProxyAuthRequired,
+			Detail: "the Whisper egress rejected this session's token (407) - run `whisper connect` again to mint a fresh session"}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return "", &ProblemError{Status: resp.StatusCode, Detail: "the egress verification endpoint was unavailable"}
@@ -108,6 +120,34 @@ func (c *Client) fetchEchoIP(ctx context.Context, proxyURL *url.URL) (string, er
 		return "", fmt.Errorf("the egress verification reply was unreadable")
 	}
 	return ip, nil
+}
+
+// classifyProxiedEchoFailure turns a failed through-proxy echo fetch into the most
+// truthful error the client can determine, with one cheap local check: does the local
+// proxy still accept a TCP connection at all?
+//
+// - It does NOT: the local session is gone (a crashed/stopped daemon) - say that, with
+// the remediation, instead of blaming the network.
+// - It DOES: the local proxy is alive, so the failure happened on the UPSTREAM egress
+// leg. The dominant real cause is the egress refusing the session's et_ token (it
+// answers the tunnel CONNECT with 407, which the local proxy surfaces as a refused
+// connection) - name the auth/token possibility distinctly so the user retries
+// `whisper connect` rather than debugging their network.
+//
+// Never leaks the proxy URL/host/port in any message.
+func classifyProxiedEchoFailure(proxyURL *url.URL) error {
+	host := proxyURL.Host
+	if host != "" {
+		conn, derr := net.DialTimeout("tcp", host, 2*time.Second)
+		if derr == nil {
+			_ = conn.Close()
+			return &ProblemError{Status: 502,
+				Detail: "the Whisper egress did not accept this session while verifying your address - " +
+					"the session token may have been rejected; run `whisper connect` again to mint a fresh session"}
+		}
+	}
+	return &ProblemError{Status: 502,
+		Detail: "the local Whisper proxy is not answering - run `whisper connect` again to bring it back up"}
 }
 
 // parseEchoIP reads the observed IP from the echo body, accepting BOTH a JSON

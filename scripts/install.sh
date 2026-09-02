@@ -1,12 +1,12 @@
 #!/bin/sh
 # -----------------------------------------------------------------------------
-# install.sh - the ONE Whisper installer (POSIX).   curl get.whisper.online | sh
+# install.sh - the ONE Whisper installer (POSIX).   curl -fsSL https://get.whisper.online | sh
 #
 #   curl -H "X-API-Key: whisper_live_xxx" https://get.whisper.online | sh   # zero prompts
 #   curl https://get.whisper.online | sh -s -- whisper_live_xxx              # key as first arg
 #   curl https://get.whisper.online | sh                                     # then: whisper
 #
-# This is the SAME installer that get.whisper.online serves - it is published here,
+# This is the SAME installer that https://get.whisper.online serves - it is published here,
 # in the public whisper-cli repo, so the entire install path is inspectable. By
 # default it fetches the SIGNED binary straight from this repo's GitHub Releases:
 #
@@ -113,10 +113,32 @@ detect_platform() {  # → sets OS + ARCH, or dies with a kind message
     Darwin) OS=darwin ;;
     *)      die "no Whisper binary for your system ($_os) yet - we ship Linux and macOS. Tell us: hello@whisper.security" ;;
   esac
+  # The map mirrors platforms.txt exactly. The second half is the embedded/router tier:
+  # 32-bit ARM, RISC-V, both MIPS endiannesses and legacy x86. Linux reports MIPS endianness
+  # in `uname -m` itself (mips vs mipsel), so no probe is needed. armv8l is a 32-bit userland
+  # on 64-bit silicon, so it takes the arm binary, not arm64.
   case "$_arch" in
-    x86_64|amd64)   ARCH=amd64 ;;
-    aarch64|arm64)  ARCH=arm64 ;;
-    *)              die "no Whisper binary for your CPU ($_arch) yet - we ship amd64 and arm64. Tell us: hello@whisper.security" ;;
+    x86_64|amd64)             ARCH=amd64 ;;
+    aarch64|arm64)            ARCH=arm64 ;;
+    armv7l|armv7|armv8l|arm)  ARCH=arm ;;
+    riscv64)                  ARCH=riscv64 ;;
+    mips)                     ARCH=mips ;;
+    mipsel|mipsle)            ARCH=mipsle ;;
+    i386|i486|i586|i686|x86)  ARCH=386 ;;
+    armv[45]*|armv6*)
+      # Our arm build is ARMv7 (Go's default GOARM=7), so an ARMv6 or older core would take
+      # an illegal instruction. Say that, rather than hand it a binary that dies at the
+      # first hard-float opcode.
+      die "your CPU ($_arch) is older than ARMv7, and the Whisper arm binary is built for ARMv7 and up. Tell us what you are running: hello@whisper.security" ;;
+    *)
+      die "no Whisper binary for your CPU ($_arch) yet. We ship amd64, arm64, arm (ARMv7), riscv64, mips, mipsle and 386 on Linux, and amd64 + arm64 on macOS. Tell us: hello@whisper.security" ;;
+  esac
+  # The embedded tier is Linux-only: platforms.txt has no darwin-mips and so on, so a mac
+  # that somehow reported one of those arches would otherwise be sent to a download path
+  # that cannot exist.
+  case "$OS-$ARCH" in
+    linux-*|darwin-amd64|darwin-arm64) : ;;
+    *) die "no Whisper binary for $OS on $_arch yet. On macOS we ship amd64 and arm64. Tell us: hello@whisper.security" ;;
   esac
 }
 
@@ -353,7 +375,7 @@ save_key() {
   [ -n "$_k" ] || _k="$ARG_KEY"
   [ -n "$_k" ] || _k="${WHISPER_API_KEY:-}"
   if [ -n "$_k" ]; then
-    ( umask 077; mkdir -p "$HOME/.config/whisper-ns" && printf '%s' "$_k" > "$HOME/.config/whisper-ns/key" ) \
+    ( umask 077; mkdir -p "$HOME/.config/whisper" && printf '%s' "$_k" > "$HOME/.config/whisper/key" ) \
       2>/dev/null || vsay "couldn't save the key file - the binary will ask."
   fi
 }

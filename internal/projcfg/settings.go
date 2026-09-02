@@ -19,14 +19,14 @@ import (
 // permissions, model, other hooks, other env vars all survive untouched.
 //
 // What we own:
-//   - env.HTTP_PROXY / env.HTTPS_PROXY  = http://127.0.0.1:<port>  (Claude Code speaks
-//     HTTP-CONNECT, not SOCKS - the local proxy serves both, we point CC at the CONNECT form)
-//   - env.ALL_PROXY                     = socks5h://127.0.0.1:<port>  (for any SOCKS-aware
-//     subprocess CC spawns - git/curl/Bash tools)
-//   - env.NO_PROXY                      = localhost,127.0.0.1,::1
-//   - hooks.SessionStart                = a best-effort `whisper connect --ensure` re-ensure
-//     (the daemon is started by init and stays up; this is the safety-net re-ensure that
-//     CANNOT block startup but runs before the first API call).
+// - env.HTTP_PROXY / env.HTTPS_PROXY = http://127.0.0.1:<port> (Claude Code speaks
+// HTTP-CONNECT, not SOCKS - the local proxy serves both, we point CC at the CONNECT form)
+// - env.ALL_PROXY = socks5h://127.0.0.1:<port> (for any SOCKS-aware
+// subprocess CC spawns - git/curl/Bash tools)
+// - env.NO_PROXY = localhost,127.0.0.1,::1
+// - hooks.SessionStart = a best-effort `whisper connect --ensure` re-ensure
+// (the daemon is started by init and stays up; this is the safety-net re-ensure that
+// CANNOT block startup but runs before the first API call).
 
 // whisperHookMarker tags the SessionStart hook command we manage so a re-init updates it
 // in place (and never duplicates it) and a teardown can find it. It is a literal substring

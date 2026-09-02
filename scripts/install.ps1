@@ -1,10 +1,10 @@
 # -----------------------------------------------------------------------------
 # install.ps1 - the ONE Whisper installer (Windows).
 #
-#   irm get.whisper.online/install.ps1 | iex
-#   irm get.whisper.online | iex                 # bare form works too (UA-detected)
+#   irm https://get.whisper.online/install.ps1 | iex
+#   irm https://get.whisper.online | iex         # bare form works too (UA-detected)
 #
-# This is the SAME installer that get.whisper.online serves - published here, in the
+# This is the SAME installer that https://get.whisper.online serves - published here, in the
 # public whisper-cli repo, so the entire install path is inspectable. By default it
 # fetches the SIGNED whisper.exe straight from this repo's GitHub Releases:
 #
@@ -120,9 +120,9 @@ try {
     # Clear the Mark-of-the-Web so SmartScreen doesn't block first run.
     Unblock-File -Path $dest -ErrorAction SilentlyContinue
 
-    # --- key handoff: a server-injected $env:WHISPER_KEY → %APPDATA%\whisper-ns\key
+    # --- key handoff: a server-injected $env:WHISPER_KEY -> %APPDATA%\whisper\key
     if ($env:WHISPER_KEY) {
-        $keyDir = Join-Path $env:APPDATA 'whisper-ns'
+        $keyDir = Join-Path $env:APPDATA 'whisper'
         New-Item -ItemType Directory -Force -Path $keyDir | Out-Null
         # -NoNewline so the saved key is byte-for-byte what the binary expects.
         [System.IO.File]::WriteAllText((Join-Path $keyDir 'key'), $env:WHISPER_KEY)

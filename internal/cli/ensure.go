@@ -20,12 +20,12 @@ import (
 // ensure.go is the IDEMPOTENT, detached-daemon backbone behind `whisper connect --ensure`
 // and `whisper init claude`:
 //
-//   - probeWhisperProxy   - is a LIVE whisper proxy already serving 127.0.0.1:<port>? (a real
-//     SOCKS5 handshake, so we never reuse a random foreign listener as if it were ours)
-//   - ensureDaemon        - reuse a live one (exit 0), else spawn the tunnel DETACHED (setsid /
-//     DETACHED_PROCESS), write `.whisper/connect.pid`, and WAIT (bounded) until the port is
-//     live so --ensure is synchronous-enough for the user/hook.
-//   - runConnectDaemon    - the hidden in-process daemon body the re-exec lands in: bring the
+// - probeWhisperProxy - is a LIVE whisper proxy already serving 127.0.0.1:<port>? (a real
+// SOCKS5 handshake, so we never reuse a random foreign listener as if it were ours)
+// - ensureDaemon - reuse a live one (exit 0), else spawn the tunnel DETACHED (setsid /
+// DETACHED_PROCESS), write `.whisper/connect.pid`, and WAIT (bounded) until the port is
+// live so --ensure is synchronous-enough for the user/hook.
+// - runConnectDaemon - the hidden in-process daemon body the re-exec lands in: bring the
 // tunnel up on the PINNED port and hold it (Background-rooted proxy + auto-reconnect).
 //
 // The daemon is the same op:connect → local proxy/tunnel the interactive `connect` uses, only
@@ -41,10 +41,13 @@ import (
 const ensureProbeTimeout = 2 * time.Second
 
 // ensureStartupBudget bounds how long the PARENT waits for the freshly-spawned daemon to
-// bring the port live before returning. 10s comfortably covers op:connect + verify on a warm
+// come up VERIFIED before returning. 10s comfortably covers op:connect + verify on a warm
 // path; on a slow path the parent returns a clear (non-fatal for a hook) note and the daemon
-// keeps coming up in the background.
-const ensureStartupBudget = 10 * time.Second
+// keeps coming up (and retrying) in the background. A var so a test can shrink the wait.
+var ensureStartupBudget = 10 * time.Second
+
+// ensurePollInterval is the parent's poll cadence while waiting for the daemon.
+const ensurePollInterval = 150 * time.Millisecond
 
 // probeWhisperProxy reports whether a LIVE whisper local proxy is already serving
 // 127.0.0.1:<port>. It does a real SOCKS5 no-auth handshake (greeting → method-select): our
@@ -90,13 +93,23 @@ func readFull(conn net.Conn, buf []byte) (int, error) {
 
 // ensureDaemon is the idempotent core of `--ensure`. Given the resolved project config, it:
 //
-//  1. PROBE: if a live whisper proxy already serves cfg.Port, it's already ensured → return
-//     (port, alreadyLive=true, nil). Zero work, zero spawn - safe to call on every SessionStart.
-//  2. SPAWN: else re-exec THIS binary in the hidden daemon mode, DETACHED (setsid /
-//     DETACHED_PROCESS), so the tunnel outlives this command and the launching shell. Write the
-//     child PID to `.whisper/connect.pid`.
-//  3. WAIT: poll the port (bounded by ensureStartupBudget) until the daemon's proxy is live, so
-//     --ensure returns only once egress is actually usable (synchronous-enough for the user).
+// 1. PROBE: if a live whisper proxy already serves cfg.Port AND the session registry holds a
+// VERIFIED session for that port, it's already ensured → (port, alreadyLive=true, nil).
+// Zero work, zero spawn - safe to call on every SessionStart.
+// 2. SPAWN: else (after sweeping any stale registry record that still claims the dead port)
+// re-exec THIS binary in the hidden daemon mode, DETACHED (setsid / DETACHED_PROCESS), so
+// the tunnel outlives this command and the launching shell. Write the child PID to
+// `.whisper/connect.pid`.
+// 3. WAIT: poll (bounded by ensureStartupBudget) until the daemon is live AND VERIFIED.
+//
+// THE VERIFIED GATE (the false-"up" fix): the daemon's proxy binds the port BEFORE its egress
+// verify runs (verify fetches the echo THROUGH the proxy), so a bare port-probe can see "live"
+// during a verify that is about to FAIL - the daemon then tears down and the parent has already
+// printed "connection: up" for a dead port. The port probe alone is therefore NEVER enough to
+// report up. The verified marker is the session registry record: every holder (daemon,
+// interactive connect, guided hold) writes it only AFTER its verify passes, and removes it on
+// teardown - so probe+record together mean "serving AND verified", reusing the one mechanism
+// that already exists rather than inventing a second handshake.
 //
 // It is a package var so command tests can stub the spawn (assert it WOULD start without
 // forking a real daemon).
@@ -107,24 +120,82 @@ var ensureDaemon = func(p projcfg.Paths, cfg projcfg.Config) (port int, alreadyL
 			Detail: "no port in .whisper/config - re-run `whisper init claude`"}
 	}
 	if probeWhisperProxy(port) {
-		return port, true, nil
+		if verifiedSessionOnPort(port) {
+			return port, true, nil
+		}
+		// A whisper proxy answers but no verified session backs it yet - most likely a daemon
+		// still inside its verify (a concurrent ensure, or a slow echo). The port is held, so
+		// spawning a duplicate is pointless; wait (bounded) for the verified marker instead of
+		// declaring up early.
+		if waitForVerifiedProxy(port) {
+			return port, false, nil
+		}
+		return port, false, ensureNotVerifiedErr(port)
 	}
+	// Nothing answers on the port, so any registry record still claiming it is a leftover from
+	// a crashed/killed holder. Sweep it NOW, before the spawn - otherwise the stale record
+	// could satisfy the verified gate while the fresh daemon is still mid-verify, reopening
+	// the exact false-"up" race this gate exists to close.
+	sweepStaleSessionRecordsForPort(port)
 	if err := spawnConnectDaemon(p); err != nil {
 		return port, false, err
 	}
-	// Wait until the daemon's proxy is live (bounded). A SessionStart hook can tolerate the
-	// daemon still coming up - but the common path is sub-second once op:connect returns.
-	deadline := time.Now().Add(ensureStartupBudget)
-	for time.Now().Before(deadline) {
-		if probeWhisperProxy(port) {
-			return port, false, nil
-		}
-		time.Sleep(150 * time.Millisecond)
+	// Wait until the daemon is live AND verified (bounded). The common path is sub-second
+	// once op:connect returns; a daemon whose verify fails retries with backoff (see
+	// runConnectDaemon), so a slow success can also land after this budget - the hook (or a
+	// later --ensure) then finds it.
+	if waitForVerifiedProxy(port) {
+		return port, false, nil
 	}
-	// Not live within budget: not necessarily fatal (the daemon may still be finishing
-	// op:connect), but we report it so a human run sees an honest result.
-	return port, false, &client.ProblemError{Status: 504,
-		Detail: fmt.Sprintf("the Whisper connection didn't come up on port %d within %s - check `whisper status`", port, ensureStartupBudget)}
+	return port, false, ensureNotVerifiedErr(port)
+}
+
+// waitForVerifiedProxy polls (bounded by ensureStartupBudget) until the port answers the
+// SOCKS5 probe AND the session registry carries a verified session for it - the two together
+// are the honest "up". Returns false when the budget expires first.
+func waitForVerifiedProxy(port int) bool {
+	deadline := time.Now().Add(ensureStartupBudget)
+	for {
+		if probeWhisperProxy(port) && verifiedSessionOnPort(port) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(ensurePollInterval)
+	}
+}
+
+// verifiedSessionOnPort reports whether the session registry holds a record for a
+// session serving this local port. Records are written only AFTER a session's egress verify
+// passes, so a record is the verified marker the ensure gate needs.
+func verifiedSessionOnPort(port int) bool {
+	for _, rec := range readSessionRecords() {
+		if rec.Port == port {
+			return true
+		}
+	}
+	return false
+}
+
+// sweepStaleSessionRecordsForPort removes registry records claiming a port whose proxy does
+// not answer - leftovers of a crashed/killed holder. Best-effort hygiene (the same lazy sweep
+// findLiveSession and status apply), and load-bearing before a spawn: a stale record must
+// never stand in as the verified marker for a daemon that hasn't verified yet.
+func sweepStaleSessionRecordsForPort(port int) {
+	for _, rec := range readSessionRecords() {
+		if rec.Port == port && !probeWhisperProxy(rec.Port) {
+			removeSessionRecord(rec.Addr)
+		}
+	}
+}
+
+// ensureNotVerifiedErr is the honest not-up-yet result: the connection did not come up
+// VERIFIED within the budget. Clear and actionable, never a false success - the daemon may
+// still be retrying in the background, and `whisper status` now shows the real state.
+func ensureNotVerifiedErr(port int) error {
+	return &client.ProblemError{Status: 504,
+		Detail: fmt.Sprintf("the Whisper connection didn't come up verified on port %d within %s - the daemon may still be connecting or retrying; check `whisper status`", port, ensureStartupBudget)}
 }
 
 // spawnConnectDaemon re-execs this binary in the hidden `__connect-daemon` mode, DETACHED, so

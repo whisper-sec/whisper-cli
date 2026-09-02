@@ -12,10 +12,10 @@ import (
 // Event is the ONE internal activity model, normalised so views never reason about the
 // µs-vs-ms split between the two surfaces:
 //
-//   - the SSE stream carries ts/latency/duration in MICROSECONDS (and alloc.allocated_at
-//     in ms); a live conn event has NO qname (the chain is split across two events).
-//   - the op:logs poll carries latency_ms/duration_ms in MILLISECONDS and a single
-//     `peer` column, with the whole chain (client_src + qname + peer) on ONE row.
+// - the SSE stream carries ts/latency/duration in MICROSECONDS (and alloc.allocated_at
+// in ms); a live conn event has NO qname (the chain is split across two events).
+// - the op:logs poll carries latency_ms/duration_ms in MILLISECONDS and a single
+// `peer` column, with the whole chain (client_src + qname + peer) on ONE row.
 //
 // We store time in microseconds internally (TsMicros) and format on render. The
 // monitor (step C) stitches a live conn's qname from a per-agent dns join cache; an
@@ -161,11 +161,11 @@ func logTsMicros(rec map[string]any) int64 {
 
 func splitPeer(peer string) (host string, port int) {
 	// Liberal-in across every form the poll might emit:
-	//   - bracketed IPv6 with a port:  [2001:db8::1]:443  → host "2001:db8::1", port 443
-	//   - bracketed IPv6, no port:     [2001:db8::1]      → host "2001:db8::1"
-	//   - host/IPv4 with a port:       1.2.3.4:443 / a.b:443
-	//   - a BARE IPv6 literal:         2001:db8::1        → host, NO port (≥2 colons)
-	//   - host only:                   example.com
+	// - bracketed IPv6 with a port: [2001:db8::1]:443 → host "2001:db8::1", port 443
+	// - bracketed IPv6, no port: [2001:db8::1] → host "2001:db8::1"
+	// - host/IPv4 with a port: 1.2.3.4:443 / a.b:443
+	// - a BARE IPv6 literal: 2001:db8::1 → host, NO port (≥2 colons)
+	// - host only: example.com
 	// Conservative-emit: a bare IPv6 literal's trailing group is NEVER mistaken for a
 	// port (that was a real foot-gun); a port is only split off after a closing bracket
 	// or when exactly one colon is present.

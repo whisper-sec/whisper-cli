@@ -275,8 +275,8 @@ func TestObserveBucketsByEventTime(t *testing.T) {
 // TestTenantFromFQDN pins the tenant-handle derivation (<agent>.<t…>.agents.<zone>).
 func TestTenantFromFQDN(t *testing.T) {
 	cases := map[string]string{
-		"a0000.t00000000000000000000000000000001.agents.whisper.online.": "t00000000000000000000000000000001",
-		"a0000.t00000000000000000000000000000001.agents.whisper.online":  "t00000000000000000000000000000001",
+		"a0000.t0123456789abcdef0123456789abcdef.agents.whisper.online.": "t0123456789abcdef0123456789abcdef",
+		"a0000.t0123456789abcdef0123456789abcdef.agents.whisper.online":  "t0123456789abcdef0123456789abcdef",
 		"example.com.":         "",
 		"":                     "",
 		"a.b.c.d":              "", // second label too short / not t-prefixed
@@ -296,7 +296,7 @@ func TestFrameNeverWiderThanTerminal(t *testing.T) {
 	a.agents = []model.Agent{
 		{ID: "agent-long", Address: "2a04:2a01:0:1::1", State: "active",
 			Label: "a-very-long-label-that-wants-to-overflow", Detailed: true,
-			FQDN: "a0000000000000001.t00000000000000000000000000000001.agents.whisper.online."},
+			FQDN: "a0000000000000001.t0123456789abcdef0123456789abcdef.agents.whisper.online."},
 	}
 	a.agentsView.syncRows()
 	for m := modeAgents; m <= modeConfig; m++ {

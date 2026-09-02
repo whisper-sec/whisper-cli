@@ -313,7 +313,8 @@ func TestNetDialer_HonoursContextCancel(t *testing.T) {
 	}
 	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
 	t.Cleanup(dev.Close)
-	d := &netDialer{tnet: tnet, timeout: 2 * time.Second}
+	d := &netDialer{stack: tnet, timeout: 2 * time.Second,
+		names: &nameService{prefix: netip.MustParsePrefix(WellKnownNAT64Prefix)}}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // already cancelled

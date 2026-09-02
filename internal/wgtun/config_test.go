@@ -148,7 +148,7 @@ func TestConfigValidate_RejectsMissing(t *testing.T) {
 }
 
 // TestUapiConfig_ContainsKeysAndKeepalive: the UAPI doc carries the private key, the peer key,
-// the endpoint, ::/0 + 0.0.0.0/0 allowed-ips, and the keepalive - the exact wireguard-go form.
+// the endpoint, the ::/0 allowed-ip, and the keepalive - the exact wireguard-go form.
 func TestUapiConfig_ContainsKeysAndKeepalive(t *testing.T) {
 	cfg := Config{
 		PrivateKeyHex:      strings.Repeat("11", 32),
@@ -163,7 +163,6 @@ func TestUapiConfig_ContainsKeysAndKeepalive(t *testing.T) {
 		"public_key=" + cfg.ServerPublicKeyHex,
 		"endpoint=box.example:51826",
 		"allowed_ip=::/0",
-		"allowed_ip=0.0.0.0/0",
 		"persistent_keepalive_interval=25",
 	} {
 		if !strings.Contains(doc, want) {
@@ -194,5 +193,41 @@ func TestResolveEndpoint(t *testing.T) {
 	// a malformed endpoint errors (not a panic)
 	if _, err := resolveEndpoint("not a host port"); err == nil {
 		t.Fatal("expected error for malformed endpoint")
+	}
+}
+
+// TestUapiConfig_ClaimsOnlyTheFamilyTheInterfaceCanSource is the regression, and it is
+// the assertion that fails if somebody re-adds the wider grant "to be safe".
+//
+// The tunnel is handed one address. A v6 /128 gives the netstack a v6 route and no v4 route at
+// all, so a 0.0.0.0/0 claim on the box peer can never select a peer for an outbound packet - and
+// inbound it is a live cryptokey-routing grant to accept v4-sourced packets the stack must drop.
+// The client must claim exactly what the server granted, which is what this pins. A v4-addressed
+// interface (which nothing issues today) gets the mirror-image answer, so the rule is stated once
+// and holds both ways rather than being a special case for the address we happen to hand out.
+func TestUapiConfig_ClaimsOnlyTheFamilyTheInterfaceCanSource(t *testing.T) {
+	base := Config{
+		PrivateKeyHex:      strings.Repeat("11", 32),
+		ServerPublicKeyHex: strings.Repeat("22", 32),
+		Endpoint:           "box.example:51826",
+	}
+
+	v6 := base
+	v6.Address = mustAddr(t, "2a04:2a01:4::7")
+	doc := uapiConfig(v6)
+	if !strings.Contains(doc, "allowed_ip=::/0\n") {
+		t.Fatalf("the box peer lost its v6 default route - every destination would black-hole:\n%s", doc)
+	}
+	if strings.Contains(doc, "0.0.0.0/0") {
+		t.Fatalf("the client claimed all of IPv4 on an interface with no v4 address. The "+
+			"server grants ::/0; widening it here routes nothing and accepts a family the stack "+
+			"drops:\n%s", doc)
+	}
+
+	v4 := base
+	v4.Address = mustAddr(t, "203.0.113.7")
+	doc = uapiConfig(v4)
+	if !strings.Contains(doc, "allowed_ip=0.0.0.0/0\n") || strings.Contains(doc, "::/0") {
+		t.Fatalf("a v4-addressed interface must claim the v4 default route and only that:\n%s", doc)
 	}
 }

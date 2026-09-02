@@ -518,7 +518,7 @@ func TestProxy_EndpointShapeAndStop(t *testing.T) {
 	}
 }
 
-// TestProxy_SurvivesControlCtxCancel is THE lifetime regression guard: the local
+// TestProxy_SurvivesControlCtxCancel is THE proxy-lifetime regression guard: the local
 // proxy MUST NOT die when the short-lived control-plane ctx (the one used for op:connect +
 // verify) is cancelled. We start the proxy on a control ctx, CANCEL that ctx, and then -
 // AFTER the cancel - assert the proxy still ACCEPTS a new local client AND streams bytes

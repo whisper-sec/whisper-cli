@@ -20,11 +20,11 @@ import (
 // flurry is dropped in the fold), and fail-open (an error paints the calm degraded
 // state, never a hang or four dead spinners).
 //
-// The live contract, validated against graph.whisper.security (Phase 0):
-//   - every node keys its canonical value on the `name` property (HOSTNAME, IPV4,
-//     IPV6, ASN, PREFIX alike); `{address:...}` would be an unindexed full scan
-//   - rows come back as column-keyed objects with {rowCount, executionTimeMs} stats
-//   - $-parameters are bound server-side, so a value never touches the query text
+// The live contract, validated against the graph:
+// - every node keys its canonical value on the `name` property (HOSTNAME, IPV4,
+// IPV6, ASN, PREFIX alike); `{address:...}` would be an unindexed full scan
+// - rows come back as column-keyed objects with {rowCount, executionTimeMs} stats
+// - $-parameters are bound server-side, so a value never touches the query text
 
 // exCypherFocus resolves a node's labels + properties in one anchored round-trip.
 const exCypherFocus = "MATCH (n {name:$v}) RETURN labels(n) AS labels, properties(n) AS props LIMIT 1"
@@ -195,8 +195,25 @@ func nodeFromInspect(value string, rec map[string]any) graphNode {
 		Labels: labels,
 		Value:  value,
 		Props:  curateProps(props),
-		Band:   normalizeBand(firstStr(props, "verdictLevel", "threatLevel", "overallThreatLevel")),
+		Band:   bandFromVerdict(props),
 	}
+}
+
+// bandFromVerdict derives the deck band from the node's RECONCILED verdict, never raw
+// feed evidence: verdictLevel first (threatLevel/overallThreatLevel only as
+// legacy fallbacks), and an explicit isThreat:false clamps any raw-evidence residue
+// down to BENIGN so an allowlisted resolver or multi-tenant apex (github.com is
+// verdictLevel INFO + threatScore 40) never reads as an alert. threatScore is
+// evidence, not severity; it never enters this decision.
+func bandFromVerdict(props map[string]any) string {
+	band := normalizeBand(firstStr(props, "verdictLevel", "threatLevel", "overallThreatLevel"))
+	if isThreat, ok := props["isThreat"].(bool); ok && !isThreat {
+		// the graph reconciled this node as not-a-threat: never alert on it
+		if band == "SUSPICIOUS" || band == "MALICIOUS" || band == "UNKNOWN" {
+			return "BENIGN"
+		}
+	}
+	return band
 }
 
 // edgesFromRecords maps the bounded-edges rows to edge groups. An inbound group reads
@@ -376,11 +393,12 @@ func reproCypher(cv catalogVerb, value string) string {
 
 // normalizeBand maps the live graph's threat vocabulary onto the deck's four bands.
 // NONE / DERIVED mean "no verdict", which is honestly NOT-ASSESSED (""), never green.
+// INFO is a verdictLevel word: an informational verdict is clean, not unknown.
 func normalizeBand(s string) string {
 	switch strings.ToUpper(strings.TrimSpace(s)) {
 	case "", "NONE", "DERIVED", "NULL":
 		return ""
-	case "CLEAN", "BENIGN", "OK", "SAFE", "LOW", "WHITELIST", "ALLOWLISTED":
+	case "CLEAN", "BENIGN", "OK", "SAFE", "LOW", "INFO", "WHITELIST", "ALLOWLISTED":
 		return "BENIGN"
 	case "MEDIUM", "SUSPICIOUS", "SUSP", "WARN", "WARNING":
 		return "SUSPICIOUS"
@@ -424,9 +442,24 @@ func curateProps(raw map[string]any) map[string]any {
 		case strings.HasPrefix(k, "verdict") || strings.HasPrefix(k, "threat") ||
 			strings.HasPrefix(k, "maxThreat") || strings.HasPrefix(k, "avgThreat") ||
 			strings.HasPrefix(k, "overallThreat"):
-			// the verdict/threat family is already the band; only a positive score is news
+			// the verdict family is already the band; verdictScore is the ONE
+			// band-consistent number. The raw threat* scores are feed evidence,
+			// shown as such, never a severity (github.com carries
+			// threatScore 40 next to a reconciled verdictScore 16).
 			if f := f64OfAny(v); f > 0 && strings.HasSuffix(k, "Score") {
-				out[k] = trimFloat(f)
+				if k == "verdictScore" {
+					out[k] = trimFloat(f)
+				} else {
+					out[k] = trimFloat(f) + " (evidence)"
+				}
+			}
+			continue
+		case k == "sources":
+			// feed evidence only: how many feeds list it, never a severity
+			if n := len(strsOf(v)); n > 0 {
+				out[k] = "listed in " + itoa(n) + " feed" + plural(n)
+			} else if c := int(int64OfAny(v)); c > 0 {
+				out[k] = "listed in " + itoa(c) + " feed" + plural(c)
 			}
 			continue
 		case strings.HasPrefix(k, "is") || k == "allowlisted" || k == "hasThreateningPrefixes":
@@ -464,6 +497,14 @@ func curateProps(raw map[string]any) map[string]any {
 		out = trimmed
 	}
 	return out
+}
+
+// plural is the "s" of "listed in N feeds" (1 feed, 2 feeds).
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }
 
 // trimFloat renders a score without float noise (6 not 6.0; 1.2 stays 1.2).

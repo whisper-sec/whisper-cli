@@ -61,7 +61,7 @@ func (h *tlsHandshaker) Leaf(ctx context.Context, hostport, sni string) (*x509.C
 }
 
 // SPKISHA256 is the DANE selector=1 (SubjectPublicKeyInfo), matching=1 (SHA-256)
-// certificate-association value (RFC 6698 §2.1.2/§3): SHA-256 over the leaf's DER SPKI.
+// certificate-association value (RFC 6698 §2.1.2/): SHA-256 over the leaf's DER SPKI.
 func SPKISHA256(cert *x509.Certificate) [32]byte {
 	return sha256.Sum256(cert.RawSubjectPublicKeyInfo)
 }
@@ -102,8 +102,8 @@ func ExtractDANEEEPin(rrs []dns.RR) ([]TLSAPin, error) {
 	return pins, nil
 }
 
-// CheckDANEEE asserts the served leaf satisfies AT LEAST ONE of the DNSSEC-validated pins (
-// -- RFC 7671 §8 make-before-break: during a rotation overlap both the old and new pins are
+// CheckDANEEE asserts the served leaf satisfies AT LEAST ONE of the DNSSEC-validated pins
+// (RFC 7671 §8 make-before-break: during a rotation overlap both the old and new pins are
 // published, and the served leaf legitimately matches only one of them) AND that its SANs bind the
 // identity: a DNS-SAN == fqdn, and an IP-SAN == the /128 (RFC 7671 -- the cert is bound to the exact
 // address it is served from). The SAN checks are independent of WHICH pin matched.

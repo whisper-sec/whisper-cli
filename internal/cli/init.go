@@ -22,16 +22,16 @@ import (
 // every subagent it spawns - egresses from THAT project's /128 with zero further config.
 //
 // It is the seam where everything else clicks together:
-//   - resolve/create the project agent (reuse guided.go's selection) and persist its /128 to a
-//     PROJECT agent file (.whisper/agent)
-//   - derive a DETERMINISTIC, collision-avoiding local port from the project's abs path
-//   - write .whisper/config (agent /128 + tier + port + schemaVersion)
-//   - MERGE the Whisper-managed env + SessionStart hook into .claude/settings.local.json
-//     (NEVER clobbering the user's other settings)
-//   - gitignore .whisper/ + .claude/settings.local.json
-//   - START the daemon now (the same `--ensure` path the hook re-runs) so the proxy is live
-//     before the user launches claude
-//   - print a calm, friendly summary
+// - resolve/create the project agent (reuse guided.go's selection) and persist its /128 to a
+// PROJECT agent file (.whisper/agent)
+// - derive a DETERMINISTIC, collision-avoiding local port from the project's abs path
+// - write .whisper/config (agent /128 + tier + port + schemaVersion)
+// - MERGE the Whisper-managed env + SessionStart hook into .claude/settings.local.json
+// (NEVER clobbering the user's other settings)
+// - gitignore .whisper/ + .claude/settings.local.json
+// - START the daemon now (the same `--ensure` path the hook re-runs) so the proxy is live
+// before the user launches claude
+// - print a calm, friendly summary
 //
 // Idempotent: re-running updates cleanly (same project → same port; managed keys updated, not
 // duplicated). --force re-inits even when a config already exists.
@@ -56,9 +56,16 @@ func newInitCmd() *cobra.Command {
 			"  whisper init telegram a grammY/Telegraf bot (SOCKS agent recipe)\n" +
 			"  whisper init notebook a one-cell Colab/Kaggle/Jupyter kernel egress",
 		Args: cobra.ArbitraryArgs,
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, args []string) error {
 			// Bare `whisper init` with no subcommand: guide, don't dump help.
-			return usageErr("tell init what to set up - e.g. `whisper init claude` or `whisper init python`")
+			if len(args) == 0 {
+				return usageErr("tell init what to set up - e.g. `whisper init claude` or `whisper init python`")
+			}
+			// An unrecognised target used to get the same "tell init what to set up" line,
+			// which reads as though nothing was typed. Name what was not understood, and say what
+			// is available, so a typo is obvious rather than mysterious.
+			return usageErr("unknown init target %q\n\navailable: %s",
+				args[0], strings.Join(subcommandNames(cmd), ", "))
 		},
 	}
 	cmd.AddCommand(newInitClaudeCmd())
@@ -421,7 +428,7 @@ func envToolProfiles() []envToolProfile {
 				"const { ProxyAgent } = require('undici');",
 				"const client = new Client({",
 				"  intents: [GatewayIntentBits.Guilds],",
-				"  rest: { agent: new ProxyAgent(process.env.HTTPS_PROXY) }, // http://127.0.0.1:<port>",
+				" rest: { agent: new ProxyAgent(process.env.HTTPS_PROXY) }, // http://127.0.0.1:<port>",
 				"});",
 				"// gateway WS: run with `--tier wireguard` (kernel routing, no extra code).",
 			},
@@ -438,7 +445,7 @@ func envToolProfiles() []envToolProfile {
 				"// grammY:",
 				"import { SocksProxyAgent } from 'socks-proxy-agent';",
 				"const bot = new Bot(token, { client: { baseFetchConfig: {",
-				"  agent: new SocksProxyAgent(process.env.ALL_PROXY) } } }); // socks5h://127.0.0.1:<port>",
+				" agent: new SocksProxyAgent(process.env.ALL_PROXY) } } }); // socks5h://127.0.0.1:<port>",
 				"// Telegraf:",
 				"const { SocksProxyAgent } = require('socks-proxy-agent');",
 				"const bot = new Telegraf(token, { telegram: { agent: new SocksProxyAgent(process.env.ALL_PROXY) } });",
@@ -555,7 +562,7 @@ func initBackbone(opts initOptions) (projcfg.Paths, projcfg.Config, error) {
 	}
 
 	// (a) Resolve the project agent. Reuse guided.go's selection precedence:
-	//   --agent > --name (create) > the project agent file > the existing config's agent.
+	// --agent > --name (create) > the project agent file > the existing config's agent.
 	c, err := resolveClient(true, false)
 	if err != nil {
 		return projcfg.Paths{}, projcfg.Config{}, err
@@ -665,7 +672,7 @@ func runInitPython(opts initOptions) error { return runInitEnvTool(opts, pythonP
 // to the persisted project agent / the existing config.
 func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, projectAgentFile string, existing *projcfg.Config) (sel, fqdn string, err error) {
 	// 1. --agent: an explicit existing agent (validated to its /128 so config holds the
-	//    canonical address).
+	// canonical address).
 	if v := strings.TrimSpace(opts.agent); v != "" {
 		if looksLikeV6(v) {
 			return v, "", nil
@@ -696,7 +703,7 @@ func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, pr
 		return existing.Agent, existing.FQDN, nil
 	}
 	// 5. Nothing pinned: reuse the caller's MOST-RECENT existing agent, or create a first one.
-	//    A fresh account with no agents needs a name - refuse rather than mint an unnamed /128.
+	// A fresh account with no agents needs a name - refuse rather than mint an unnamed /128.
 	cx, cancel := ctx()
 	defer cancel()
 	choices, lerr := listAgents(c, cx)

@@ -1,6 +1,6 @@
 name: whisper-cli
 base: core24
-version: '0.202.0'
+version: '0.211.0'
 summary: A routable Whisper IPv6 identity and safe egress for agents
 description: |
   The official Whisper CLI: give an AI agent a real, routable IPv6 /128 identity
@@ -25,6 +25,13 @@ source-code: https://github.com/whisper-sec/whisper-cli
 confinement: strict
 grade: stable
 
+# This snap is BUILT FROM SOURCE, from the tag above, so it is the client: identity,
+# egress, connect, verify, the security-graph surface and the TUI. It does not carry the
+# endpoint sensor, which is distributed as a binary and not as source, so `whisper
+# service`, `whisper sensor` and `whisper posture` are not in it. The channels that ship
+# the full binary are the release assets, the install one-liner, apt, dnf, apk, brew and
+# scoop. See "Source here, binaries there" in the README.
+
 plugs:
   dot-config-whisper:
     interface: personal-files
@@ -35,12 +42,12 @@ parts:
   whisper:
     plugin: go
     source: https://github.com/whisper-sec/whisper-cli.git
-    source-tag: v0.202.0
+    source-tag: v0.211.0
     build-snaps: [go]
     build-environment:
       - CGO_ENABLED: "0"
     override-build: |
-      go build -trimpath -ldflags "-s -w -X github.com/whisper-sec/whisper-cli/internal/cli.Version=0.202.0" -o "$CRAFT_PART_INSTALL/bin/whisper" ./cmd/whisper
+      go build -trimpath -ldflags "-s -w -X github.com/whisper-sec/whisper-cli/internal/cli.Version=0.211.0" -o "$CRAFT_PART_INSTALL/bin/whisper" ./cmd/whisper
 
 apps:
   whisper:

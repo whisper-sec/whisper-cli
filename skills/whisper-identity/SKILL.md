@@ -66,5 +66,7 @@ whisper run curl -s https://api64.ipify.org
 - `aiohttp` ignores proxy env by default - pass `ClientSession(trust_env=True)`.
 - Docs: https://whisper.online · CLI source (MIT): https://github.com/whisper-sec/whisper-cli
 
-_Signed: a detached PGP signature (`SKILL.md.asc`) is published alongside this file;
-verify with the AS219419 key (fingerprint `EFF1663D992539682106A5EAD0F70908CF3B7929`)._
+_This file is served from the repository it lives in. Everything it tells you to install is
+verified where it matters: every published `whisper` binary carries a detached PGP signature
+made with the AS219419 release key (fingerprint `EFF1663D992539682106A5EAD0F70908CF3B7929`),
+and the installer checks it._

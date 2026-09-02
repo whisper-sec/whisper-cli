@@ -20,8 +20,8 @@ var whisperPrefix = netip.MustParsePrefix("2a04:2a01::/32")
 // newIPCmd is `whisper ip [--json]`: bring up (or reuse) the local egress
 // proxy, HTTP GET the keyless Whisper echo THROUGH it, and assert the observed source
 // IP is within 2a04:2a01::/32 AND == the selected agent's /128. It prints ONE green
-// line `<addr>  ✓ egress verified` (or --json {ip,verified,agent}); EXIT CODE is the
-// answer (0 = verified, 1 = not) so scripts/agents and the harness gate on it.
+// line `<addr> ✓ egress verified` (or --json {ip,verified,agent}); EXIT CODE is the
+// answer (0 = verified, 1 = not) so scripts, agents and the test harness can gate on it.
 func newIPCmd() *cobra.Command {
 	var agent, agentFile string
 	cmd := &cobra.Command{
@@ -38,10 +38,20 @@ func newIPCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			sel := resolveAgentSelector(agent, agentFile)
+			// D7: the shared resolver - `--agent <name>` works here exactly like it
+			// does on connect (a /128 or "" passes through free). D9: a stale
+			// persisted-FILE selector falls back to the server default with one note
+			// instead of failing every zero-config run.
+			rawSel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
+			cxSel, cancelSel := ctx()
+			sel, rerr := resolveAgentArg(c, cxSel, rawSel, selFromFile, agentFile)
+			cancelSel()
+			if rerr != nil {
+				return rerr
+			}
 			cx, cancel := ctx()
 			defer cancel()
-			// detect-and-reuse: when a long-lived `whisper connect` daemon on this host
+			// Detect-and-reuse: when a long-lived `whisper connect` daemon on this host
 			// already serves the target /128, verify THROUGH its live proxy instead of opening
 			// a competing op:connect (which would replace - and on our exit, remove - the
 			// daemon's server-side peer, killing its tunnel). The verify below is the SAME

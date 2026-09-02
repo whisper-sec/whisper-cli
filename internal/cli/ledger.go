@@ -23,8 +23,8 @@ import (
 // witness key is pinned out-of-band (--witness-key) - otherwise it is qualified as "per the
 // server-published witness policy" (never over-state the guarantee).
 //
-//	whisper ledger checkpoint                     # fetch + verify the latest signed checkpoint
-//	whisper ledger verify <addr> --salt <hex> --event-file <f>   # prove inclusion under it
+//	whisper ledger checkpoint # fetch + verify the latest signed checkpoint
+//	whisper ledger verify <addr> --salt <hex> --event-file <f> # prove inclusion under it
 //
 // PRIVACY: the public feed exposes ONLY the opaque commitment (leaf hash) + the
 // inclusion proof + the signed checkpoint. To verify WHAT a commitment attests, the SUBJECT
@@ -52,7 +52,7 @@ func newLedgerCmd() *cobra.Command {
 // is HONEST by construction: "publicly verifiable" is printed ONLY when the CLI itself verified
 // a FRESH cosignature from an independent witness on the served note - a config-only policy, a
 // stale cosignature, or the availability cross-check keeps the truthful "tamper-evident,
-// signed" wording. TWO trust modes for the witness key set (review): by default the
+// signed" wording. TWO trust modes for the witness key set: by default the
 // independent witnesses come from the SAME origin's /witness/keys, so the verdict is qualified
 // "per the server-published witness policy"; with --witness-key the operator pins the
 // independent witness key(s) OUT-OF-BAND and only cosignatures verifying under a pinned key

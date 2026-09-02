@@ -23,19 +23,22 @@ import (
 // talks newline-delimited JSON-RPC 2.0 on stdin/stdout. The tool surface is TWO-TIER, per the
 // Robustness Principle:
 //
-//   - KEYLESS (always): verify an agent identity (DANE/DNSSEC/JWS) and fetch RDAP for a /128 -
-//     "is this address a real Whisper agent, and whose?" in-chat, with NO API key and NO
-//     dependency on the private control backend (the work is done by the public endpoints).
-//   - KEY-GATED (when the standard key ladder resolves a credential - WHISPER_API_KEY /
-//     WHISPER_KEY env, or the `whisper login` key file): the FULL control plane -
-//     register / list / policy / logs / revoke / egress-config - every one a thin shell over
-//     the SAME internal/client op paths the CLI subcommands use (no new protocol code);
-//     plus the GRAPH surface (mcp_graph.go): whisper_graph_query (raw Cypher) and one
-//     whisper_<camelId> tool per embedded catalog recipe, mirroring `whisper query` /
-//     `whisper graph`.
+// - KEYLESS (always): verify an agent identity (DANE/DNSSEC/JWS) and fetch RDAP for a /128 -
+// "is this address a real Whisper agent, and whose?" in-chat, with NO API key and NO
+// dependency on the private control backend (the work is done by the public endpoints).
+// - KEY-GATED (when the standard key ladder resolves a credential - WHISPER_API_KEY /
+// WHISPER_KEY env, or the `whisper login` key file): the FULL control plane -
+// register / list / policy / logs / revoke / egress-config - every one a thin shell over
+// the SAME internal/client op paths the CLI subcommands use (no new protocol code);
+// plus the GRAPH surface (mcp_graph.go): whisper_graph_query (raw Cypher) and one
+// whisper_<camelId> tool per embedded catalog recipe, mirroring `whisper query` /
+// `whisper graph`.
 //
-// Without a key, only the two keyless tools are listed (graceful degradation, zero friction);
-// with a key, the control half unlocks - auth is optional, never demanded. The MCP server
+// Without a key the keyless tier is listed (graceful degradation, zero friction): the
+// verify/RDAP pair plus the public graph reads - whisper_assess, whisper_identify and
+// whisper_explain, which need no tenant and so are real value rather than a stub
+// With a key the whole control + graph surface unlocks - auth is
+// optional, never demanded. The MCP server
 // itself cannot HOLD egress open (it is a stdio child of the client), so whisper_egress_config
 // hands out the exact ready-to-run config `whisper connect`/`whisper init` use. The stdio
 // transport keeps stdout for protocol bytes ONLY; all diagnostics go to stderr.
@@ -47,12 +50,15 @@ const mcpProtocolVersion = "2024-11-05"
 func newMCPCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "mcp",
-		Short: "Run a Model Context Protocol server (stdio): keyless verify/RDAP for all, full control tools with your API key",
+		Short: "Run a Model Context Protocol server (stdio): keyless verify/RDAP/graph reads for all, full control tools with your API key",
 		Long: "Start an MCP server on stdio so an MCP client (Claude Desktop, Cursor, Windsurf, VS Code,\n" +
 			"Cline, Goose, …) can use Whisper in-chat. The tool surface is two-tier:\n\n" +
-			"KEYLESS (always available - the verify/RDAP surface is public):\n" +
+			"KEYLESS (always available - these are public, no tenant involved):\n" +
 			"  • whisper_verify <address|fqdn>  - is it a real Whisper agent? (DANE + DNSSEC + JWS)\n" +
-			"  • whisper_rdap <ipv6>            - RDAP for a Whisper /128 (who operates it)\n\n" +
+			"  • whisper_rdap <ipv6>            - RDAP for a Whisper /128 (who operates it)\n" +
+			"  • whisper_assess <host|ip>       - threat posture: label, band, coverage, evidence\n" +
+			"  • whisper_identify <host|ip>     - the vendor and operator roles behind it\n" +
+			"  • whisper_explain <indicator>    - the threat-feed score, and exactly why\n\n" +
 			"WITH YOUR API KEY (WHISPER_API_KEY in the client's env, or `whisper login`):\n" +
 			"  • whisper_register        - mint a named agent: name → routable IPv6 /128 identity\n" +
 			"  • whisper_list            - your agents (name, /128, DNS name, state)\n" +
@@ -186,8 +192,9 @@ func mcpClientMatrix() string {
 		"  Goose                  ~/.config/goose/config.yaml (YAML, key \"extensions\") - add a `whisper` extension running `whisper mcp`\n" +
 		"  Continue               ~/.continue/config.yaml (YAML list \"mcpServers\") - add a `whisper` entry running `whisper mcp`\n" +
 		"\nthen restart the client. Verify in-chat: ask it to run the `whisper_verify` tool.\n" +
-		"keyless verify/RDAP work as-is; with WHISPER_API_KEY in the client's env (or after\n" +
-		"`whisper login`) the control tools - register/list/policy/logs/revoke/egress - unlock too.\n"
+		"keyless verify/RDAP and the public graph reads (assess/identify/explain) work as-is;\n" +
+		"with WHISPER_API_KEY in the client's env (or after `whisper login`) the control tools -\n" +
+		"register/list/policy/logs/revoke/egress - and the full graph catalogue unlock too.\n"
 }
 
 // --- JSON-RPC 2.0 wire types ---------------------------------------------------------------
@@ -319,9 +326,10 @@ func mcpInitializeResult(params json.RawMessage) map[string]any {
 
 // mcpHasKey reports whether the standard key ladder resolves a credential (WHISPER_API_KEY /
 // WHISPER_KEY env, --key, or the `whisper login` key file). It gates WHICH tools are listed:
-// the keyless verify/RDAP pair always; the control tools only when a key is present - the
-// two-tier surface mandates (keyless value for everyone, the full product for
-// key-holders, auth optional).
+// the keyless tier always (verify, RDAP, and the public graph reads); the control tools and
+// the rest of the graph catalogue only when a key is present, which is the two-tier surface
+// this project mandates: keyless value for everyone, the full product for key-holders, auth
+// optional.
 func mcpHasKey() bool {
 	c, err := resolveClient(false, false)
 	return err == nil && !c.Credential().IsZero()
@@ -331,10 +339,11 @@ func mcpHasKey() bool {
 // it names the exact fix (Postel: a clear error, never an opaque failure).
 const mcpNoKeyErr = "this tool needs your Whisper API key - set WHISPER_API_KEY in the environment " +
 	"your MCP client uses to launch `whisper mcp` (or run `whisper login` once on this machine), " +
-	"then restart the client. The keyless whisper_verify / whisper_rdap tools work without a key."
+	"then restart the client. The keyless tools work without a key: whisper_verify, whisper_rdap, " +
+	"and the public graph reads whisper_assess / whisper_identify / whisper_explain."
 
-// mcpTools is the tool catalogue: the keyless pair always, plus the key-gated control tools
-// when a credential resolves (two-tier).
+// mcpTools is the tool catalogue: the keyless tier always, plus the key-gated control,
+// reference and graph tools when a credential resolves (two-tier).
 func mcpTools() []map[string]any {
 	tools := []map[string]any{
 		{
@@ -366,8 +375,12 @@ func mcpTools() []map[string]any {
 		tools = append(tools, mcpControlTools()...)
 		tools = append(tools, mcpReferenceTools()...)
 		tools = append(tools, mcpGraphTools()...)
+		return tools
 	}
-	return tools
+	// No key: the public graph reads join verify/RDAP, so the keyless half of the
+	// surface answers real questions instead of only saying no. mcpGraphTools
+	// already contains these, which is why the two branches are exclusive.
+	return append(tools, mcpGraphKeylessTools()...)
 }
 
 // mcpReadResource handles resources/read: dispatch the URI to its reader, else a
@@ -459,13 +472,13 @@ func mcpControlTools() []map[string]any {
 		},
 		{
 			"name":        "whisper_revoke",
-			"description": "IRREVERSIBLY revoke an agent: withdraw its /128 address, reverse-DNS and tokens, and refuse its control-plane access (the API key is a Whisper API key managed by Whisper auth and is not deleted). The identity stops verifying immediately. Use whisper_list first to confirm the exact agent; there is no undo. Requires the agent id or its /128 address.",
+			"description": "IRREVERSIBLY revoke an agent: withdraw its /128 address, reverse-DNS and tokens, and refuse its control-plane access (the API key is a Whisper API key managed by Whisper auth and is not deleted). The identity stops verifying immediately. Use whisper_list first to confirm the exact agent; there is no undo. Takes the agent id, its /128 address, or its label - anything whisper_list printed. A label naming more than one agent is refused rather than guessed.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
 				"required":             []string{"agent"},
 				"additionalProperties": false,
 				"properties": map[string]any{
-					"agent": map[string]any{"type": "string", "description": "the agent id or its /128 address"},
+					"agent": map[string]any{"type": "string", "description": "the agent id, its /128 address, or its label"},
 				},
 			},
 		},
@@ -717,7 +730,7 @@ func mcpToolRevoke(args json.RawMessage) mcpToolResult {
 	_ = json.Unmarshal(args, &a)
 	target := strings.TrimSpace(a.Agent)
 	if target == "" {
-		return mcpErr("agent is required (the agent id or its /128 address) - call whisper_list to find it")
+		return mcpErr("agent is required (the agent id, its /128 address, or its label) - call whisper_list to find it")
 	}
 	// The tools/call itself is the confirmation (the model + its human decided); op:revoke is
 	// the same full-teardown path `whisper kill --revoke` uses.

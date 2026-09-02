@@ -13,14 +13,15 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
-// domain.go is `whisper domain`: bring-your-own-domain onboarding + trust, TWO-TIER by design.
+// domain.go is `whisper domain`: bring-your-own-domain onboarding + trust. Two-tier: the
+// keyless half verifies, and a key unlocks the rest.
 //
-//   - KEYLESS (always): `whisper domain verify <apex>` runs the public trust chain (DANE-EE +
-//     DNSSEC + JWS) for a name under your own domain - real value with no API key.
-//   - KEY-GATED: submit a domain for onboarding, opt it into browser-trusted (WebPKI) certs, and
-//     read its status/list - the control half over op:domain.
+// - KEYLESS (always): `whisper domain verify <apex>` runs the public trust chain (DANE-EE +
+// DNSSEC + JWS) for a name under your own domain - real value with no API key.
+// - KEY-GATED: submit a domain for onboarding, opt it into browser-trusted (WebPKI) certs, and
+// read its status/list - the control half over op:domain.
 //
-// WebPKI opt-in (b): with --webpki, `submit` asks Whisper to additionally obtain a
+// WebPKI opt-in: with --webpki, `submit` asks Whisper to additionally obtain a
 // browser-trusted Let's Encrypt leaf (via DNS-01 in your delegated, DNSSEC-signed BYOD zone),
 // served ALONGSIDE the default DANE-EE leaf. Without it, the domain stays DANE-EE-only.
 func newDomainCmd() *cobra.Command {
@@ -84,7 +85,7 @@ func newDomainVerifyCmd() *cobra.Command {
 	}
 }
 
-// newDomainSubmitCmd is the KEY-GATED submit, with the b --webpki opt-in. It calls the one
+// newDomainSubmitCmd is the KEY-GATED submit, with the --webpki opt-in. It calls the one
 // control verb (op:domain, sub-op submit); with --webpki it sets acme:true so the backend also
 // pursues a browser-trusted leaf for the opted-in apex (additive to the DANE-EE default).
 func newDomainSubmitCmd() *cobra.Command {
@@ -100,7 +101,7 @@ func newDomainSubmitCmd() *cobra.Command {
 			}
 			wire := map[string]any{"op": "submit", "domain": apex}
 			if webpki {
-				wire["acme"] = true // b: opt into a browser-trusted WebPKI leaf (additive to DANE-EE)
+				wire["acme"] = true // opt into a browser-trusted WebPKI leaf (additive to DANE-EE)
 			}
 			return runDomainOp(wire, func() {
 				if webpki && !g.quiet && !g.jsonOut {

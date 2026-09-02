@@ -12,10 +12,12 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/projcfg"
 )
 
-// TestEnsureDaemon_ReusesLiveProxy: when a live whisper proxy already serves the port, ensure
-// is a no-op (alreadyLive=true) and NEVER spawns a daemon. Idempotency is the whole point of
-// the SessionStart hook being safe to re-run.
+// TestEnsureDaemon_ReusesLiveProxy: when a live whisper proxy already serves the port AND the
+// session registry backs it with a VERIFIED session, ensure is a no-op (alreadyLive=true) and
+// NEVER spawns a daemon. Idempotency is the whole point of the SessionStart hook being safe to
+// re-run.
 func TestEnsureDaemon_ReusesLiveProxy(t *testing.T) {
+	stubSessionsDir(t)
 	savedProbe := probeWhisperProxy
 	savedSpawn := spawnConnectDaemon
 	defer func() { probeWhisperProxy = savedProbe; spawnConnectDaemon = savedSpawn }()
@@ -23,6 +25,8 @@ func TestEnsureDaemon_ReusesLiveProxy(t *testing.T) {
 	probeWhisperProxy = func(int) bool { return true } // already live
 	spawned := false
 	spawnConnectDaemon = func(projcfg.Paths) error { spawned = true; return nil }
+	// The verified marker: a held session registered (post-verify) for this port.
+	writeSessionRecord(ownedSession("2a04:2a01::1", "socks5h://127.0.0.1:28080", "socks5"))
 
 	p := projcfg.PathsFor(t.TempDir())
 	port, alreadyLive, err := ensureDaemon(p, projcfg.Config{Port: 28080, Agent: "2a04:2a01::1", Tier: "socks5"})
@@ -41,9 +45,11 @@ func TestEnsureDaemon_ReusesLiveProxy(t *testing.T) {
 }
 
 // TestEnsureDaemon_SpawnsWhenDead: when nothing serves the port, ensure spawns the daemon and
-// then waits until the port comes live. We stub the spawn (no real fork) and flip the probe to
-// "live" after the spawn to simulate the daemon coming up.
+// then waits until the port comes live AND verified. We stub the spawn (no real fork) and flip
+// the probe to "live" + write the verified session record, as the real daemon does once its
+// egress verify passes.
 func TestEnsureDaemon_SpawnsWhenDead(t *testing.T) {
+	stubSessionsDir(t)
 	savedProbe := probeWhisperProxy
 	savedSpawn := spawnConnectDaemon
 	defer func() { probeWhisperProxy = savedProbe; spawnConnectDaemon = savedSpawn }()
@@ -53,7 +59,8 @@ func TestEnsureDaemon_SpawnsWhenDead(t *testing.T) {
 	spawnCalls := 0
 	spawnConnectDaemon = func(projcfg.Paths) error {
 		spawnCalls++
-		live = true // the "daemon" is now up
+		live = true // the "daemon" is now up and (below) verified
+		writeSessionRecord(ownedSession("2a04:2a01::2", "socks5h://127.0.0.1:29090", "socks5"))
 		return nil
 	}
 

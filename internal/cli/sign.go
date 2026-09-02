@@ -4,12 +4,12 @@
 // Package cli - `whisper sign`: S/MIME / CMS signing anchored to your Whisper identity.
 //
 // Two-tier, per the Whisper integration standard:
-//   - `whisper sign file <path>`  (KEYED)   issues your per-agent emailProtection cert from the
-//     control plane and produces a detached S/MIME (CMS/PKCS#7) signature you can hand to anyone.
-//   - `whisper sign verify …`     (KEYLESS) checks a signature against your Whisper identity with
-//     NO API key: it validates the CMS signature AND matches the signer key to the DNSSEC-signed
-//     SMIMEA (RFC 8162) record, validated from the IANA root IN-PROCESS. Trust is DANE-anchored
-//     (the SMIMEA pins the signer's exact key), NOT a public S/MIME CA.
+// - `whisper sign file <path>` (KEYED) issues your per-agent emailProtection cert from the
+// control plane and produces a detached S/MIME (CMS/PKCS#7) signature you can hand to anyone.
+// - `whisper sign verify …` (KEYLESS) checks a signature against your Whisper identity with
+// NO API key: it validates the CMS signature AND matches the signer key to the DNSSEC-signed
+// SMIMEA (RFC 8162) record, validated from the IANA root IN-PROCESS. Trust is DANE-anchored
+// (the SMIMEA pins the signer's exact key), NOT a public S/MIME CA.
 package cli
 
 import (
@@ -45,7 +45,9 @@ func newSignCmd() *cobra.Command {
 	}
 	cmd.AddCommand(newSignFileCmd())
 	cmd.AddCommand(newSignVerifyCmd())
-	return cmd
+	// An unrecognised verb here used to print help and exit 0, so a typo in a script
+	// reported success. asParent makes it a named, non-zero usage error.
+	return asParent(cmd)
 }
 
 // --- sign file (keyed) --------------------------------------------------------------------------

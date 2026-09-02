@@ -18,17 +18,39 @@ import (
 )
 
 // EscapeCypherString renders s safe to embed inside a single-quoted Cypher literal.
-// Neo4j/openCypher escapes a single quote by DOUBLING it (” ); a backslash is also
-// doubled so a trailing backslash can never escape the closing quote. A legitimate
-// apostrophe in a label ("Tim O'Reilly") just works; a breakout attempt
-// ("'}}) RETURN 1 //") stays trapped inside the literal value.
+//
+// Cypher escapes with a BACKSLASH, the way C and JSON do: \' for a quote, \\ for a
+// backslash, \n \r \t \b \f for the control characters that would otherwise ride the
+// wire raw. SQL is the language that doubles a quote, and this function used to do that,
+// which is a real difference and not a stylistic one: the control plane's own map-literal
+// reader returns on the second quote character, so 'Tim O”Reilly' terminated the string
+// early and every value carrying an apostrophe came back as
+//
+//	400 bad_request "could not read the whisper.agents(...) map literal:
+//	                 expected, or } after a map entry, found '''"
+//
+// measured against graph.whisper.online and against ns1 directly. The docstring here
+// promised that "a legitimate apostrophe in a label (Tim O'Reilly) just works" while the
+// code guaranteed the opposite.
+//
+// A breakout attempt ("'}}) RETURN 1 //") stays trapped inside the literal either way:
+// the quote is escaped rather than closed.
 //
 // Conservative in what we emit: the returned string is the INNER text only (no
-// surrounding quotes) - callers wrap it in '...'.
+// surrounding quotes) - callers wrap it in '...'. Escaping the newline matters for the
+// same reason as the quote: a WhaleACL document is a multi-line HuJSON file sent
+// as one argument, and a query that carries raw newlines through a JSON body and a proxy
+// is one rewrite away from arriving mangled.
 func EscapeCypherString(s string) string {
-	// Order matters: escape backslashes first, then quotes, so we never double-escape.
+	// Order matters: escape backslashes first, then everything that a backslash
+	// introduces, so nothing is ever double-escaped.
 	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `'`, `''`)
+	s = strings.ReplaceAll(s, `'`, `\'`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	s = strings.ReplaceAll(s, "\t", `\t`)
+	s = strings.ReplaceAll(s, "\b", `\b`)
+	s = strings.ReplaceAll(s, "\f", `\f`)
 	return s
 }
 
@@ -38,13 +60,13 @@ func QuoteCypherString(s string) string {
 }
 
 // Lit renders an arbitrary Go value as a Cypher literal:
-//   - string            -> a quoted, escaped string literal
-//   - bool              -> true / false
-//   - int / int64       -> the decimal form
-//   - float64           -> the shortest exact decimal form
-//   - []T / []any       -> a bracketed list of literals
-//   - map[string]any    -> a brace map literal (keys sorted for determinism)
-//   - nil               -> null
+// - string -> a quoted, escaped string literal
+// - bool -> true / false
+// - int / int64 -> the decimal form
+// - float64 -> the shortest exact decimal form
+// - []T / []any -> a bracketed list of literals
+// - map[string]any -> a brace map literal (keys sorted for determinism)
+// - nil -> null
 //
 // Conservative-emit: every leaf string flows through QuoteCypherString, so no value -
 // however hostile - can break out of the surrounding map/list.

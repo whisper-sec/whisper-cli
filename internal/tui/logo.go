@@ -10,7 +10,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// The Whisper brand mark as terminal art (approved on): the four-ring
+// The Whisper brand mark as terminal art, approved for this surface: the four-ring
 // cloverleaf, baked at two sizes in logo_gen.go. Colour is the BRAND ramp -
 // blue → violet - deliberately theme-independent (a logo keeps its colours);
 // lipgloss/termenv degrade truecolor to 256 automatically. On NO_COLOR every

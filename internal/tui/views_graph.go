@@ -17,9 +17,9 @@ import (
 // the objects their live traffic touches. It renders the liveGraph state (fed by the
 // always-on monitor fold) as a fan-out of typed, coloured nodes:
 //
-//	● scraper  2a04:2a01::1
-//	 ├─▶ ⬢ api.openai.com ─▶ ▥ 2606:4700::1111 :443  ◈ AS13335 Cloudflare, Inc.
-//	 └─╳ ⬢ ads.tracker.io   blocked                              ×3
+//	● scraper 2a04:2a01::1
+//	 ├─▶ ⬢ api.openai.com ─▶ ▥ 2606:4700::1111 :443 ◈ AS13335 Cloudflare, Inc.
+//	 └─╳ ⬢ ads.tracker.io blocked ×3
 //
 // Node hues reuse the EXPLORE type language (lavender hostname, cyan/azure IPs,
 // blue-violet ASN) so the two graph surfaces read as one system - but this one is not

@@ -72,7 +72,7 @@ type streamStateMsg struct {
 }
 
 // monitorBackfillMsg seeds the live feed from an op:logs query on MONITOR enter (the
-// hybrid: paint history, then tail the stream on top). token drops a stale reply.
+// hybrid feed: paint history, then tail the stream on top). token drops a stale reply.
 type monitorBackfillMsg struct {
 	events []model.Event
 	token  int
