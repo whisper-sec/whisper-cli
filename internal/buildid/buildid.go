@@ -33,10 +33,13 @@
 //     does. Anything under test that reads this package directly therefore sees
 //     "" and cannot tell a working wiring from a deleted one, which is why the
 //     sensor reaches it through a seam.
-//   - Building inside a nested git worktree (a `.git` FILE rather than a
-//     directory) stamps the OUTER repository's HEAD and dirty state, because
-//     the toolchain resolves the repository root by walking up. A release build
-//     runs in a plain checkout, where the stamp is exact.
+//   - Building inside a git worktree (a `.git` FILE rather than a directory)
+//     never stamps THIS tree. Nested inside the main clone, the walk up finds
+//     the main clone's .git and stamps the OUTER HEAD and dirty state. Anywhere
+//     else, it finds no .git directory and records nothing at all, and
+//     -buildvcs=true does not make that an error. The published v0.211.0 assets
+//     carry no vcs.* settings for exactly that reason, which is why build-all.sh
+//     now passes the revision in through Stamped rather than hoping for one.
 package buildid
 
 import (
@@ -55,7 +58,38 @@ const shortLen = 12
 // which is the same lie the version string was telling.
 const dirtySuffix = "-dirty"
 
-var id, buildTime = resolve(debug.ReadBuildInfo())
+// Stamped and StampedTime are set at link time by build-all.sh:
+//
+//	-X github.com/whisper-sec/whisper-cli/internal/buildid.Stamped=<40-hex>[-dirty]
+//	-X github.com/whisper-sec/whisper-cli/internal/buildid.StampedTime=<RFC 3339 UTC>
+//
+// They exist because the toolchain's own stamp is not reliable where we
+// build. `go build` finds the repository by walking up for a .git
+// DIRECTORY, and every agent on this project works in a `git worktree`
+// checkout whose .git is a FILE. Measured both shapes:
+//
+//   - a worktree NESTED inside the main clone: the walk steps over the .git
+//     file and finds the main clone's, so the binary is stamped with the
+//     MAIN checkout's HEAD and dirty state. Not this tree's.
+//   - a worktree ANYWHERE ELSE: the walk finds no .git directory at all and
+//     -buildvcs=auto silently records nothing. -buildvcs=true does not even
+//     turn that into an error, because from its point of view there is no
+//     repository to read.
+//
+// The published v0.211.0 assets have no vcs.* settings whatsoever, so this
+// package was inert in every binary we shipped: `whisper version` printed a
+// version and nothing to check it against, which is the exact failure it was
+// written for. A value the build computes and passes in cannot be lost that
+// way, so it wins over the toolchain's when both are present.
+var (
+	Stamped     string
+	StampedTime string
+)
+
+var id, buildTime = func() (string, string) {
+	bi, ok := debug.ReadBuildInfo()
+	return resolveStamped(Stamped, StampedTime, bi, ok)
+}()
 
 // ID is this binary's build identity: the abbreviated VCS revision it was
 // built from, with a dirty marker when the tree had uncommitted changes.
@@ -68,6 +102,26 @@ func ID() string { return id }
 // without a lookup table from revision to date, which is the question an
 // operator actually asks first.
 func Time() string { return buildTime }
+
+// resolveStamped prefers the value the build passed in and falls back to what
+// the toolchain recorded. Split out from the package variables so a test can
+// drive both halves; an empty stamp is not a value, so it never shadows a
+// usable toolchain revision.
+func resolveStamped(stamped, stampedTime string, bi *debug.BuildInfo, ok bool) (string, string) {
+	rev := strings.TrimSpace(stamped)
+	if rev == "" {
+		return resolve(bi, ok)
+	}
+	dirty := strings.HasSuffix(rev, dirtySuffix)
+	rev = strings.TrimSuffix(rev, dirtySuffix)
+	if len(rev) > shortLen {
+		rev = rev[:shortLen]
+	}
+	if dirty {
+		rev += dirtySuffix
+	}
+	return rev, strings.TrimSpace(stampedTime)
+}
 
 // resolve is the whole of the logic, split out from the package variables so a
 // test can drive it with a constructed BuildInfo instead of the test binary's

@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -55,6 +56,16 @@ const (
 	panelNotInForce = "not-in-force"
 	panelUnknown    = "unknown"
 )
+
+// panelPolicyLimited is the fourth word, and this is the reason it exists.
+//
+// A tenant whose policy is `default block` with a short allow list has a tunnel that is up,
+// bound to the right identity, and carrying traffic - to the handful of names the policy allows
+// and to nothing else. Calling that "in force" is a confident green over a machine that can
+// barely reach the internet. Calling it "not in force" blames the tunnel for doing exactly what
+// it was told. It is neither, so it has its own word, and the sentence beside it points at
+// `whisper policy` rather than at the connection.
+const panelPolicyLimited = "policy-limited"
 
 // The identity verdict, matching `whisper verify`: verified means the server ran the full chain
 // and DANE anchored it; unverified means it ran and did not; unknown means it did not run.
@@ -134,6 +145,12 @@ type panelConnection struct {
 type panelTunnel struct {
 	Known   bool `json:"known"`
 	Healthy bool `json:"healthy"`
+	// Reconnects is how many times the holder has had to re-handshake a dead tunnel. Surfaced
+	// because a FLAPPING tunnel is healthy at most instants and useless across all of them: the
+	// handshake completes, goes idle, completes again, and no data ever crosses. "healthy: true"
+	// with a reconnect count in the hundreds is the shape of that, and without the count the
+	// reader has no way to tell it from a tunnel that has simply been up all day.
+	Reconnects int `json:"reconnects,omitempty"`
 }
 
 // panelEgress is the defect this whole command exists to make visible.
@@ -152,8 +169,11 @@ type panelEgress struct {
 	Direct string `json:"direct"`
 }
 
-// panelProxyApps is the ALL_PROXY half, proven the way `whisper ip` proves it: fetch the keyless
-// echo THROUGH the live local proxy and check the source the server saw.
+// panelProxyApps is the ALL_PROXY half, proven with TWO observations through the same proxy: the
+// keyless Whisper echo, which says WHICH ADDRESS traffic leaves from, and a cheap HEAD to a
+// destination that is not ours, which says WHETHER IT GETS ANYWHERE. State is one of in-force,
+// policy-limited, not-in-force or unknown - see panelEgressCarrying for why the third answer had
+// to exist.
 type panelProxyApps struct {
 	State    string `json:"state"`
 	Observed string `json:"observed"`
@@ -433,9 +453,19 @@ func panelTunnelFor(addr string) panelTunnel {
 	if !ok {
 		return panelTunnel{}
 	}
-	// A holder that is alive but has stopped updating is a wedged monitor, and saying "healthy"
-	// about a record that stopped moving 20 minutes ago is the same lie in slower motion.
-	return panelTunnel{Known: true, Healthy: !rec.Stale()}
+	// PREFER the holder's own reading. Record freshness answers a different question: a monitor
+	// failing to re-handshake is still a monitor that is RUNNING, so it republishes on every tick
+	// and the record never goes stale. That is how a panel came to report healthy for a session
+	// whose own log had reached re-handshake attempt 183 while carrying no traffic. Freshness is
+	// the liveness of the publisher; only the holder knows the tunnel.
+	if healthy, published := rec.TunnelHealth(); published {
+		// A stale record still overrides: a holder that has stopped updating is a wedged monitor,
+		// and its last opinion is no more current than the record carrying it.
+		return panelTunnel{Known: true, Healthy: healthy && !rec.Stale(), Reconnects: rec.Reconnects}
+	}
+	// An older holder published no opinion, so fall back to the freshness heuristic rather than
+	// reporting a confident "unhealthy" that nobody actually published.
+	return panelTunnel{Known: true, Healthy: !rec.Stale(), Reconnects: rec.Reconnects}
 }
 
 // panelVerifyLeg runs the keyless identity check and returns the verdict plus the fqdn and
@@ -496,13 +526,14 @@ func panelEgressLeg(cx context.Context, c *client.Client, sess *statusSession, e
 		return panelProxyApps{State: panelUnknown, Detail: "no client to check the egress with"}, ""
 	}
 
-	// The two echo fetches are independent, and this is a polled surface, so they run together
+	// The observations are independent, and this is a polled surface, so they run together
 	// rather than one after the other.
 	var (
 		wg       sync.WaitGroup
 		direct   string
 		observed string
 		obsErr   error
+		reach    panelReach
 	)
 	wg.Add(1)
 	go func() {
@@ -515,10 +546,14 @@ func panelEgressLeg(cx context.Context, c *client.Client, sess *statusSession, e
 		direct = d
 	}()
 	if sess != nil {
-		wg.Add(1)
+		wg.Add(2)
 		go func() {
 			defer wg.Done()
 			observed, obsErr = c.ObservedEgressIP(cx, sess.Endpoint)
+		}()
+		go func() {
+			defer wg.Done()
+			reach = panelReachLeg(cx, *sess)
 		}()
 	}
 	wg.Wait()
@@ -541,21 +576,86 @@ func panelEgressLeg(cx context.Context, c *client.Client, sess *statusSession, e
 		errs.add("could not read the egress through the local proxy: %s", friendly(obsErr))
 		return panelProxyApps{State: panelUnknown, Detail: friendly(obsErr)}, direct
 	}
-	out := panelProxyApps{Observed: observed}
-	switch {
-	case inWhisperRange(observed) && sameIP(observed, sess.Address):
-		out.State = panelInForce
-		out.Detail = "tools that honour ALL_PROXY leave from " + observed + ", your own Whisper address"
-	case direct != "" && sameIP(observed, direct):
-		out.State = panelNotInForce
-		out.Detail = "traffic through the local proxy still came out of this machine's own address (" +
-			observed + "), so the egress is not carrying it"
-	default:
-		out.State = panelNotInForce
-		out.Detail = "traffic through the local proxy left from " + observed + ", which is not this agent's address (" +
-			sess.Address + ")"
+	out := panelProxyAppsVerdict(sess.Address, observed, direct, reach)
+	if out.State == panelUnknown {
+		// The address leg was read; the reachability leg was not. That is a failed read and it
+		// belongs in `errors`, so a panel which renders only the banner still says so.
+		errs.add("%s", out.Detail)
 	}
 	return out, direct
+}
+
+// panelProxyAppsVerdict is the whole decision, pure, so every branch can be driven from a test
+// without a proxy, a tunnel, a policy or a network.
+func panelProxyAppsVerdict(sessAddr, observed, direct string, reach panelReach) panelProxyApps {
+	switch {
+	case inWhisperRange(observed) && sameIP(observed, sessAddr):
+		return panelEgressCarrying(observed, reach)
+	case direct != "" && sameIP(observed, direct):
+		return panelProxyApps{State: panelNotInForce, Observed: observed,
+			Detail: "traffic through the local proxy still came out of this machine's own address (" +
+				observed + "), so the egress is not carrying it"}
+	default:
+		return panelProxyApps{State: panelNotInForce, Observed: observed,
+			Detail: "traffic through the local proxy left from " + observed +
+				", which is not this agent's address (" + sessAddr + ")"}
+	}
+}
+
+// panelEgressCarrying answers the question the Whisper echo alone never could, and this is the
+// whole reason it exists.
+//
+// By the time we are here one thing is settled: traffic through the local proxy left from this
+// agent's own /128. The tunnel is up and it is carrying. What that does NOT establish is where
+// it can carry anything TO, because the only destination that was asked is ours - the probe sat
+// inside the same failure domain it was certifying. On a `default block` tenant the panel drew a
+// confident green over a machine that could reach Whisper and nothing else.
+//
+// The second observation settles it, and its control is what makes it evidence rather than
+// inference: the SAME destination, at the SAME moment, through the proxy and straight from this
+// machine.
+//
+//   - it answered through the proxy: the egress reaches the wider internet. in-force.
+//   - it was REFUSED through the proxy and answered directly: something on the egress path
+//     turned that traffic away while this machine could make the identical request. On this
+//     product that is the tenant policy, so the sentence names `whisper policy` and says in as
+//     many words that the tunnel is not the problem - because it is not.
+//   - it TIMED OUT through the proxy: a refusal is a decision taken by something and can be
+//     named; a timeout is the absence of one. Not knowing is an answer here, and it is the
+//     honest one.
+//   - it failed BOTH ways, or nothing was measured: that is about the destination or this
+//     machine's own network, and it is not grounds to say anything about the egress. Also
+//     unknown - never a green, because we did not check what a green would be claiming.
+func panelEgressCarrying(observed string, reach panelReach) panelProxyApps {
+	out := panelProxyApps{Observed: observed}
+	leaves := "traffic through the local proxy left from " + observed + ", your own Whisper address"
+	switch {
+	case !reach.Tried:
+		out.State = panelUnknown
+		out.Detail = leaves + ", but whether it reaches anything beyond Whisper was not checked, " +
+			"so nothing here says it does"
+	case reach.ProxiedOK:
+		out.State = panelInForce
+		out.Detail = "tools that honour ALL_PROXY leave from " + observed + ", your own Whisper address, " +
+			"and traffic through it reached " + reach.Host
+	case reach.ProxiedTimedOut && reach.DirectOK:
+		out.State = panelUnknown
+		out.Detail = leaves + ", but a request to " + reach.Host + " through the egress timed out while the " +
+			"identical one straight from this machine answered. A timeout is not a refusal, so what the " +
+			"egress will and will not carry is not known from here - see what your policy allows with: whisper policy"
+	case reach.DirectOK:
+		out.State = panelPolicyLimited
+		out.Detail = "the tunnel is up and carrying: " + leaves + ". What it is not carrying is the rest of " +
+			"the internet - " + reach.Host + " was refused through the egress at the same moment the identical " +
+			"request straight from this machine succeeded. That is your policy, not a broken connection: " +
+			"see what is allowed with `whisper policy`"
+	default:
+		out.State = panelUnknown
+		out.Detail = leaves + ", but whether it reaches the rest of the internet is not known: " + reach.Host +
+			" answered neither through the egress nor straight from this machine, which is that destination " +
+			"or this machine's own network and not something to pin on the egress"
+	}
+	return out
 }
 
 // panelEgressStalledByTunnel is the pure half of that decision, so it can be tested without a
@@ -580,6 +680,135 @@ func panelEgressStalledByTunnel(tun panelTunnel, obsErr error) (panelProxyApps, 
 		Detail: "the Whisper tunnel has stopped carrying traffic, so tools pointed at the local proxy are " +
 			"not getting through. That is the tunnel itself and not your session: check that UDP to the " +
 			"Whisper endpoint is not blocked on this network, then run: whisper connect"}, true
+}
+
+// --- the second observation ------------------------------------------------------------
+
+// panelReach is what the outside-destination probe established, reduced to the facts the verdict
+// needs and nothing else.
+//
+// Booleans rather than the errors themselves, and that is deliberate twice over. A transport
+// failure through a SOCKS proxy spells out the local proxy's host and port, and nothing in this
+// document may carry that. And this record is cached on disk between polls, where an error value
+// could not survive anyway.
+type panelReach struct {
+	// Host is the destination that was tried, so the sentence can name it. Never the proxy.
+	Host string `json:"host,omitempty"`
+	// Tried is false when nothing was measured. It is NOT a failed measurement, and it is never
+	// evidence of a block.
+	Tried bool `json:"tried"`
+	// ProxiedOK and DirectOK are the observation and its control, taken at the same moment.
+	ProxiedOK bool `json:"proxied_ok"`
+	DirectOK  bool `json:"direct_ok"`
+	// ProxiedTimedOut separates a refusal from a black hole. Something refused is a decision
+	// that can be named; something that never answered is not.
+	ProxiedTimedOut bool `json:"proxied_timed_out,omitempty"`
+}
+
+// panelReachFrom reduces the client's pair of observations to the record above.
+func panelReachFrom(r client.OutsideReach) panelReach {
+	return panelReach{
+		Host:            r.Host,
+		Tried:           r.Tried,
+		ProxiedOK:       r.Tried && r.Proxied == nil,
+		DirectOK:        r.Tried && r.Direct == nil,
+		ProxiedTimedOut: r.ProxiedTimedOut,
+	}
+}
+
+// panelReachLeg takes the second observation. A package var so every branch of the verdict can
+// be driven from a test with no proxy, no policy and no network.
+var panelReachLeg = panelReachCached
+
+// panelReachTTL is how long one pair of observations may be reused.
+//
+// The panel refreshes every 15 seconds while somebody has it open and every 2 minutes while
+// nobody does, and two real HTTPS requests to a stranger's host on every one of those polls is
+// not a thing to do to somebody's laptop, or to the far end. A minute is short enough that a
+// policy change is reflected within a minute and long enough that an open panel costs two
+// requests a minute instead of eight. The same TTL the system-proxy pre-flight settled on, for
+// the same reason.
+const panelReachTTL = 60 * time.Second
+
+// panelReachCached is the live leg: a record no older than the TTL and measured against THIS
+// session, or a fresh pair of probes.
+func panelReachCached(cx context.Context, sess statusSession) panelReach {
+	if r, ok := readPanelReachCache(sess); ok {
+		return r
+	}
+	r := panelReachFrom(client.ReachOutside(cx, sess.Endpoint))
+	writePanelReachCache(sess, r)
+	return r
+}
+
+// panelReachRecord is the cached pair plus the provenance that decides whether it may be reused:
+// when it was taken, and which session it was taken against. A new connect invalidates it by
+// simply not matching.
+type panelReachRecord struct {
+	panelReach
+	CheckedAt string `json:"checked_at"`
+	Endpoint  string `json:"endpoint"`
+	Address   string `json:"address"`
+}
+
+// panelReachCachePath is where that record lives. On disk because `whisper panel status` is a
+// fresh process on every poll, so an in-process cache would never once be read.
+func panelReachCachePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(".config", "whisper", "egress-reach.json")
+	}
+	return filepath.Join(home, ".config", "whisper", "egress-reach.json")
+}
+
+// readPanelReachCache returns a usable cached record, or ok=false. A record for another session,
+// an unreadable file, an unparseable timestamp or an age past the TTL all mean "measure again";
+// none of them is fatal, because a miss costs two requests and never a wrong answer.
+func readPanelReachCache(sess statusSession) (panelReach, bool) {
+	raw, err := os.ReadFile(panelReachCachePath())
+	if err != nil {
+		return panelReach{}, false
+	}
+	var rec panelReachRecord
+	if json.Unmarshal(raw, &rec) != nil {
+		return panelReach{}, false
+	}
+	if rec.Endpoint != sess.Endpoint || !strings.EqualFold(rec.Address, sess.Address) {
+		return panelReach{}, false
+	}
+	// The destination is part of the answer: an operator who repoints it must not be shown a
+	// verdict about the host it used to probe, and a record taken when there was no usable
+	// destination at all must not survive one being configured.
+	if rec.Host != client.ReachURLHost() {
+		return panelReach{}, false
+	}
+	at, perr := time.Parse(time.RFC3339, rec.CheckedAt)
+	if perr != nil {
+		return panelReach{}, false
+	}
+	if age := time.Since(at); age < 0 || age > panelReachTTL {
+		return panelReach{}, false
+	}
+	return rec.panelReach, true
+}
+
+// writePanelReachCache stores the record (0600, in a 0700 directory). Best-effort: losing it
+// costs two requests, never a wrong verdict, so a write failure is silent.
+func writePanelReachCache(sess statusSession, r panelReach) {
+	raw, err := json.Marshal(panelReachRecord{
+		panelReach: r,
+		CheckedAt:  time.Now().UTC().Format(time.RFC3339),
+		Endpoint:   sess.Endpoint,
+		Address:    sess.Address,
+	})
+	if err != nil {
+		return
+	}
+	path := panelReachCachePath()
+	if os.MkdirAll(filepath.Dir(path), 0o700) != nil {
+		return
+	}
+	_ = os.WriteFile(path, raw, 0o600)
 }
 
 // panelSystemAppsLeg answers the half of the egress story `whisper connect` never could: what

@@ -123,7 +123,7 @@ func TestExploreDeckNavigation(t *testing.T) {
 	}
 }
 
-// TestExploreOrnamentAndOverlayKeys covers the ornament cycle and the o / / /:
+// TestExploreOrnamentAndOverlayKeys covers the ornament cycle and the o / / / :
 // overlay openers.
 func TestExploreOrnamentAndOverlayKeys(t *testing.T) {
 	a := newExploreApp(t, 100, 34, true, fixtureCloudflare())

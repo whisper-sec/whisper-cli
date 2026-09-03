@@ -172,6 +172,10 @@ type statusSession struct {
 	Address  string `json:"address"`
 	Tier     string `json:"tier"`
 	Port     int    `json:"port"`
+	// NAT64Prefix / NAT64Source are the tunnel's own answer, empty when the record does
+	// not carry one. `whale ip -4` prefers them over anything it could compute for itself.
+	NAT64Prefix string `json:"nat64_prefix,omitempty"`
+	NAT64Source string `json:"nat64_source,omitempty"`
 }
 
 // liveStatusSessions reads the session registry and keeps only the records whose
@@ -183,14 +187,16 @@ func liveStatusSessions() []statusSession {
 	var out []statusSession
 	for _, rec := range readSessionRecords() {
 		if !probeWhisperProxy(rec.Port) {
-			removeSessionRecord(rec.Addr)
+			removeSessionRecordAt(rec.path)
 			continue
 		}
 		out = append(out, statusSession{
-			Endpoint: rec.Endpoint,
-			Address:  rec.Addr,
-			Tier:     rec.Tier,
-			Port:     rec.Port,
+			Endpoint:    rec.Endpoint,
+			Address:     rec.Addr,
+			Tier:        rec.Tier,
+			Port:        rec.Port,
+			NAT64Prefix: rec.NAT64Prefix,
+			NAT64Source: rec.NAT64Source,
 		})
 	}
 	return out

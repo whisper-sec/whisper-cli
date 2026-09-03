@@ -116,10 +116,9 @@ type whaleStatusView struct {
 	// still shows up here - which is the whole point of putting it in status.
 	Serving  *whale.ServeState `json:"serving,omitempty"`
 	PathNote string            `json:"path_note"`
-	// Snapshot is how old each authoritative node's copy of the agent zone is (finding
-	// I-03). It is here rather than behind a flag because the thing it exposes - two nodes
-	// serving different snapshots, so a principal you removed still logs in to the one that
-	// is behind - is invisible unless somebody is shown it without asking.
+	// Snapshot is how old each authoritative node's copy of the agent zone is. It is here
+	// rather than behind a flag because two nodes answering from different snapshots is
+	// invisible unless somebody is shown it without asking.
 	Snapshot []whale.SnapshotAge `json:"snapshot,omitempty"`
 	// SnapshotNote is the sentence rendered from Snapshot, carried so --json readers get
 	// the same reading a person gets rather than having to re-derive it.
@@ -160,6 +159,22 @@ func buildWhaleStatus(cx context.Context, agentFile string, wantPeers, probe boo
 	}
 	if view.Self.Address == "" {
 		view.Self.Address = client.ReadAgentFile(agentFile)
+	}
+	// `whale serve` brings its own tunnel up in-process rather than joining the persistent
+	// session `whisper connect` installs, so this host can be carrying real traffic on a routable
+	// /128 in the same minute these cells read `not connected` and `none yet - run: whisper
+	// connect`. Each line is defensible on its own and the pair is not: a customer reading them
+	// together concludes that one of the two is lying, and they are right to. Say what is actually
+	// true instead, without borrowing the word `connected`, which means a session other things
+	// depend on and which this host genuinely does not have.
+	if view.Serving != nil && view.Self.Connection != "connected" {
+		view.Self.Connection = "serving only - `whale serve` holds its own tunnel, no persistent connection"
+		if view.Self.Address == "" {
+			view.Self.Address = view.Serving.Address
+		}
+		if view.Self.Name == "" {
+			view.Self.Name = view.Serving.FQDN
+		}
 	}
 
 	if !view.Self.KeyPresent {
@@ -207,12 +222,10 @@ func buildWhaleStatus(cx context.Context, agentFile string, wantPeers, probe boo
 			"this host is pinned to %s, which is not in the fleet this key can see - "+
 				"the node half and the peer half are describing different accounts", view.Self.Address))
 	}
-	// Finding I-03: how old is the copy each node is answering from? Who may log in is
-	// decided ON a node, from a signed record, and a node that has lost the primary keeps
-	// serving what it holds with nothing bounding how long - SOA expire is never read back
-	// as a limit and the secondary re-signs rather than going BOGUS. The mitigation is
-	// visibility, and the zone the fleet's names live in is the one to date. Bounded and
-	// fail-open: no answer costs the line and nothing else.
+	// How old is the copy each node is answering from? Read each node's SOA and report the
+	// age, so a fleet answering from different snapshots is visible rather than inferred.
+	// The zone the fleet's names live in is the one to date. Bounded and fail-open: no
+	// answer costs the line and nothing else.
 	if zone := fleetZone(peers); zone != "" {
 		view.Snapshot = readZoneSnapshot(cx, zone, time.Now())
 		view.SnapshotNote = whale.SnapshotNote(zone, view.Snapshot)
@@ -404,7 +417,7 @@ func renderWhaleStatus(view whaleStatusView, showSelf, showPeers, probed bool) {
 			whaleNote("%s", view.PathNote)
 		}
 	}
-	// Finding I-03. Printed after the path note and before the general notes, because it is
+	// Node staleness. Printed after the path note and before the general notes, because it is
 	// a standing property of the fleet rather than a fault of this run, and because a person
 	// reading down the screen should meet "how old is what I was just told" last.
 	if view.SnapshotNote != "" {

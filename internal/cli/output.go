@@ -342,7 +342,7 @@ func mapProblem(pe *client.ProblemError) string {
 // isScopeRefusal reports whether a 401/403 is about a missing SCOPE rather than about the
 // key itself. Keyed on the control plane's own words in every shape it sends them: the
 // front door's {"code":"FORBIDDEN_SCOPE"} (decoded into Title), an RFC-7807 type, and the
-// message text, which reads "Missing required scope: dns:whale:write..." and, on older
+// message text, which reads "Missing required scope: dns:whale:write - ..." and, on older
 // paths, "missing required scope: dns:connect".
 func isScopeRefusal(pe *client.ProblemError) bool {
 	s := strings.ToLower(pe.Title + " " + pe.Type + " " + pe.Error())

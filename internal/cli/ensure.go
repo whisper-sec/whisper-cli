@@ -185,7 +185,7 @@ func verifiedSessionOnPort(port int) bool {
 func sweepStaleSessionRecordsForPort(port int) {
 	for _, rec := range readSessionRecords() {
 		if rec.Port == port && !probeWhisperProxy(rec.Port) {
-			removeSessionRecord(rec.Addr)
+			removeSessionRecordAt(rec.path)
 		}
 	}
 }

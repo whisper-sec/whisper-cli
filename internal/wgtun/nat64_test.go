@@ -108,7 +108,7 @@ func TestSynthesizeEmbedsTheV4InTheLow32Bits(t *testing.T) {
 // Round trip: the inverse recovers exactly what went in, for a spread of addresses.
 func TestSynthesizeRoundTrips(t *testing.T) {
 	p := wellKnown(t)
-	for _, s := range []string{"8.8.8.8", "1.1.1.1", "203.0.113.7", "192.0.2.53", "223.255.255.254"} {
+	for _, s := range []string{"8.8.8.8", "1.1.1.1", "203.0.113.7", "78.141.218.153", "223.255.255.254"} {
 		in := netip.MustParseAddr(s)
 		w, err := Synthesize(p, in)
 		if err != nil {
@@ -342,19 +342,30 @@ func TestDialRetriesAV4OnlyNameThroughNAT64(t *testing.T) {
 	}
 }
 
-// A name that HAS a v6 address failed for a real reason. Do not retry it and do not
-// invent a second failure mode: the error the caller sees stays the one we already give.
-func TestDialDoesNotRetryANameWithAV6Address(t *testing.T) {
+// A name that HAS a native v6 address is dialled at that address, and NEVER over NAT64.
+//
+// This previously asserted the opposite outcome - one attempt, and an error - because the name was
+// handed to netstack first and its failure was treated as earned. That first attempt could not be
+// trusted: netstack resolves with one server, AAAA-only on a v6-only stack, over UDP, and returned
+// nothing for every name on a live tunnel. The primary path now resolves on the settled resolver
+// over TCP and dials the answer, so a reachable native address connects. What must not change, and
+// is still asserted, is that no NAT64 form is ever dialled for a name that has a native address.
+func TestDialDialsTheNativeV6AddressAndNeverNat64(t *testing.T) {
 	f := &fakeStack{
 		answers: map[string][]string{"dual.example": {"2001:db8::1", "203.0.113.7"}},
 		fail:    map[string]bool{"dual.example:80": true},
 	}
 	_, err := newTestDialer(f).Dial(context.Background(), "dual.example:80")
-	if err == nil {
-		t.Fatal("a dial that failed for a real reason was reported as success")
+	if err != nil {
+		t.Fatalf("the native v6 address is reachable, so the dial must succeed: %v", err)
 	}
-	if len(f.dialed) != 1 {
-		t.Fatalf("dialed %v, want exactly one attempt", f.dialed)
+	if len(f.dialed) == 0 {
+		t.Fatalf("nothing was dialled; the name must be resolved and its address dialled")
+	}
+	for _, d := range f.dialed {
+		if strings.Contains(d, "64:ff9b::") || strings.Contains(d, "cb00:7107") {
+			t.Fatalf("dialed %v: a name with a native v6 address must never go over NAT64", f.dialed)
+		}
 	}
 }
 

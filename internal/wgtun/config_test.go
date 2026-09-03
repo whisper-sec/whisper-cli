@@ -62,7 +62,8 @@ func TestKeyBase64ToHex(t *testing.T) {
 func TestFromWgQuick_StructuredFieldsWin(t *testing.T) {
 	srvKey := base64.StdEncoding.EncodeToString(make([]byte, 32)) // all-zero key (valid 32 bytes)
 	priv := strings.Repeat("ab", 32)                              // 64 hex chars
-	cfg, err := FromWgQuick(srvKey, "box.example:51826", "2a04:2a01:4::7", "2a04:2a01:0:53::1", "", priv)
+	cfg, err := FromWgQuick(
+		srvKey, "box.example:51826", "2a04:2a01:4::7", "2a04:2a01:0:53::1", "2a04:2a00:64::/96", "", priv)
 	if err != nil {
 		t.Fatalf("FromWgQuick: %v", err)
 	}
@@ -99,7 +100,7 @@ func TestFromWgQuick_BlobFallback(t *testing.T) {
 		"AllowedIPs = ::/0\n" +
 		"PersistentKeepalive = 25\n"
 	priv := strings.Repeat("cd", 32)
-	cfg, err := FromWgQuick("", "", "", "", blob, priv)
+	cfg, err := FromWgQuick("", "", "", "", "", blob, priv)
 	if err != nil {
 		t.Fatalf("FromWgQuick(blob): %v", err)
 	}

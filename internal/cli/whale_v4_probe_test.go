@@ -74,7 +74,7 @@ func TestV4ProbeReachableWhenBothCompleted(t *testing.T) {
 	var log dialLog
 	stubDial(t, &log, allGood)
 
-	p := probeV4Through(context.Background(), 1080, []string{"ns1.whisper.online"})
+	p := probeV4Through(context.Background(), 1080, "", []string{"ns1.whisper.online"})
 	if p.State != v4Reachable {
 		t.Fatalf("state = %q (%s), want reachable", p.State, p.Detail)
 	}
@@ -109,7 +109,7 @@ func TestV4ProbeUnreachableWhenOnlyTheV4HalfFails(t *testing.T) {
 		return 0x00, nil
 	})
 
-	p := probeV4Through(context.Background(), 1080, []string{"ns1.whisper.online"})
+	p := probeV4Through(context.Background(), 1080, "", []string{"ns1.whisper.online"})
 	if p.State != v4Unreachable {
 		t.Fatalf("state = %q (%s), want unreachable", p.State, p.Detail)
 	}
@@ -144,7 +144,7 @@ func TestV4ProbeUnknownWhenTheControlFails(t *testing.T) {
 				return tc.rep, tc.err
 			})
 
-			p := probeV4Through(context.Background(), 1080, []string{"ns1.whisper.online"})
+			p := probeV4Through(context.Background(), 1080, "", []string{"ns1.whisper.online"})
 			if p.State != v4Unknown {
 				t.Fatalf("state = %q, want unknown when the control did not complete", p.State)
 			}
@@ -166,7 +166,7 @@ func TestV4ProbeUnknownWithNoListener(t *testing.T) {
 	stubAnchor(t, testAnchorV4, testAnchorV6)
 	var log dialLog
 	stubDial(t, &log, allGood)
-	p := probeV4Through(context.Background(), 0, []string{"ns1.whisper.online"})
+	p := probeV4Through(context.Background(), 0, "", []string{"ns1.whisper.online"})
 	if p.State != v4Unknown {
 		t.Fatalf("state = %q, want unknown with nothing connected", p.State)
 	}
@@ -185,7 +185,7 @@ func TestV4ProbeUnknownWhenTheAnchorIsNotDualStack(t *testing.T) {
 		stubAnchor(t, only...)
 		var log dialLog
 		stubDial(t, &log, allGood)
-		p := probeV4Through(context.Background(), 1080, []string{"ns1.whisper.online"})
+		p := probeV4Through(context.Background(), 1080, "", []string{"ns1.whisper.online"})
 		if p.State != v4Unknown {
 			t.Fatalf("state = %q for a single-stack anchor %v, want unknown", p.State, only)
 		}
@@ -198,7 +198,7 @@ func TestV4ProbeUnknownWhenTheAnchorIsNotDualStack(t *testing.T) {
 func TestV4ProbeUnknownWithNoAnchors(t *testing.T) {
 	var log dialLog
 	stubDial(t, &log, allGood)
-	p := probeV4Through(context.Background(), 1080, nil)
+	p := probeV4Through(context.Background(), 1080, "", nil)
 	if p.State != v4Unknown {
 		t.Fatalf("state = %q, want unknown with no anchor to measure against", p.State)
 	}

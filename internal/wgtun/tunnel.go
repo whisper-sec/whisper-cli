@@ -62,6 +62,12 @@ type Config struct {
 	Address            netip.Addr // the agent's /128 - the tunnel's only source address
 	DNS                netip.Addr // the resolver to use inside the tunnel (DNS64/NAT64)
 	Keepalive          int        // PersistentKeepalive seconds (server default 25)
+	// NAT64Prefix is the prefix the CONTROL PLANE named for this box (op:connect's
+	// nat64_prefix). The zero value means it named none, which is every server built before that
+	// column existed, and the node then falls back to what it always did. It is a DECLARATION,
+	// not a measurement: newNameService still prefers RFC 7050 discovery over it, because the
+	// live path is the only thing that can prove which translator actually answers.
+	NAT64Prefix netip.Prefix
 	// ListenPort pins the UDP port the device binds. 0 ⇒ the kernel picks one, which
 	// is what it did before. It has to be pinned for a DECLARED endpoint to mean anything: the
 	// ip:port a node tells the control plane it listens on is only true if it actually listens
@@ -139,6 +145,12 @@ type Tunnel struct {
 	healthEvery time.Duration
 	deadAfter   time.Duration
 	logf        func(format string, args ...any)
+
+	// rebindUDP re-opens the device's UDP sockets. A seam rather than a direct call so the
+	// escalation in the health monitor can be OBSERVED by a test: without it the only proof
+	// that a dead socket is ever re-opened would be reading the code and believing it, and
+	// the defect this exists for was itself invisible for two hours.
+	rebindUDP func() error
 
 	// names is what this tunnel settled on for the NAT64 prefix and the in-tunnel resolver
 	// (nameservice.go), decided once at bring-up and read-only thereafter. Held here as well
@@ -230,7 +242,7 @@ func (t *Tunnel) Stop() {
 // it alongside everything else. A bind failure is returned to the caller (best-effort: the tunnel
 // itself is unaffected either way - this is additive proof surface, not the egress data path).
 // ServedDoc is one static document the in-tunnel identity listener serves over the DANE-pinned TLS
-// a gateway-signed identity-doc / JWKS / did:web the agent fetched at connect time. The agent
+// : a gateway-signed identity-doc / JWKS / did:web the agent fetched at connect time. The agent
 // is a THIN server here - the bytes are gateway-signed, nothing is signed in-tunnel.
 type ServedDoc struct {
 	Path        string // exact request path, e.g. "/.well-known/whisper-identity"
@@ -286,6 +298,17 @@ func docsHandler(docs []ServedDoc) http.Handler {
 		})
 	}
 	return mux
+}
+
+// NAT64 reports the prefix this tunnel settled on for IPv4 destinations and where that answer
+// came from, so a caller can tell an operator the truth instead of re-deriving a guess. It is the
+// value every dial through this tunnel actually uses (netDialer.nat64 reads the same field), which
+// is the property that makes it worth reporting at all.
+func (t *Tunnel) NAT64() (netip.Prefix, string) {
+	if t == nil || t.names == nil || !t.names.prefix.IsValid() {
+		return NAT64Prefix()
+	}
+	return t.names.prefix, t.names.prefixSource
 }
 
 // Healthy reports whether the tunnel has completed a handshake recently (within DeadAfter).

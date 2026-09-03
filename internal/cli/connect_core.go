@@ -376,6 +376,28 @@ type egressSession struct {
 	verified   bool          // true when the egress source IP == the agent /128
 	negotiated bool          // true when AUTO tier negotiation picked this tier (the success line then names it)
 	local      localEndpoint // the running proxy (Tier-1.5) or WG tunnel (Tier-1); nil in stubs
+
+	// recordPath is the session-registry file THIS process wrote. Teardown removes that
+	// exact path, after checking the pid in it is still ours, so one session's exit can never
+	// unlink another's row.
+	recordPath string
+}
+
+// nat64 reports the NAT64 prefix this session's tunnel SETTLED on and where that came from, for
+// the Tier-1 WG tier (ok=true); the egress tiers wrap nothing themselves, so there is nothing to
+// report (ok=false). The same seam shape as tunnelHealthy, and for the same reason: the caller
+// should not have to know the tier to ask an honest question.
+func (s *egressSession) nat64() (prefix string, source string, ok bool) {
+	if s == nil {
+		return "", "", false
+	}
+	if t, isWG := s.local.(*wgtun.Tunnel); isWG {
+		p, src := t.NAT64()
+		if p.IsValid() {
+			return p.String(), src, true
+		}
+	}
+	return "", "", false
 }
 
 // tunnelHealthy reports the WireGuard tunnel's live handshake health when this session is the
@@ -417,6 +439,7 @@ type connectEnvelope struct {
 	wgDNS          string // the in-tunnel resolver (DNS64/NAT64)
 	wgQuick        string // the full wg-quick config blob (parsed as a fallback)
 	wgPrivKeyB64   string // server-minted private key, base64 - present ONLY on the zero-key path
+	wgNat64Prefix  string // the NAT64 prefix the BOX translates; "" on a server older than it
 }
 
 // isWireGuard reports whether the server selected the Tier-1 WireGuard tier for this result.
@@ -446,6 +469,10 @@ func parseConnectEnvelope(res *client.Result) (connectEnvelope, error) {
 		out.wgDNS = field(rec, "dns")
 		out.wgQuick = field(rec, "wireguard_config")
 		out.wgPrivKeyB64 = field(rec, "client_private_key") // empty when WE supplied the public key
+		// The box names the prefix it translates, so this node stops guessing one. Absent
+		// on every server built before that column, which is exactly the older behaviour and
+		// not a fault - FromWgQuick treats "" as "nobody said".
+		out.wgNat64Prefix = field(rec, "nat64_prefix")
 		if out.wgServerPubKey == "" && out.wgQuick == "" {
 			return connectEnvelope{}, &client.ProblemError{Status: 502,
 				Detail: "the control plane returned a WireGuard tier without a usable config"}
@@ -651,7 +678,8 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 	if wgKey != nil {
 		privHex = wgKey.PrivateKeyHex
 	}
-	cfg, err := wgtun.FromWgQuick(ce.wgServerPubKey, ce.wgEndpoint, ce.address, ce.wgDNS, ce.wgQuick, privHex)
+	cfg, err := wgtun.FromWgQuick(
+		ce.wgServerPubKey, ce.wgEndpoint, ce.address, ce.wgDNS, ce.wgNat64Prefix, ce.wgQuick, privHex)
 	if err != nil {
 		return nil, &client.ProblemError{Status: 502,
 			Detail: "the control plane returned an unusable WireGuard config"}
@@ -877,11 +905,11 @@ func connectAndVerifyOnPort(ctx context.Context, c *client.Client, res *client.R
 // writeSuccessLine emits the ONE calm, Scandinavian success line on err, and the
 // bearer-free endpoint on out only when quiet (so a script captures exactly one value).
 //
-//	default: stderr → "Connected as <name> - <addr> ✓ verified"
-//	auto: stderr → the same line + " via <landed tier> <local endpoint>" (still ONE line:
+//	default : stderr → "Connected as <name> - <addr> ✓ verified"
+//	auto : stderr → the same line + " via <landed tier> <local endpoint>" (still ONE line:
 //	          the user never asked for a tier, so the answer says which one they landed on
 //	          and the proxy string to point tools at)
-//	--quiet: stdout → "socks5h://127.0.0.1:<port>" (nothing else, anywhere)
+//	--quiet : stdout → "socks5h://127.0.0.1:<port>" (nothing else, anywhere)
 func writeSuccessLine(out, errw io.Writer, s *egressSession, quiet bool) {
 	if quiet {
 		fmt.Fprintln(out, s.endpoint)

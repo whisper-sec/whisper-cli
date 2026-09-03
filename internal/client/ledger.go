@@ -163,7 +163,7 @@ func (c *Client) FetchLedgerKey(ctx context.Context) (*LedgerKey, error) {
 }
 
 // FetchWitnessKeys downloads the published witness policy from <gateway>/witness/keys
-// A 404 means witnessing is simply not enabled on the node, so callers treat that as
+// . A 404 means witnessing is simply not enabled on the node, so callers treat that as
 // "no witness policy" (the honest tamper-evident posture), never an error to surface.
 func (c *Client) FetchWitnessKeys(ctx context.Context) (*WitnessPolicy, error) {
 	base := strings.TrimRight(c.rdapURL, "/")
@@ -385,7 +385,7 @@ const maxForwardSkewSeconds = 300
 // VerifyIndependentCosignatures counts the DISTINCT independent witnesses from the published
 // policy whose cosignature on THIS checkpoint cryptographically verifies AND is fresh
 // (-maxForwardSkew <= now-ts <= maxAge). This is the cryptographic publicly-verifiable check
-// the CLI recomputes everything with stock crypto; the endpoint's own
+// : the CLI recomputes everything with stock crypto; the endpoint's own
 // publicly_verifiable bool is never trusted, only cross-checked. Availability-only
 // (independent=false) witnesses never count; a stale, far-future-dated, tampered, or
 // wrong-key cosignature never counts.

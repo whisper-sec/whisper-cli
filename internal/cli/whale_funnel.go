@@ -19,7 +19,7 @@ package cli
 // address the internet can reach.
 //
 // Ours is a publish verb. The /128 is globally routable and inbound-reachable already
-// and the leaf is pinned by a TLSA in a signed zone. So a funnel does not deploy
+//, and the leaf is pinned by a TLSA in a signed zone. So a funnel does not deploy
 // anything: it decides to answer strangers. That is the whole difference, and it is why
 // the verb spends its care on CONSENT and on being switchable off rather than on plumbing:
 //

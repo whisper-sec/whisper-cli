@@ -134,9 +134,10 @@ func newWhaleMigratePlanCmd() *cobra.Command {
 		Use:   "plan",
 		Short: "Read a tailnet and write a plan. Changes nothing, on either side",
 		Long: "Read a Tailscale tailnet with a read-only credential and write a plan file.\n\n" +
-			"This command performs GETs and nothing else. The API client behind it has no write\n" +
+			"Every call it makes to either side is a GET. The API client behind it has no write\n" +
 			"method at all, so \"changes nothing on either side\" is structural rather than a\n" +
-			"promise: re-read both sides afterwards and they are byte-identical.\n\n" +
+			"promise: re-read both sides afterwards and they are byte-identical. The one thing\n" +
+			"it writes is the plan file you name with -o, here on this host.\n\n" +
 			"Four things are unreadable and the plan says so before it starts rather than\n" +
 			"halfway through: auth-key secrets (their schema populates `key` only at creation),\n" +
 			"node private keys, IdP/SCIM-synced group membership, and per-node serve/funnel\n" +

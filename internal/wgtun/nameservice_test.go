@@ -34,6 +34,15 @@ type dnsStack struct {
 	// perResolver overrides the answers for one resolver address, so a test can make the
 	// ladder's two rungs behave differently. Absent, every resolver sees the same table.
 	perResolver map[string]*dnsStack
+	// edes maps the same key to an RFC 8914 Extended DNS Error the reply should carry, so a
+	// test can reproduce a resolver that refuses a name AND says why.
+	edes map[string]ede
+}
+
+// ede is an Extended DNS Error a fixture reply attaches.
+type ede struct {
+	code uint16
+	text string
 }
 
 func key(name string, qtype uint16) string { return dnsName(name) + "|" + typeName(qtype) }
@@ -121,6 +130,26 @@ func (s *dnsStack) reply(q []byte) []byte {
 		msg = binary.BigEndian.AppendUint16(msg, 16)
 		msg = append(msg, b[:]...)
 	}
+	// ARCOUNT is set explicitly rather than inherited. The header was copied from the QUERY,
+	// which carries an OPT of its own, so without this every fixture reply would claim an
+	// additional record it does not contain: a malformed message, and one that would let a
+	// parser bug pass by reading a section that is not there.
+	if e, ok := s.edes[k]; ok {
+		msg = append(msg, 0) // root name
+		msg = binary.BigEndian.AppendUint16(msg, dnsTypeOPT)
+		msg = binary.BigEndian.AppendUint16(msg, ednsUDPPayload)
+		msg = binary.BigEndian.AppendUint32(msg, 0)
+		body := make([]byte, 2+len(e.text))
+		binary.BigEndian.PutUint16(body, e.code)
+		copy(body[2:], e.text)
+		msg = binary.BigEndian.AppendUint16(msg, uint16(4+len(body))) // RDLEN
+		msg = binary.BigEndian.AppendUint16(msg, ednsOptionExtendedError)
+		msg = binary.BigEndian.AppendUint16(msg, uint16(len(body)))
+		msg = append(msg, body...)
+		binary.BigEndian.PutUint16(msg[10:], 1)
+	} else {
+		binary.BigEndian.PutUint16(msg[10:], 0)
+	}
 	return msg
 }
 
@@ -148,9 +177,10 @@ func synth(t *testing.T, prefix, v4 string) netip.Addr {
 
 const nsp = "2a04:2a00:64::/96" // the fleet's dedicated agent NAT64 prefix
 
-// controlA is what a resolver that recurses answers for the RFC 7050 name. The probe asks
-// for it FIRST, as the control that separates "this resolver will not serve me" from "this
-// resolver has no DNS64", so every fixture that means "usable" has to carry it.
+// controlA is what a resolver that recurses answers for the RECURSION PROBE name. The probe used to
+// ask for the RFC 7050 name, which whisper-ns answers unconditionally (POLICY_EXEMPT_NAMES), so a
+// resolver refusing every real name still passed it. It now asks a name nothing special-cases, and
+// every fixture that means "this resolver is usable" answers that instead.
 func controlA() []netip.Addr {
 	return []netip.Addr{wellKnownIPv4OnlyAddrs[0], wellKnownIPv4OnlyAddrs[1]}
 }
@@ -166,13 +196,13 @@ func resolverAddr() netip.Addr { return netip.MustParseAddr("2a04:2a01:0:53::1")
 
 func TestDiscoversTheNAT64PrefixTheResolverActuallySynthesisesInto(t *testing.T) {
 	s := &dnsStack{answers: map[string][]netip.Addr{
-		key(wellKnownIPv4OnlyName, dnsTypeA): controlA(),
+		key(recursionProbeName, dnsTypeA): controlA(),
 		key(wellKnownIPv4OnlyName, dnsTypeAAAA): {
 			synth(t, nsp, "192.0.0.170"),
 			synth(t, nsp, "192.0.0.171"),
 		},
 	}}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	if got := ns.prefix.String(); got != nsp {
 		t.Fatalf("prefix = %s, want the discovered %s (a guessed well-known prefix is the bug)", got, nsp)
 	}
@@ -192,10 +222,10 @@ func TestDiscoversTheNAT64PrefixTheResolverActuallySynthesisesInto(t *testing.T)
 // is strictly worse than the guess it replaced, so the embedded-v4 check is load-bearing.
 func TestAnAnswerThatDoesNotEmbedTheWellKnownIPv4IsNotAPrefix(t *testing.T) {
 	s := &dnsStack{answers: map[string][]netip.Addr{
-		key(wellKnownIPv4OnlyName, dnsTypeA):    controlA(),
+		key(recursionProbeName, dnsTypeA):       controlA(),
 		key(wellKnownIPv4OnlyName, dnsTypeAAAA): {netip.MustParseAddr("2001:db8::1")},
 	}}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	if ns.prefix.String() != WellKnownNAT64Prefix {
 		t.Fatalf("prefix = %s, want the unchanged default %s", ns.prefix, WellKnownNAT64Prefix)
 	}
@@ -215,10 +245,10 @@ func TestAnAnswerThatDoesNotEmbedTheWellKnownIPv4IsNotAPrefix(t *testing.T) {
 // was wrong. Ask for the AAAA only, and this test fails.
 func TestAResolverThatRecursesWithoutDns64IsStillUsable(t *testing.T) {
 	s := &dnsStack{
-		answers: map[string][]netip.Addr{key(wellKnownIPv4OnlyName, dnsTypeA): controlA()},
+		answers: map[string][]netip.Addr{key(recursionProbeName, dnsTypeA): controlA()},
 		rcodes:  map[string]uint8{key(wellKnownIPv4OnlyName, dnsTypeAAAA): 3}, // NXDOMAIN
 	}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	if !ns.resolverOK {
 		t.Fatalf("a resolver that answers the control must stay usable; verdict = %q", ns.verdict)
 	}
@@ -235,8 +265,8 @@ func TestAResolverThatRecursesWithoutDns64IsStillUsable(t *testing.T) {
 // three possible faults look identical from the user's seat. The tunnel must still come up,
 // must fail open, and must say which of the three it was.
 func TestARefusingResolverIsNamedAndTheTunnelStillComesUp(t *testing.T) {
-	s := &dnsStack{rcodes: map[string]uint8{key(wellKnownIPv4OnlyName, dnsTypeA): 5}}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	s := &dnsStack{rcodes: map[string]uint8{key(recursionProbeName, dnsTypeA): 5}}
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	if ns.resolverOK {
 		t.Fatalf("a resolver that refused the control must not be marked usable")
 	}
@@ -252,17 +282,21 @@ func TestARefusingResolverIsNamedAndTheTunnelStillComesUp(t *testing.T) {
 // so without a resolver reachable INSIDE the tunnel the session carries nothing by name. Delete
 // the fallback rung from pickResolver and this test fails.
 func TestABrokenNamedResolverFallsBackToOneInsideTheTunnel(t *testing.T) {
-	fallback := whisperPublicResolver()
+	// The named resolver here IS the first agent-plane candidate, which is the real case where
+	// the control plane hands an agent the SHARED resolver rather than a per-tenant one. The
+	// ladder must skip the address it has already rejected and move to the next one on the same
+	// plane, so the expected fallback is the SECOND agent-plane resolver and not the first.
+	fallback := agentPlaneResolvers[1]
 	s := &dnsStack{
 		perResolver: map[string]*dnsStack{
 			fallback.String(): {answers: map[string][]netip.Addr{
-				key(wellKnownIPv4OnlyName, dnsTypeA):    controlA(),
+				key(recursionProbeName, dnsTypeA):       controlA(),
 				key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")},
 			}},
 		},
-		rcodes: map[string]uint8{key(wellKnownIPv4OnlyName, dnsTypeA): 3}, // the named one: NXDOMAIN
+		rcodes: map[string]uint8{key(recursionProbeName, dnsTypeA): 3}, // the named one: NXDOMAIN
 	}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	if !ns.resolverOK || ns.resolver != fallback {
 		t.Fatalf("resolver = %v ok=%v, want the in-tunnel fallback %v", ns.resolver, ns.resolverOK, fallback)
 	}
@@ -280,17 +314,17 @@ func TestABrokenNamedResolverFallsBackToOneInsideTheTunnel(t *testing.T) {
 // so the user hears nothing at all. A tunnel that narrates its own healthy bring-up is noise.
 func TestAWorkingNamedResolverIsUsedSilently(t *testing.T) {
 	s := &dnsStack{answers: map[string][]netip.Addr{
-		key(wellKnownIPv4OnlyName, dnsTypeA):    controlA(),
+		key(recursionProbeName, dnsTypeA):       controlA(),
 		key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")},
 	}}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	if ns.resolver != resolverAddr() || ns.verdict != "" {
 		t.Fatalf("resolver=%v verdict=%q, want the named resolver and silence", ns.resolver, ns.verdict)
 	}
 }
 
 func TestAnUnreachableResolverSaysDnsNotRouting(t *testing.T) {
-	ns := newNameService(context.Background(), &dnsStack{refuseConnect: true}, resolverAddr())
+	ns := newNameService(context.Background(), &dnsStack{refuseConnect: true}, resolverAddr(), netip.Prefix{})
 	if ns.resolverOK {
 		t.Fatalf("an unreachable resolver must not be marked usable")
 	}
@@ -300,7 +334,7 @@ func TestAnUnreachableResolverSaysDnsNotRouting(t *testing.T) {
 }
 
 func TestNoResolverAtAllIsAnOrdinaryOutcome(t *testing.T) {
-	ns := newNameService(context.Background(), &dnsStack{}, netip.Addr{})
+	ns := newNameService(context.Background(), &dnsStack{}, netip.Addr{}, netip.Prefix{})
 	if ns.resolverOK || ns.verdict == "" {
 		t.Fatalf("ok=%v verdict=%q, want not-usable with a sentence", ns.resolverOK, ns.verdict)
 	}
@@ -311,10 +345,10 @@ func TestNoResolverAtAllIsAnOrdinaryOutcome(t *testing.T) {
 func TestAPinnedPrefixWinsAndTheDisagreementIsReported(t *testing.T) {
 	t.Setenv(nat64PrefixEnv, WellKnownNAT64Prefix)
 	s := &dnsStack{answers: map[string][]netip.Addr{
-		key(wellKnownIPv4OnlyName, dnsTypeA):    controlA(),
+		key(recursionProbeName, dnsTypeA):       controlA(),
 		key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")},
 	}}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	if ns.prefix.String() != WellKnownNAT64Prefix {
 		t.Fatalf("prefix = %s, want the pinned %s", ns.prefix, WellKnownNAT64Prefix)
 	}
@@ -334,13 +368,13 @@ func TestAPinnedPrefixWinsAndTheDisagreementIsReported(t *testing.T) {
 func TestAV4OnlyNameIsResolvedOverTheTunnelAndTranslated(t *testing.T) {
 	s := &dnsStack{
 		answers: map[string][]netip.Addr{
-			key(wellKnownIPv4OnlyName, dnsTypeA):    controlA(),
+			key(recursionProbeName, dnsTypeA):       controlA(),
 			key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")},
 			key("v4only.example", dnsTypeA):         {netip.MustParseAddr("203.0.113.7")},
 		},
 		failDial: map[string]bool{"v4only.example:80": true},
 	}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	d := &netDialer{stack: s, timeout: time.Second, names: ns}
 	if _, err := d.Dial(context.Background(), "v4only.example:80"); err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -360,13 +394,13 @@ func TestADns64SynthesisedAaaaIsDialledNotMistakenForNativeV6(t *testing.T) {
 	synthesised := synth(t, nsp, "203.0.113.7")
 	s := &dnsStack{
 		answers: map[string][]netip.Addr{
-			key(wellKnownIPv4OnlyName, dnsTypeA):    controlA(),
+			key(recursionProbeName, dnsTypeA):       controlA(),
 			key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")},
 			key("v4only.example", dnsTypeAAAA):      {synthesised},
 		},
 		failDial: map[string]bool{"v4only.example:80": true},
 	}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	d := &netDialer{stack: s, timeout: time.Second, names: ns}
 	if _, err := d.Dial(context.Background(), "v4only.example:80"); err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -377,24 +411,44 @@ func TestADns64SynthesisedAaaaIsDialledNotMistakenForNativeV6(t *testing.T) {
 	}
 }
 
-// The other side of that coin, and a property worth keeping: a name with a NATIVE v6 address
-// failed for a real reason, and reaching it over NAT64 instead would egress from a shared IPv4
-// SNAT rather than the agent's own /128. Silently changing which identity a connection presents
-// is the one thing an identity product must not do, so the name keeps the error it earned.
+// The property worth keeping, restated for the current contract: a dual-stack name must NEVER be
+// reached over NAT64. Doing so would egress from a shared IPv4 SNAT rather than the agent's own
+// /128, and silently changing which identity a connection presents is the one thing an identity
+// product must not do.
+//
+// What changed, and why the old assertion had to go. This used to also assert that the dial FAILED,
+// on the reasoning that the name had "earned its error" from the first attempt. That reasoning
+// depended on the first attempt being a real connect. It is not: the primary path now resolves the
+// name on the settled resolver over TCP and dials the address, because handing the name to netstack
+// asked AAAA-only over UDP against a single server and failed for every name on a live tunnel. So
+// there is no earned error to preserve - the native address is dialled directly, and the fixture's
+// failDial on the NAME is never consulted. The security property is unchanged and still asserted.
 func TestANameWithNativeV6IsNotReroutedThroughNat64(t *testing.T) {
 	s := &dnsStack{
 		answers: map[string][]netip.Addr{
-			key(wellKnownIPv4OnlyName, dnsTypeA):    controlA(),
+			key(recursionProbeName, dnsTypeA):       controlA(),
 			key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")},
 			key("dual.example", dnsTypeAAAA):        {netip.MustParseAddr("2001:db8::1")},
 			key("dual.example", dnsTypeA):           {netip.MustParseAddr("203.0.113.7")},
 		},
 		failDial: map[string]bool{"dual.example:80": true},
 	}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	d := &netDialer{stack: s, timeout: time.Second, names: ns}
-	if _, err := d.Dial(context.Background(), "dual.example:80"); err == nil {
-		t.Fatalf("a dial that failed for a real reason was reported as success")
+	if _, err := d.Dial(context.Background(), "dual.example:80"); err != nil {
+		t.Fatalf("the native v6 address is reachable, so the dial must succeed: %v", err)
+	}
+	if len(s.dialed) == 0 {
+		t.Fatalf("nothing was dialled; the name must be resolved and its address dialled")
+	}
+	sawNative := false
+	for _, dialed := range s.dialed {
+		if strings.Contains(dialed, "2001:db8::1") {
+			sawNative = true
+		}
+	}
+	if !sawNative {
+		t.Fatalf("dialed %v, want the NATIVE v6 address", s.dialed)
 	}
 	for _, dialed := range s.dialed {
 		if strings.Contains(dialed, "cb00:7107") {
@@ -408,10 +462,10 @@ func TestANameWithNativeV6IsNotReroutedThroughNat64(t *testing.T) {
 // says out loud, and it is the difference between a working tool and a dead one.
 func TestAnUnusableResolverFallsBackToThisHostAndStillConnects(t *testing.T) {
 	s := &dnsStack{
-		rcodes:   map[string]uint8{key(wellKnownIPv4OnlyName, dnsTypeA): 5},
+		rcodes:   map[string]uint8{key(recursionProbeName, dnsTypeA): 5},
 		failDial: map[string]bool{"v4only.example:80": true},
 	}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	ns.hostLookup = func(_ context.Context, network, _ string) ([]netip.Addr, error) {
 		if network != "ip4" {
 			return nil, errors.New("no such host") // v4-only: no AAAA, so the retry is allowed
@@ -432,10 +486,10 @@ func TestAnUnusableResolverFallsBackToThisHostAndStillConnects(t *testing.T) {
 // the literal path is the one that silently egressed from the wrong address.
 func TestALiteralIsWrappedIntoTheDiscoveredPrefix(t *testing.T) {
 	s := &dnsStack{answers: map[string][]netip.Addr{
-		key(wellKnownIPv4OnlyName, dnsTypeA):    controlA(),
+		key(recursionProbeName, dnsTypeA):       controlA(),
 		key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")},
 	}}
-	ns := newNameService(context.Background(), s, resolverAddr())
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
 	d := &netDialer{stack: s, timeout: time.Second, names: ns}
 	if _, err := d.Dial(context.Background(), "8.8.8.8:53"); err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -580,5 +634,48 @@ func TestBuildQueryRoundTripsThroughTheParser(t *testing.T) {
 	name, qtype, _ := readQuestion(q)
 	if name != "example.com." || qtype != dnsTypeAAAA {
 		t.Fatalf("(%q,%d), want a lower-cased root-terminated name and AAAA", name, qtype)
+	}
+}
+
+// A query with no OPT record cannot be answered with an Extended DNS Error, so a resolver that is
+// broken and one that is deliberately refusing us arrive as the same bare rcode. Those two need
+// opposite remedies, and telling them apart is the whole reason the OPT is on the wire. This asserts
+// the additional section is really emitted and really well formed: a query that merely LOOKS right
+// but sets ARCOUNT 0, or writes the OPT into the wrong section, buys us no diagnosis at all.
+func TestBuildQueryCarriesAnOPTRecordSoTheResolverCanExplainItself(t *testing.T) {
+	q, err := buildQuery("example.com", dnsTypeA)
+	if err != nil {
+		t.Fatalf("buildQuery: %v", err)
+	}
+	if got := binary.BigEndian.Uint16(q[10:]); got != 1 {
+		t.Fatalf("ARCOUNT = %d, want 1 - without it the OPT is invisible to the resolver", got)
+	}
+
+	// The OPT is the last 11 bytes: one zero byte for the root name, then TYPE, CLASS, TTL, RDLEN.
+	const optLen = 1 + 2 + 2 + 4 + 2
+	if len(q) < optLen {
+		t.Fatalf("query is %d bytes, too short to hold an OPT at all", len(q))
+	}
+	opt := q[len(q)-optLen:]
+	if opt[0] != 0 {
+		t.Fatalf("OPT owner name = %#x, want the root label (0)", opt[0])
+	}
+	if got := binary.BigEndian.Uint16(opt[1:]); got != dnsTypeOPT {
+		t.Fatalf("OPT TYPE = %d, want %d", got, dnsTypeOPT)
+	}
+	if got := binary.BigEndian.Uint16(opt[3:]); got != ednsUDPPayload {
+		t.Fatalf("advertised payload = %d, want %d", got, ednsUDPPayload)
+	}
+	if got := binary.BigEndian.Uint32(opt[5:]); got != 0 {
+		t.Fatalf("extended rcode/version/flags = %#x, want 0 (version 0, DO clear)", got)
+	}
+	if got := binary.BigEndian.Uint16(opt[9:]); got != 0 {
+		t.Fatalf("RDLEN = %d, want 0 - we send no EDNS options", got)
+	}
+
+	// The question must still parse: an OPT appended over the top of the question would satisfy
+	// every check above and still be a broken query.
+	if name, qtype, _ := readQuestion(q); name != "example.com." || qtype != dnsTypeA {
+		t.Fatalf("question reads (%q,%d) with the OPT present, want example.com./A", name, qtype)
 	}
 }

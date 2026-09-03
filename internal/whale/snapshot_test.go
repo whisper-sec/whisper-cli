@@ -14,7 +14,7 @@ import (
 var snapNow = time.Unix(1_788_239_069, 0)
 
 // TestAgeOf_ReadsAnEpochAnchoredSerialAsATime: the ordinary case, and the one the whole
-// line rests on. bumpSerial = max(current+1, epochSeconds), so on any zone written less
+// line rests on: serials here are epoch-anchored, so on any zone written less
 // than once a second the serial IS the second it last changed.
 func TestAgeOf_ReadsAnEpochAnchoredSerialAsATime(t *testing.T) {
 	a := AgeOf("ns1.whisper.online", uint32(snapNow.Unix()-600), snapNow)
@@ -58,8 +58,8 @@ func TestAgeOf_RefusesToDateASerialItCannotStandBehind(t *testing.T) {
 
 // TestAgeOf_ASerialAheadOfTheClockIsNeverFreshness: a negative interval must never render
 // as an age, because "0s old" on a zone whose serial is a year in the future is the most
-// confident wrong answer this file could give. A SMALL lead is legitimate (every write
-// above one per second buys a second) and reads as fresh; a large one is a finding.
+// confident wrong answer this file could give. A SMALL lead is legitimate and reads as
+// fresh; a large one is worth flagging.
 func TestAgeOf_ASerialAheadOfTheClockIsNeverFreshness(t *testing.T) {
 	small := AgeOf("ns1", uint32(snapNow.Unix()+30), snapNow)
 	if !small.Known || small.Age != 0 {
@@ -100,7 +100,7 @@ func TestSnapshotNote_SaysTheNodesAgree(t *testing.T) {
 
 // TestSnapshotNote_SaysTheNodesDISAGREE. THE case this whole file exists for. Two nodes on
 // different serials means which one answers decides what you are told, and a principal
-// removed from the fleet may still be admitted by the node that is behind. It must be
+// answering from a stale snapshot is unreliable until the fleet converges. It must be
 // impossible to read the line and miss that.
 func TestSnapshotNote_SaysTheNodesDISAGREE(t *testing.T) {
 	note := SnapshotNote("agents.whisper.online", []SnapshotAge{
@@ -110,7 +110,7 @@ func TestSnapshotNote_SaysTheNodesDISAGREE(t *testing.T) {
 	if !strings.Contains(note, "THE NODES DISAGREE") {
 		t.Fatalf("divergence must be stated, got %q", note)
 	}
-	if !strings.Contains(note, "may still be admitted") {
+	if !strings.Contains(note, "unreliable until") {
 		t.Fatalf("the consequence must be stated, not just the fact, got %q", note)
 	}
 	// Both ages are still shown: a warning with no numbers cannot be acted on.

@@ -9,7 +9,7 @@ import (
 )
 
 // search domains - the REAL OS search domain, which is the primary mechanism behind
-// `ping db-01`. Board finding B-22: what looked like a search list was
+// `ping db-01`. What looked like a search list was
 // systemd-resolved ROUTING syntax ("~example.com"), which never completes a bare
 // name. These rows pin the difference on all three platforms, and pin the two
 // properties that keep the apply safe: we only ever ADD our suffix, and revert

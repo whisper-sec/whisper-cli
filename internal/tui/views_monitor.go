@@ -235,7 +235,7 @@ func (v *monitorView) blockRate(key string) float64 {
 }
 
 // lastBlockedTargets returns the most recent blocked qname and denied peer for a scope
-// key = one agent's ring, "" = the newest across EVERY ring (the (all) view).
+// : key = one agent's ring, "" = the newest across EVERY ring (the (all) view).
 // Empty strings mean none seen this session - the caller renders nothing (honest).
 func (v *monitorView) lastBlockedTargets(key string) (qname, peer string) {
 	var qUS, pUS int64
@@ -258,7 +258,7 @@ func (v *monitorView) lastBlockedTargets(key string) (qname, peer string) {
 }
 
 // blockedTargetLine renders the WHAT-was-blocked summary line for the current scope
-// or "" when nothing was blocked this session. The ✗ glyph carries the meaning
+// , or "" when nothing was blocked this session. The ✗ glyph carries the meaning
 // (NO_COLOR-safe); red reinforces. Both targets show when both exist.
 func (v *monitorView) blockedTargetLine(key string, iw int) string {
 	qname, peer := v.lastBlockedTargets(key)

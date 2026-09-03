@@ -44,7 +44,19 @@ type sessionRecord struct {
 	Endpoint string `json:"endpoint"` // the bearer/key-free local endpoint, e.g. socks5h://127.0.0.1:1080
 	Tier     string `json:"tier"`     // socks5 | anyip | wireguard
 	Port     int    `json:"port"`     // the ACTUAL bound local port (random interactive ports included)
-	PID      int    `json:"pid"`      // the holding process (diagnostics only; liveness is the probe)
+	PID      int    `json:"pid"`      // the holding process; the owner check on teardown reads it
+	// NAT64Prefix / NAT64Source are what the TUNNEL settled on. They are here because
+	// `whisper whale ip -4` runs in a DIFFERENT process from the one holding the tunnel, and
+	// re-deriving the prefix there would report this process's guess rather than the tunnel's
+	// answer, which is the exact thing this field exists to stop. Absent on an egress-tier record and
+	// on a record written before this field, and both read as "we do not know, say the guess".
+	NAT64Prefix string `json:"nat64_prefix,omitempty"`
+	NAT64Source string `json:"nat64_source,omitempty"`
+
+	// path is the file this record was READ from. Not serialised: it is how a sweep
+	// removes the record it is actually looking at instead of recomputing a name, which is what
+	// lets records written by an older build (keyed on the address alone) still be swept.
+	path string
 }
 
 // sessionsDirFn resolves the registry directory. A package var so tests point it at a temp dir.
@@ -58,11 +70,22 @@ func defaultSessionsDir() string {
 	return filepath.Join(home, ".config", "whisper", "sessions")
 }
 
-// sessionRecordPath maps a /128 to its record file. Colons are not portable in filenames
-// (Windows), so they are flattened; the Addr INSIDE the record stays the real literal.
-func sessionRecordPath(addr string) string {
+// sessionRecordPath maps ONE SESSION to its record file: the /128 AND the local port it bound.
+// Colons are not portable in filenames (Windows), so they are flattened; the Addr INSIDE the
+// record stays the real literal.
+//
+// The key used to be the address alone, so two `whisper connect` sessions for one agent
+// shared one file and whichever exited first deleted the survivor's entry. The survivor kept
+// serving perfectly - process up, port listening, traffic flowing, launchd never restarted it -
+// while `whisper status` and the panel both said "not connected - run: whisper connect". That
+// combination stopped being exotic when a resident session became the default on every Mac,
+// because the remedy those surfaces print creates the second session.
+//
+// The port is the discriminator that costs nothing: two holders cannot bind the same one, and
+// an interactive connect already takes a random port while the resident daemon holds 1080.
+func sessionRecordPath(addr string, port int) string {
 	name := strings.ReplaceAll(strings.TrimSpace(addr), ":", "_")
-	return filepath.Join(sessionsDirFn(), name+".json")
+	return filepath.Join(sessionsDirFn(), fmt.Sprintf("%s-%d.json", name, port))
 }
 
 // writeSessionRecord registers a HELD session we own (sess.local != nil) in the local registry.
@@ -79,6 +102,9 @@ func writeSessionRecord(sess *egressSession) {
 		Port:     endpointPort(sess.endpoint),
 		PID:      os.Getpid(),
 	}
+	if prefix, source, ok := sess.nat64(); ok {
+		rec.NAT64Prefix, rec.NAT64Source = prefix, source
+	}
 	if rec.Port <= 0 {
 		return // an endpoint we can't probe later is useless as a reuse target
 	}
@@ -89,26 +115,60 @@ func writeSessionRecord(sess *egressSession) {
 	if err := os.MkdirAll(sessionsDirFn(), 0o700); err != nil {
 		return
 	}
-	_ = os.WriteFile(sessionRecordPath(sess.addr), b, 0o600)
+	path := sessionRecordPath(sess.addr, rec.Port)
+	if os.WriteFile(path, b, 0o600) == nil {
+		// Remember exactly what we wrote, so teardown removes THAT file and nothing else.
+		sess.recordPath = path
+	}
 }
 
 // clearSessionRecord removes a held session's record on teardown (best-effort). Only the OWNER
 // (sess.local != nil) may clear - a one-shot that merely reused the session must never unlink the
 // daemon's record.
+//
+// It removes the file this process WROTE, and only after re-reading it and confirming the
+// pid on disk is still ours. Per-session keying already stops the collision that caused the bug,
+// but a teardown that unlinks a path by recomputing a name is one key-scheme change away from
+// deleting somebody else's row again. A cleanup that can delete a record it did not write is the
+// defect whatever the key scheme is, so this one cannot.
 func clearSessionRecord(sess *egressSession) {
 	if sess == nil || sess.local == nil || sess.addr == "" {
 		return
 	}
-	removeSessionRecord(sess.addr)
-}
-
-// removeSessionRecord unlinks the record for a /128 (best-effort; used for owner teardown and for
-// lazily sweeping a stale record whose probe failed).
-func removeSessionRecord(addr string) {
-	if strings.TrimSpace(addr) == "" {
+	path := sess.recordPath
+	if path == "" {
+		// An older path, or a write that failed: fall back to the name this session would have
+		// used. Still ownership-checked below, so the worst case is that nothing is removed.
+		path = sessionRecordPath(sess.addr, endpointPort(sess.endpoint))
+	}
+	if !ownsSessionRecord(path) {
 		return
 	}
-	_ = os.Remove(sessionRecordPath(addr))
+	removeSessionRecordAt(path)
+}
+
+// ownsSessionRecord reports whether the record at path was written by THIS process. A file we
+// cannot read or parse is not ours to delete: unreadable must never mean "safe to remove".
+func ownsSessionRecord(path string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	var rec sessionRecord
+	if json.Unmarshal(b, &rec) != nil {
+		return false
+	}
+	return rec.PID == os.Getpid()
+}
+
+// removeSessionRecordAt unlinks one record file (best-effort). Sweeps use the path the record was
+// READ from rather than one recomputed from its fields, so a record written by an older build -
+// keyed on the address alone, with no port in the name - is still removable.
+func removeSessionRecordAt(path string) {
+	if strings.TrimSpace(path) == "" {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // readSessionRecords loads every parseable record in the registry (unreadable/garbled files are
@@ -131,6 +191,7 @@ func readSessionRecords() []sessionRecord {
 		if json.Unmarshal(b, &rec) != nil || rec.Addr == "" || rec.Endpoint == "" || rec.Port <= 0 {
 			continue
 		}
+		rec.path = filepath.Join(sessionsDirFn(), e.Name())
 		out = append(out, rec)
 	}
 	return out
@@ -166,8 +227,19 @@ func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressS
 	}
 	var match *sessionRecord
 	if target != "" {
+		// One agent can now legitimately have MORE than one live session, so take the
+		// first one whose proxy answers rather than the first one on disk. Reusing a dead row
+		// while a live sibling sits behind it in the directory listing would send the caller
+		// into a fresh op:connect that replaces the live peer, which is the clobber this whole
+		// registry exists to prevent.
 		for i := range recs {
-			if sameIP(recs[i].Addr, target) {
+			if !sameIP(recs[i].Addr, target) {
+				continue
+			}
+			if match == nil {
+				match = &recs[i]
+			}
+			if probeWhisperProxy(recs[i].Port) {
 				match = &recs[i]
 				break
 			}
@@ -184,7 +256,7 @@ func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressS
 	// a foreign listener fails here, the stale record is swept, and we fall through to a fresh
 	// connect (regression-free).
 	if !probeWhisperProxy(match.Port) {
-		removeSessionRecord(match.Addr)
+		removeSessionRecordAt(match.path)
 		return nil, false
 	}
 	return &egressSession{

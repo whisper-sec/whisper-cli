@@ -89,6 +89,35 @@ type PathStateRecord struct {
 	PID     int              `json:"pid"`
 	Updated time.Time        `json:"updated"`
 	Peers   []PathPeerRecord `json:"peers"`
+
+	// TunnelHealthy is the holder's OWN reading of whether the tunnel has handshaked recently.
+	//
+	// It exists because record freshness answers a different question than anyone reading it
+	// assumed. A monitor that is failing to re-handshake is still a monitor that is running, so
+	// it keeps republishing on every tick and the record never goes stale. On 2026-09-03 a panel
+	// reported `healthy: true` for a session whose own log had reached re-handshake attempt 183
+	// and which was carrying no traffic at all. Nothing lied: freshness was being read as health,
+	// and those are the liveness of the PUBLISHER and the health of the TUNNEL.
+	//
+	// A POINTER so that absent and false stay different things. A record written by an older
+	// holder has no opinion, and must fall back to the freshness heuristic rather than be read as
+	// a confident "unhealthy" that nobody published.
+	TunnelHealthy *bool `json:"tunnel_healthy,omitempty"`
+
+	// Reconnects is how many times the monitor has had to re-handshake a dead tunnel. It only
+	// grows, so a healthy long-lived tunnel stays at 0 and a flapping one climbs without bound.
+	// Published because "healthy right now" and "has failed 183 times in two hours" are both
+	// true of a flapping tunnel, and only the second one explains what the user is seeing.
+	Reconnects int `json:"reconnects,omitempty"`
+}
+
+// TunnelHealth reports the holder's own reading, and whether it published one at all. Callers
+// must prefer this to Stale(): freshness says the publisher is alive, not that the tunnel works.
+func (r PathStateRecord) TunnelHealth() (healthy bool, published bool) {
+	if r.TunnelHealthy == nil {
+		return false, false
+	}
+	return *r.TunnelHealthy, true
 }
 
 // Age is how long ago this record was written.
@@ -204,11 +233,14 @@ func (t *Tunnel) publishPaths() {
 		return
 	}
 	peers := t.DirectPeers()
+	healthy := t.Healthy()
 	rec := PathStateRecord{
-		Address: t.cfg.Address.String(),
-		PID:     os.Getpid(),
-		Updated: time.Now(),
-		Peers:   make([]PathPeerRecord, 0, len(peers)),
+		Address:       t.cfg.Address.String(),
+		PID:           os.Getpid(),
+		Updated:       time.Now(),
+		TunnelHealthy: &healthy,
+		Reconnects:    t.Reconnects(),
+		Peers:         make([]PathPeerRecord, 0, len(peers)),
 	}
 	for _, p := range peers {
 		rec.Peers = append(rec.Peers, PathPeerRecord{
@@ -303,12 +335,31 @@ func writePathRecord(path string, b []byte) error {
 // is going away: a record that outlives its tunnel is a claim nothing stands behind. A reader
 // would have caught it anyway through the pid, so this is tidiness rather than correctness -
 // which is the right level of effort for a teardown that may not get to run at all.
+//
+// It removes the record only when the pid inside it is OURS. The file is keyed on the
+// address alone, so two tunnels for one /128 share it, and an unconditional remove let the
+// exiting one delete the survivor's row. That is what the panel then rendered as
+// "tunnel": {"known": false, "healthy": false} over a tunnel that was up and carrying traffic.
+// A record we cannot read, or one naming another process, is not ours to unlink; the pid sweep
+// in ReadPathStates already retires it the moment its holder is gone.
 func (t *Tunnel) clearPaths() {
 	dir := t.pathStateDir()
 	if dir == "" {
 		return
 	}
-	_ = os.Remove(pathRecordPath(dir, t.cfg.Address.String()))
+	path := pathRecordPath(dir, t.cfg.Address.String())
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var rec PathStateRecord
+	if json.Unmarshal(b, &rec) != nil {
+		return
+	}
+	if rec.PID != 0 && rec.PID != os.Getpid() {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 // pathFingerprint is the part of a record that a reader would notice changing: which peers there

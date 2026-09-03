@@ -134,7 +134,13 @@ var socks5Dial = func(ctx context.Context, listenerPort int, addr netip.Addr, po
 // probeV4Through measures the IPv4 half through one live local listener. It never returns
 // an error: a probe that cannot run produces an UNKNOWN carrying the reason, because the
 // caller's job is to print an honest sentence and "the probe errored" is not one.
-func probeV4Through(ctx context.Context, listenerPort int, anchors []string) v4Probe {
+//
+// prefixStr is the NAT64 prefix the TUNNEL settled on. A blank value means the caller
+// could not learn it - an old session record, or an egress tier - and the probe then falls back
+// to what this process would guess, which is what it always did. Measuring through a prefix the
+// tunnel does not use would give a confident, wrong answer in either direction: a working v4 path
+// reported dead, or a dead one reported alive because the well-known prefix happens to route.
+func probeV4Through(ctx context.Context, listenerPort int, prefixStr string, anchors []string) v4Probe {
 	started := time.Now()
 	p := v4Probe{State: v4Unknown}
 	defer func() { p.ElapsedMs = time.Since(started).Milliseconds() }()
@@ -148,7 +154,10 @@ func probeV4Through(ctx context.Context, listenerPort int, anchors []string) v4P
 		p.Detail = "could not find a dual-stack anchor to measure against: " + err.Error()
 		return p
 	}
-	prefix, _ := wgtun.NAT64Prefix()
+	prefix, perr := wgtun.ParseNAT64Prefix(prefixStr)
+	if perr != nil {
+		prefix, _ = wgtun.NAT64Prefix()
+	}
 	wrapped, serr := wgtun.Synthesize(prefix, v4)
 	if serr != nil {
 		p.Detail = "the anchor's IPv4 address cannot be carried by NAT64: " + serr.Error()

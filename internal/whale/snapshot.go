@@ -10,25 +10,19 @@ import (
 	"time"
 )
 
-// snapshot.go answers "how old is the answer this node just gave me", which is the
-// mitigation finding I-03 asked for and the one thing `whale ssh` shipped without.
+// snapshot.go answers one question: "how old is the answer this node just gave me".
 //
-// THE PROBLEM. Who may log in to a node is decided ON that node, by an authorized-keys
-// command reading a DNSSEC-signed record. A node that has lost contact with the primary
-// keeps serving the copy it holds, and nothing bounds how long: SOA expire is never read
-// back as a limit, and the secondary re-signs rather than going BOGUS, so the records stay
-// valid indefinitely. A revoked principal therefore keeps being admitted by a partitioned
-// node for as long as the partition lasts, and from the outside that node looks perfectly
-// healthy. The chosen mitigation is not an expiry - a fleet that stops answering is worse
-// than one that answers a little late - it is VISIBILITY: say how old the copy is, and let
-// a person decide.
+// WHY IT EXISTS. A node can keep serving a copy of its configuration after it has lost
+// contact with the primary, and from the outside it looks perfectly healthy either way.
+// The choice made here is VISIBILITY rather than expiry: a fleet that stops answering is
+// worse than one that answers a little late, so this reports the age of the copy and lets
+// an operator decide what to do about it.
 //
-// WHY A CLIENT CAN COMPUTE IT AT ALL. The serial is epoch-anchored by construction:
-// every write takes max(current + 1, epoch seconds), so under any write rate below one per
-// second the serial IS the second the zone last changed. That makes staleness readable
-// from one SOA query per node, with no new server surface, no metrics endpoint and no
-// credential. Deriving it from what a node already has beats fetching it from somewhere
-// else, and it works from a laptop.
+// WHY A CLIENT CAN COMPUTE IT AT ALL. Zone serials here are epoch-anchored, so a serial
+// can be read as an approximate last-changed time. That makes staleness readable from a
+// single SOA query per node, with no new server surface, no metrics endpoint and no
+// credential. Deriving it from what a node already publishes beats fetching it from
+// somewhere else, and it works from a laptop.
 //
 // Nothing in here queries anything. It takes serials that a caller read and turns them
 // into an age and a sentence, so the rules can be tested exactly and the network part
@@ -41,9 +35,9 @@ import (
 const epochAnchorFloor = 1_600_000_000
 
 // serialLeadTolerance is how far AHEAD of the reader's clock a serial may sit and still be
-// read as fresh. Every write above one per second buys a second of lead, so a busy zone
-// legitimately runs a little into the future; beyond this the honest answer is that the
-// two clocks (or the anchoring) disagree, not that the zone is fresh.
+// read as fresh. A busy zone can legitimately run a little into the future; beyond
+// this the honest answer is that the two clocks (or the anchoring) disagree, not
+// that the zone is fresh.
 const serialLeadTolerance = time.Hour
 
 // SnapshotAge is one node's answer about one zone.
@@ -126,19 +120,18 @@ func SnapshotNote(zone string, ages []SnapshotAge) string {
 			" of unknown age."
 	case len(serials) > 1:
 		return line + " THE NODES DISAGREE: they are answering from different snapshots, so which one" +
-			" replies decides what you are told. A node that has lost the primary keeps serving its own" +
-			" copy indefinitely - nothing bounds it - so a principal you removed may still be admitted" +
-			" by the node that is behind."
+			" replies decides what you are told. Treat the older node's answer as unreliable until they" +
+			" converge."
 	case oldest >= staleAfter:
-		return line + " That is older than a healthy fleet runs. A node that has lost the primary keeps" +
-			" serving its own copy indefinitely, so a principal you removed may still be admitted there."
+		return line + " That is older than a healthy fleet runs. Treat this node's answer as unreliable" +
+			" until it catches up."
 	default:
 		return line + " Every node is answering from the same recent snapshot."
 	}
 }
 
 // staleAfter is when an age stops being ordinary and starts being worth a sentence. The
-// signing refresh and the ordinary write rate keep a healthy fleet far below it; a zone
+// ordinary write rate keeps a healthy fleet far below it; a zone
 // that has not changed in a day is either idle or cut off, and the two look identical
 // from here, which is precisely why the line says what it says rather than judging.
 const staleAfter = 24 * time.Hour

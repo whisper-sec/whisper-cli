@@ -24,7 +24,7 @@ import (
 // widen?" is not a property of the rule, it is a property of the rule MEETING a target
 // that cannot hold all of it, and writing that as data keeps the two apart.
 //
-// The values here are the corrected ones from finding B-30. The compiled WhaleACL
+// The values here are the corrected ones. The compiled WhaleACL
 // artifact is `(srcSet, dstSet, proto, portRange, action)` plus a per-node predicate mask,
 // so source, protocol and ports all survive. What does NOT survive is a HOST-dimension
 // rule east-west: the kernel has no graph, no cache and no hostname, so it cannot evaluate
@@ -512,7 +512,7 @@ func mapOneRule(in ruleInput, target Expressiveness, hostAddrs map[string]netip.
 		return mappedRule{rule: rule, fidelity: []Fidelity{noSourceFidelity(in.From, in.SourceIndex, in.Dst)}}
 	}
 
-	// 1) The HOST dimension east-west. This is the residue finding B-30 says does not go
+	// 1) The HOST dimension east-west. This is the residue that does not go
 	// away: the kernel has no hostname, so a name destination cannot be evaluated there
 	// at all, and keeping the rule means keeping something broader than they wrote.
 	if plane == PlaneEastWest && isHostDimension(dstTarget, hostAddrs) && !target.HostEastWest {

@@ -12,7 +12,7 @@ import (
 )
 
 // serveidentity.go turns a caller's socket address into the PeerIdentity the headers carry
-// Three rules shape it, and they are the same three the resolver hot path obeys.
+//. Three rules shape it, and they are the same three the resolver hot path obeys.
 //
 // 1. THE FAST HALF IS NEVER BLOCKED. The address and whether it is on the Whisper net are
 // computed with no I/O at all, so the worst outcome of a dead control plane or a slow

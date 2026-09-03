@@ -56,9 +56,3 @@ require (
 	golang.zx2c4.com/wintun v0.0.0-20230126152724-0fa3db229ce2 // indirect
 	gvisor.dev/gvisor v0.0.0-20250503011706-39ed1f5ac29c // indirect
 )
-
-// Withdrawn releases. Use v0.211.0 or later.
-retract (
-	v0.210.1
-	v0.210.0
-)

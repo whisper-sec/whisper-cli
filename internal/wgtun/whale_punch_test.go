@@ -147,7 +147,7 @@ func TestFailedPunch_CostsLatencyNotReachability(t *testing.T) {
 	box := startRelayBox(t, clientPubHex, clientIP, []netip.Addr{mustAddr(t, "2a04:2a01:0:53::1"), peerIP}, echoPort)
 
 	cfg, err := FromWgQuick(box.pubB64, netip.AddrPortFrom(mustAddr(t, "::1"), uint16(box.udpPort)).String(),
-		clientIP.String(), box.serverIP.String(), "", kp.PrivateKeyHex)
+		clientIP.String(), box.serverIP.String(), "", "", kp.PrivateKeyHex)
 	if err != nil {
 		t.Fatalf("FromWgQuick: %v", err)
 	}
@@ -266,7 +266,7 @@ func TestPunch_RotatesToAWorkingCandidateAndPromotesOnTheHandshake(t *testing.T)
 	other := startPeerSide(t, clientPubHex, clientIP)
 
 	cfg, err := FromWgQuick(box.pubB64, netip.AddrPortFrom(mustAddr(t, "::1"), uint16(box.udpPort)).String(),
-		clientIP.String(), box.serverIP.String(), "", kp.PrivateKeyHex)
+		clientIP.String(), box.serverIP.String(), "", "", kp.PrivateKeyHex)
 	if err != nil {
 		t.Fatalf("FromWgQuick: %v", err)
 	}
@@ -378,7 +378,7 @@ func TestPunch_ADeadDirectPathFallsBackAndIsPunchedAgain(t *testing.T) {
 	other := startPeerSide(t, clientPubHex, clientIP)
 
 	cfg, _ := FromWgQuick(box.pubB64, netip.AddrPortFrom(mustAddr(t, "::1"), uint16(box.udpPort)).String(),
-		clientIP.String(), box.serverIP.String(), "", kp.PrivateKeyHex)
+		clientIP.String(), box.serverIP.String(), "", "", kp.PrivateKeyHex)
 	tun, err := Start(cfg, Options{
 		HealthInterval:  100 * time.Millisecond,
 		DeadAfter:       30 * time.Second,

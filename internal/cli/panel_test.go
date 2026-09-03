@@ -55,13 +55,34 @@ func panelIsolation(t *testing.T) string {
 	prevLegs, prevDrive := newSysProxyLegs, systemProxyDrivable
 	prevWrite, prevRestore := writeSystemProxyFn, restoreSystemProxyFn
 	newSysProxyLegs = func() sysProxyLegs { return &fakeSysProxyLegs{} }
+	// The egress reachability probe is reset here for the same reason: it makes two real HTTPS
+	// requests to a host that is deliberately NOT ours, and a unit test must never make one. The
+	// default answers "nothing was measured", which is the cheapest honest answer and touches
+	// nothing; a test that cares installs its own with panelStubReach.
+	prevReach := panelReachLeg
+	panelReachLeg = func(context.Context, statusSession) panelReach { return panelReach{} }
 	t.Cleanup(func() {
 		sessionsDirFn = prevSessions
 		g = prevG
 		newSysProxyLegs, systemProxyDrivable = prevLegs, prevDrive
 		writeSystemProxyFn, restoreSystemProxyFn = prevWrite, prevRestore
+		panelReachLeg = prevReach
 	})
 	return dir
+}
+
+// panelStubReach installs one scripted pair of reachability observations, and records the
+// session it was asked about so a test can prove the leg was actually consulted.
+func panelStubReach(t *testing.T, r panelReach) *[]statusSession {
+	t.Helper()
+	var asked []statusSession
+	saved := panelReachLeg
+	panelReachLeg = func(_ context.Context, sess statusSession) panelReach {
+		asked = append(asked, sess)
+		return r
+	}
+	t.Cleanup(func() { panelReachLeg = saved })
+	return &asked
 }
 
 // fakeSysProxyLegs is the pre-flight's three measurements, scripted. Every verdict below is
@@ -1071,8 +1092,10 @@ func TestPanelSystemProxy_ReEnablingKeepsTheORIGINALPreviousState(t *testing.T) 
 		t.Fatalf("first enable: %v", err)
 	}
 
-	// A second session on a new port, with the first setting still in place.
-	removeSessionRecord(first.Address)
+	// A second session on a new port, with the first setting still in place. The first record is
+	// removed by ITS OWN path: the registry is keyed on the /128 AND the port, so the
+	// two sessions below are two rows and the second no longer overwrites the first.
+	removeSessionRecordAt(sessionRecordPath(first.Address, first.Port))
 	second := panelSysProxySession(t, "2a04:2a01:9::abcd", 41080)
 	if err := runPanelSystemProxySet(true, sysProxyEnableOptions{verifyTimeout: time.Second}); err != nil {
 		t.Fatalf("second enable: %v", err)

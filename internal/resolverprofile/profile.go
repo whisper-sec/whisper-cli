@@ -99,7 +99,7 @@ type Profile struct {
 	// thing from MatchDomains, which only says which names ROUTE to Whisper -
 	// systemd-resolved's "~example.com" is routing-only and never completes a
 	// bare name, which is why the search-domain support had to add this rather than reuse the
-	// field that looked like it (finding B-22). Empty means the OS keeps whatever
+	// field that looked like it. Empty means the OS keeps whatever
 	// search list it already had; we only ever ADD ours.
 	SearchDomains []string
 	// AppleProfileURL, when set, is the CMS-SIGNED .mobileconfig URL for this
@@ -262,7 +262,7 @@ func (p Profile) searchDomains() []string {
 //
 // - "~example.com" is ROUTING only: send queries for that namespace to this
 // link's DNS. It never completes a bare hostname, which is the whole of
-// finding B-22 - the code that looked like a search domain was not one.
+// the distinction: the code that looked like a search domain was not one.
 // - "example.com" (no tilde) is a real SEARCH domain: it is appended to a
 // single-label name AND routed. That is what makes `ping db-01` work.
 //

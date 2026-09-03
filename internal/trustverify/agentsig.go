@@ -41,7 +41,7 @@ import (
 
 // SignatureCustody is the one-line custody statement carried on every signature report. It is
 // deliberately not optimistic: the DNS record cannot tell a hosted key from an agent-held one
-// so the claim is bounded by the weaker of the two.
+// , so the claim is bounded by the weaker of the two.
 const SignatureCustody = "this key's private half is held by the agent OR, under hosted custody, by Whisper" +
 	" on the agent's behalf; a pass proves the bytes were signed by THIS agent's key, not by a member" +
 	" identity the platform cannot fabricate. A routed agent supplies its own public key, and a public" +

@@ -106,6 +106,7 @@ func Start(cfg Config, opts Options) (*Tunnel, error) {
 		logf:        opts.Logf,
 		stop:        make(chan struct{}),
 	}
+	t.rebindUDP = dev.BindUpdate
 
 	// 4. Settle names and IPv4 BEFORE the front-end accepts its first connection.
 	// Both answers are properties of the far end, not of this process, so we ask rather
@@ -114,7 +115,7 @@ func Start(cfg Config, opts Options) (*Tunnel, error) {
 	// Bounded and fail-open - a probe that times out costs the refinement and nothing else,
 	// and whatever is degraded is said once, here, in a sentence rather than a symptom.
 	nameCtx, cancelNames := context.WithTimeout(context.Background(), nameServiceProbeTimeout)
-	names := newNameService(nameCtx, tnet, cfg.DNS)
+	names := newNameService(nameCtx, tnet, cfg.DNS, cfg.NAT64Prefix)
 	cancelNames()
 	t.names = names
 	if names.verdict != "" {
@@ -388,6 +389,27 @@ func (d *netDialer) Dial(ctx context.Context, target string) (net.Conn, error) {
 		dialTarget = translated
 	}
 
+	// Resolve a NAME ourselves before dialling, on the settled resolver over TCP - the seam every
+	// other dial in this file uses.
+	//
+	// Handing a name to netstack looks equivalent and is not. netstack resolves it with the ONE
+	// server the tun was built with (device.go, CreateNetTUN), asks AAAA only because this stack
+	// holds a single IPv6 /128 and so hasV4 is false, sends it over UDP only, and on NXDOMAIN or
+	// an empty NOERROR returns immediately without trying anything else. None of that is visible
+	// from here: the dial just fails, and diagnosis() then blames the destination.
+	//
+	// Measured through a live tunnel: the in-tunnel resolver answers github.com AAAA over TCP with
+	// a synthesised address (NOERROR, ancount=1), while every name dialled through netstack failed.
+	// The resolver was never the problem and the fail-open ladder in nameservice.go was never
+	// consulted, because it only ever governed the retry below, not this path.
+	//
+	// So the ladder governs the primary path now. An IP literal still goes straight through.
+	if !isIPLiteralTarget(dialTarget) && d.names != nil {
+		if conn, ok := d.dialResolved(dctx, dialTarget); ok {
+			return conn, nil
+		}
+	}
+
 	c, err := d.stack.DialContext(dctx, "tcp", dialTarget)
 	if err == nil {
 		return c, nil
@@ -450,6 +472,50 @@ func (d *netDialer) diagnosis() string {
 		" rather than the Whisper connection"
 }
 
+// isIPLiteralTarget reports whether "host:port" carries an address rather than a name, so the
+// resolve step can be skipped for the socks5 (non-h) path and for anything already translated.
+func isIPLiteralTarget(target string) bool {
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		return false
+	}
+	_, perr := netip.ParseAddr(strings.Trim(host, "[]"))
+	return perr == nil
+}
+
+// dialResolved resolves the name on the tunnel's settled resolver and dials the answers in order,
+// preferring a native v6 address over a NAT64 synthesis: the native form keeps the agent's own /128
+// as the source, while a synthesis egresses from a shared v4 SNAT. Reports ok=false when it cannot
+// resolve or cannot connect, so the caller still falls through to the paths below rather than
+// turning a resolvable name into a hard failure.
+func (d *netDialer) dialResolved(ctx context.Context, target string) (net.Conn, bool) {
+	host, port, err := net.SplitHostPort(target)
+	if err != nil {
+		return nil, false
+	}
+	prefix := d.nat64()
+	aaaa, aerr := d.names.resolve(ctx, d.stack, host, dnsTypeAAAA)
+	if aerr != nil || len(aaaa) == 0 {
+		return nil, false
+	}
+	var synth []netip.Addr
+	for _, a := range aaaa {
+		if prefix.IsValid() && prefix.Contains(a) {
+			synth = append(synth, a)
+			continue
+		}
+		if conn, derr := d.stack.DialContext(ctx, "tcp", net.JoinHostPort(a.String(), port)); derr == nil {
+			return conn, true
+		}
+	}
+	for _, a := range synth {
+		if conn, derr := d.stack.DialContext(ctx, "tcp", net.JoinHostPort(a.String(), port)); derr == nil {
+			return conn, true
+		}
+	}
+	return nil, false
+}
+
 // dialV4OnlyName is the second half of the v4 story, and until it was a half that could
 // never fire.
 //
@@ -497,12 +563,16 @@ func (d *netDialer) dialV4OnlyName(ctx context.Context, target string) (net.Conn
 	// around it over NAT64 would egress from a shared IPv4 SNAT rather than the agent's own
 	// /128. Quietly changing which identity a connection presents is the last thing an
 	// identity product should do, so the name keeps the error it earned.
-	var native bool
+	// ONE firstErr across the rungs below. It used to be re-declared per rung, with an early
+	// `return nil, firstErr` after the synthesised loop, so a single dead NAT64 address ended the
+	// function before the native rung could run - vetoing the very addresses that rung exists to
+	// dial. Keep the first error we saw and let every rung have its turn.
+	var firstErr error
+	var native []netip.Addr
 	if aaaa, aerr := d.names.resolve(ctx, d.stack, host, dnsTypeAAAA); aerr == nil {
-		var firstErr error
 		for _, a := range aaaa {
 			if !prefix.Contains(a) {
-				native = true
+				native = append(native, a)
 				continue
 			}
 			conn, derr := d.stack.DialContext(ctx, "tcp", net.JoinHostPort(a.String(), port))
@@ -513,12 +583,38 @@ func (d *netDialer) dialV4OnlyName(ctx context.Context, target string) (net.Conn
 				firstErr = derr
 			}
 		}
-		if firstErr != nil {
-			return nil, firstErr
-		}
 	}
-	if native {
-		return nil, errors.New("the name has a v6 address; the first dial already tried it")
+	// A NATIVE v6 answer used to end here, on the reasoning that the first dial had already
+	// tried it and the name had earned its error. That reasoning holds only when the first
+	// dial failed at CONNECT. It fails at RESOLUTION for every name on this tunnel: the
+	// netstack is built with the box resolver and looks names up over UDP, while everything
+	// else here - dnsQuery, the RFC 7050 probe, this retry - goes over TCP through the same
+	// seam as any other dial, because that is the seam that works. So the first dial never
+	// reached the destination to earn anything, and refusing to dial a perfectly good AAAA
+	// condemned every dual-stack name on the tunnel. Measured: github.com, example.com and
+	// google.com all failed through socks5h while an IP literal to the same hosts succeeded.
+	//
+	// Dialling it here does NOT do what the old comment feared. Wrapping a v4 address into
+	// NAT64 changes the egress to a shared v4 SNAT, and that is worth refusing. A native v6
+	// address is dialled from this stack, sourced from the agent's own /128, which is exactly
+	// what the netstack dial would have done had its lookup worked. The identity is unchanged.
+	if len(native) > 0 {
+		for _, a := range native {
+			conn, derr := d.stack.DialContext(ctx, "tcp", net.JoinHostPort(a.String(), port))
+			if derr == nil {
+				return conn, nil
+			}
+			if firstErr == nil {
+				firstErr = derr
+			}
+		}
+		// Deliberately terminal: falling through from a failed NATIVE dial into A-synthesis
+		// would silently move this connection's egress to a shared v4 SNAT. That is the one
+		// thing an identity product must not do quietly.
+		if firstErr == nil {
+			firstErr = errors.New("no native v6 address could be dialled")
+		}
+		return nil, firstErr
 	}
 
 	// No DNS64 on the path, so do the synthesis ourselves from the A record.
@@ -526,7 +622,6 @@ func (d *netDialer) dialV4OnlyName(ctx context.Context, target string) (net.Conn
 	if rerr != nil {
 		return nil, rerr
 	}
-	var firstErr error
 	for _, v4 := range addrs {
 		wrapped, serr := Synthesize(prefix, v4)
 		if serr != nil {

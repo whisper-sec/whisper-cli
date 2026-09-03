@@ -149,6 +149,7 @@ func TestTunnel_EndToEndEgress(t *testing.T) {
 		clientIP.String(),
 		srv.serverIP.String(),
 		"",
+		"",
 		kp.PrivateKeyHex,
 	)
 	if err != nil {
@@ -212,7 +213,7 @@ func TestTunnel_StopIsCleanAndIdempotent(t *testing.T) {
 	srv := startServerSide(t, clientPubHex, clientIP, 7001)
 
 	cfg, err := FromWgQuick(srv.pubB64, net.JoinHostPort("::1", strconv.Itoa(srv.udpPort)),
-		clientIP.String(), srv.serverIP.String(), "", kp.PrivateKeyHex)
+		clientIP.String(), srv.serverIP.String(), "", "", kp.PrivateKeyHex)
 	if err != nil {
 		t.Fatalf("FromWgQuick: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestTunnel_ReconnectOnDeadHandshake(t *testing.T) {
 	srv := startServerSide(t, clientPubHex, clientIP, 7002)
 
 	cfg, err := FromWgQuick(srv.pubB64, net.JoinHostPort("::1", strconv.Itoa(srv.udpPort)),
-		clientIP.String(), srv.serverIP.String(), "", kp.PrivateKeyHex)
+		clientIP.String(), srv.serverIP.String(), "", "", kp.PrivateKeyHex)
 	if err != nil {
 		t.Fatalf("FromWgQuick: %v", err)
 	}

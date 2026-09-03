@@ -32,6 +32,16 @@ func (t *Tunnel) monitor() {
 	var nextReconnect time.Time // earliest time we may force the next reconnect
 	var stall stallTracker      // counts consecutive failed re-handshakes, so the note can escalate
 
+	// Consecutive forced reconnects that have not produced a handshake. Re-pointing the peer
+	// endpoint cannot fix a dead UDP SOCKET, and on a laptop that is the common case: sleep, or
+	// a change of network, leaves the device with sockets that will never carry another packet.
+	// Observed on 2026-09-03, a session reached re-handshake attempt 183 over two hours without
+	// once recovering, because every attempt was IpcSet(update_only) against the same dead bind.
+	// After rebindAfter fruitless attempts we escalate to BindUpdate, which closes and re-opens
+	// the sockets and clears each peer's cached source address, then let the backoff continue.
+	const rebindAfter = 3
+	sinceRebind := 0
+
 	for {
 		select {
 		case <-t.stop:
@@ -52,6 +62,7 @@ func (t *Tunnel) monitor() {
 			if ok && !last.IsZero() && now.Sub(last) < t.deadAfter {
 				backoff = baseBackoff
 				nextReconnect = time.Time{}
+				sinceRebind = 0
 				stall.recovered()
 				continue
 			}
@@ -61,6 +72,9 @@ func (t *Tunnel) monitor() {
 			if !nextReconnect.IsZero() && now.Before(nextReconnect) {
 				continue
 			}
+			// Escalate before trying the same thing a fourth time. A re-pointed endpoint on a
+			// dead socket is the same non-answer however many times it is repeated.
+			sinceRebind = t.escalateIfStuck(sinceRebind, rebindAfter)
 			if err := t.setPeerEndpoint(); err != nil {
 				t.note("whisper: WireGuard tunnel re-handshake failed, retrying…")
 			} else {
@@ -208,4 +222,35 @@ func (s *stallTracker) attemptFailed() (string, bool) {
 // from zero, and to be explained again if it stalls a second time.
 func (s *stallTracker) recovered() {
 	s.consecutive, s.said = 0, false
+}
+
+// escalateIfStuck counts one more fruitless forced reconnect and, once repeating the same
+// re-point has clearly stopped helping, re-opens the device's UDP sockets. It returns the new
+// counter, reset to zero on the tick that escalated so the next escalation is another full run
+// away rather than every tick.
+//
+// Separate from the monitor loop for the same reason stallTracker is: the escalation can then be
+// driven by a test without a live WireGuard device, which is the only way anyone can show it
+// actually fires. The defect it exists for went two hours and 183 attempts without firing at all.
+func (t *Tunnel) escalateIfStuck(sinceRebind, threshold int) int {
+	sinceRebind++
+	if sinceRebind <= threshold {
+		return sinceRebind
+	}
+	if err := t.rebind(); err != nil {
+		t.note("whisper: could not re-open the tunnel's UDP socket, still retrying…")
+	} else {
+		t.note("whisper: re-opening the tunnel's UDP socket (the network moved, or this host slept)…")
+	}
+	return 0
+}
+
+// rebind re-opens the device's UDP sockets, through the seam so a test can observe it. A tunnel
+// built without one (a unit test's zero value) reports success and changes nothing, which keeps
+// the escalation from being the reason an unrelated test panics.
+func (t *Tunnel) rebind() error {
+	if t.rebindUDP == nil {
+		return nil
+	}
+	return t.rebindUDP()
 }

@@ -27,7 +27,7 @@ import (
 // early and every value carrying an apostrophe came back as
 //
 //	400 bad_request "could not read the whisper.agents(...) map literal:
-//	                 expected, or } after a map entry, found '''"
+//	                 expected , or } after a map entry, found '''"
 //
 // measured against graph.whisper.online and against ns1 directly. The docstring here
 // promised that "a legitimate apostrophe in a label (Tim O'Reilly) just works" while the

@@ -98,3 +98,55 @@ func TestAccessorsMatchResolveOverThisBinary(t *testing.T) {
 		t.Errorf("ID()/Time() = (%q, %q), want (%q, %q)", ID(), Time(), wantID, wantTime)
 	}
 }
+
+// The link-time stamp. build-all.sh passes the revision in because the
+// toolchain's own does not survive the checkout shape we build in: a git
+// worktree stamps the main clone's HEAD when it is nested inside it, and
+// records nothing at all when it is not. Both measured; the published v0.211.0
+// assets carry no vcs.* settings whatsoever.
+
+func TestResolveStampedPrefersTheLinkTimeValue(t *testing.T) {
+	// The toolchain half is deliberately a DIFFERENT, valid revision. If the
+	// stamp were ignored this would still return something that looks correct,
+	// which is how the wrong commit gets believed.
+	other := "0000111122223333444455556666777788889999"
+	id, when := resolveStamped(fullRev, "2026-09-02T05:36:16Z", info("vcs.revision", other, "vcs.time", "2026-01-01T00:00:00Z"), true)
+	if id != "d6d4c5f4998e" {
+		t.Errorf("id = %q, want the stamped revision abbreviated, not the toolchain's %q", id, other)
+	}
+	if when != "2026-09-02T05:36:16Z" {
+		t.Errorf("time = %q, want the stamped commit time", when)
+	}
+}
+
+func TestResolveStampedCarriesTheDirtyMarkerThrough(t *testing.T) {
+	id, _ := resolveStamped(fullRev+dirtySuffix, "", nil, false)
+	if id != "d6d4c5f4998e"+dirtySuffix {
+		t.Errorf("id = %q, want the abbreviated revision with the dirty marker kept on the end", id)
+	}
+}
+
+func TestResolveStampedFallsBackWhenNothingWasStamped(t *testing.T) {
+	// An unstamped build must still report whatever the toolchain managed to
+	// record. The stamp is an addition, never a replacement.
+	id, when := resolveStamped("", "", info("vcs.revision", fullRev, "vcs.time", "2026-09-01T14:29:59Z"), true)
+	if id != "d6d4c5f4998e" || when != "2026-09-01T14:29:59Z" {
+		t.Errorf("resolveStamped(\"\", \"\", ...) = (%q, %q), want the toolchain values", id, when)
+	}
+}
+
+func TestResolveStampedTreatsBlankAsUnstamped(t *testing.T) {
+	// A build that passes -X with an empty value must not shadow a usable
+	// toolchain revision with nothing.
+	id, _ := resolveStamped("   ", "  ", info("vcs.revision", fullRev), true)
+	if id != "d6d4c5f4998e" {
+		t.Errorf("id = %q, want the toolchain revision - whitespace is not a stamp", id)
+	}
+}
+
+func TestResolveStampedReportsUnknownWhenNeitherSideHasOne(t *testing.T) {
+	id, when := resolveStamped("", "", nil, false)
+	if id != "" || when != "" {
+		t.Errorf("resolveStamped with nothing anywhere = (%q, %q), want empty - unknown must read as unknown", id, when)
+	}
+}

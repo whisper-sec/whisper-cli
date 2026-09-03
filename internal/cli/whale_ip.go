@@ -72,10 +72,12 @@ func newWhaleIPCmd() *cobra.Command {
 					pcx, pcancel := ctx()
 					defer pcancel()
 					port := 0
+					prefix := ""
 					if len(sessions) > 0 {
 						port = sessions[0].Port
+						prefix = sessions[0].NAT64Prefix // measure the prefix the tunnel uses
 					}
-					m := probeV4Through(pcx, port, whaleBoxHosts())
+					m := probeV4Through(pcx, port, prefix, whaleBoxHosts())
 					measured = &m
 				}
 				v := whaleV4Status(sessions, measured)

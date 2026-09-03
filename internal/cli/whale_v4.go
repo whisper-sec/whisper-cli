@@ -5,6 +5,7 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
@@ -48,7 +49,12 @@ type whaleV4View struct {
 	Reachability string `json:"reachability"`
 	Endpoint     string `json:"endpoint,omitempty"`
 	NAT64Prefix  string `json:"nat64_prefix,omitempty"`
-	Tier         string `json:"tier,omitempty"`
+	// NAT64PrefixSource says WHERE the prefix above came from: the control plane, an RFC 7050
+	// measurement, an operator pin, or a guess. Before that issue this command named the
+	// prefix THIS process would have guessed, which is not necessarily the one the tunnel wraps
+	// into, and there was no way to tell the two apart from the output.
+	NAT64PrefixSource string `json:"nat64_prefix_source,omitempty"`
+	Tier              string `json:"tier,omitempty"`
 	// Measured is the probe result and is ALWAYS present, reading "not-measured" when no
 	// probe ran. Never omitempty: an absent field is exactly how an unmeasured claim gets
 	// read as a measured one.
@@ -77,15 +83,23 @@ func whaleV4Status(sessions []statusSession, measured *v4Probe) whaleV4View {
 	v.Tier = orVal(s.Tier, "socks5")
 	v.Endpoint = fmt.Sprintf("127.0.0.1:%d", s.Port)
 	if v.Tier == "wireguard" {
-		prefix, _ := wgtun.NAT64Prefix()
+		// Prefer what the TUNNEL settled on. Recomputing it here would report this
+		// process's own guess, and this process is not the one holding the tunnel.
+		prefix, source := s.NAT64Prefix, s.NAT64Source
+		if prefix == "" {
+			p, why := wgtun.NAT64Prefix()
+			prefix, source = p.String(), why
+		}
 		v.Reachability = "nat64"
-		v.NAT64Prefix = prefix.String()
+		v.NAT64Prefix = prefix
+		v.NAT64PrefixSource = source
 		v.Note = fmt.Sprintf("This node has no IPv4 address, and it does not need one. Its identity is the "+
 			"IPv6 /128 %s. IPv4 DESTINATIONS are carried by NAT64 (%s): the local listener at %s is itself "+
 			"IPv4, so a v4-only client library needs no changes, and an IPv4 target is wrapped into that "+
-			"prefix before it goes down the tunnel. Point it at the listener: "+
+			"prefix before it goes down the tunnel.%s Point it at the listener: "+
 			"curl -4 --proxy socks5h://%s http://<a v4-only host>/. %s",
-			orDash(s.Address), v.NAT64Prefix, v.Endpoint, v.Endpoint, measuredClause(v.Measured))
+			orDash(s.Address), v.NAT64Prefix, v.Endpoint, prefixSourceClause(v.NAT64PrefixSource),
+			v.Endpoint, measuredClause(v.Measured))
 		return v
 	}
 	v.Reachability = "box"
@@ -95,6 +109,16 @@ func whaleV4Status(sessions []statusSession, measured *v4Probe) whaleV4View {
 		"curl -4 --proxy socks5h://%s http://<a v4-only host>/. %s",
 		orDash(s.Address), v.Endpoint, v.Endpoint, measuredClause(v.Measured))
 	return v
+}
+
+// prefixSourceClause names WHERE the prefix came from, in one clause, so an operator reading the
+// line can tell a value the box declared from a value this client guessed. Empty when we do not
+// know, because "its source: " with nothing after it is worse than saying nothing.
+func prefixSourceClause(source string) string {
+	if strings.TrimSpace(source) == "" {
+		return ""
+	}
+	return " Its source: " + source + "."
 }
 
 // measuredClause is the sentence that separates a design from a system. It is appended to

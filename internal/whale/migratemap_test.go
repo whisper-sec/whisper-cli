@@ -136,7 +136,7 @@ func TestIdPSyncedGroupIsReportedByName(t *testing.T) {
 	}
 }
 
-// The corrected B-30 claim, asserted in both directions.
+// The corrected port-constraint claim, asserted in both directions.
 func TestPortConstraintIsCarriedByReachabilityAndIsNotWidening(t *testing.T) {
 	p := buildFixturePlan(t)
 	var found bool

@@ -29,7 +29,7 @@ import (
 // address instead of the dedicated agent one. So a working connection quietly egressed from
 // the wrong address and gave up the reputation isolation the dedicated prefix exists for.
 // Measured, one tunnel, two prefixes, same second: 64:ff9b::/96 came out of 108.61.167.17
-// and 2a04:2a00:64::/96 came out of 203.0.113.7.
+// and 2a04:2a00:64::/96 came out of 95.179.179.56.
 //
 // The fix is not a better constant. It is to ASK, with the mechanism designed for exactly
 // this: RFC 7050. ipv4only.arpa has two well-known A records and nothing else, so a DNS64
@@ -64,6 +64,23 @@ import (
 // bits of whatever comes back identify the prefix unambiguously.
 const wellKnownIPv4OnlyName = "ipv4only.arpa."
 
+// recursionProbeName is the control question pickResolver asks each rung, and it is deliberately
+// NOT wellKnownIPv4OnlyName.
+//
+// The RFC 7050 name is the right question for NAT64 DISCOVERY and the wrong one for "does this
+// resolver serve me". whisper-ns answers it unconditionally - POLICY_EXEMPT_NAMES in
+// ForwardingResponder, with a test asserting a `default: block` tenant still answers it while
+// everything else is sinkholed - so a resolver that refuses every real name still passes. Measured
+// on a live tunnel: the per-tenant resolver returned NXDOMAIN for example.com while passing this
+// probe, so resolverOK latched true, the rung-1 rejection note never printed, rung 2 was never
+// reached, and the dialer went on to blame the destination. A control the system guarantees to
+// answer is not a control.
+//
+// a.root-servers.net is the opposite: no special case anywhere in our stack, stable for decades,
+// and a resolver that cannot answer it cannot serve this user. It is asked for A because the point
+// is recursion, not address family.
+const recursionProbeName = "a.root-servers.net."
+
 var wellKnownIPv4OnlyAddrs = [2]netip.Addr{
 	netip.AddrFrom4([4]byte{192, 0, 0, 170}),
 	netip.AddrFrom4([4]byte{192, 0, 0, 171}),
@@ -81,12 +98,49 @@ const WhisperPublicResolverEnv = "WHISPER_RESOLVER"
 // construction, and having it here means a broken per-tenant resolver degrades to a slower
 // correct answer instead of to no answer at all.
 func whisperPublicResolver() netip.Addr {
+	return fallbackResolvers()[0]
+}
+
+// agentPlaneResolvers are the shared DNS64 resolvers that belong to the AGENT plane, in the
+// address space an agent's own tunnel routes.
+//
+// Why they exist as a distinct list. The office/staff anycast and the agent resolvers are two
+// different planes with two different NAT64 translators, and each synthesises the prefix that
+// its OWN path can translate. Measured from inside a live agent tunnel on 2026-09-03, asking
+// each of them for ipv4only.arpa:
+//
+//	2a04:2a01:0:53::1        2a04:2a00:64::c000:aa   agent plane, routed via wg-ns
+//	2a04:2a01:0:53:8000::1   2a04:2a00:64::c000:aa   agent plane, routed via wg-ns
+//	2a04:2a00::53            64:ff9b::c000:aa        office plane, via the edge nat64
+//
+// Neither resolver is wrong; each is right for its own plane. What was wrong was falling back
+// ACROSS planes, because the agent then adopts a prefix whose translator sits on a path its
+// tunnel never traverses, and every IPv4-only destination becomes a silent black hole. A name
+// that resolves to an address nothing can reach is worse than a name that does not resolve,
+// because the failure arrives later and looks like the destination's fault.
+var agentPlaneResolvers = []netip.Addr{
+	netip.MustParseAddr("2a04:2a01:0:53::1"),
+	netip.MustParseAddr("2a04:2a01:0:53:8000::1"),
+}
+
+// fallbackResolvers is the ordered candidate list for the ladder's second rung.
+//
+// An explicit WHISPER_RESOLVER wins outright and alone: an operator naming a resolver has said
+// which one they want, and quietly trying others after it would be us overruling them.
+//
+// Otherwise the agent-plane resolvers come first and the office anycast last. It stays on the
+// list because it does resolve names, and a slow correct answer beats no answer when both agent
+// resolvers are unreachable; it is simply no longer the FIRST thing tried, which is what made a
+// cross-plane prefix the normal outcome rather than the desperate one.
+func fallbackResolvers() []netip.Addr {
 	if raw := strings.TrimSpace(os.Getenv(WhisperPublicResolverEnv)); raw != "" {
 		if a, err := netip.ParseAddr(strings.Trim(raw, "[]")); err == nil {
-			return a
+			return []netip.Addr{a}
 		}
 	}
-	return netip.MustParseAddr("2a04:2a00::53")
+	out := make([]netip.Addr, 0, len(agentPlaneResolvers)+1)
+	out = append(out, agentPlaneResolvers...)
+	return append(out, netip.MustParseAddr("2a04:2a00::53"))
 }
 
 // DNS record types and the rcodes we name in a verdict. Spelled out rather than imported so
@@ -94,7 +148,12 @@ func whisperPublicResolver() netip.Addr {
 const (
 	dnsTypeA    uint16 = 1
 	dnsTypeAAAA uint16 = 28
-	dnsClassIN  uint16 = 1
+	// dnsTypeOPT is the pseudo-record that carries EDNS. It is a query-side capability
+	// advertisement, not a question: without it a resolver may not send us an Extended DNS Error.
+	dnsTypeOPT uint16 = 41
+	// ednsUDPPayload is the requestor's advertised payload size, carried in the OPT CLASS field.
+	ednsUDPPayload uint16 = 1232
+	dnsClassIN     uint16 = 1
 )
 
 var rcodeNames = map[uint8]string{
@@ -137,10 +196,25 @@ func lookupOnThisHost(ctx context.Context, network, host string) ([]netip.Addr, 
 // never fails: an unreachable resolver, a refusing resolver and a resolver with no DNS64 are
 // all ordinary outcomes with their own sentence, because a tunnel that came up must keep
 // working while it tells you what is degraded about it.
-func newNameService(ctx context.Context, stack tunnelStack, resolver netip.Addr) *nameService {
+//
+// declared is the prefix op:connect NAMED for this box, or the zero Prefix when it named
+// none. It sits THIRD in the ladder, and the order is the whole point:
+//
+//  1. WHISPER_NAT64_PREFIX, an operator who said and meant it.
+//  2. RFC 7050 discovery, a MEASUREMENT of the live path. It outranks the declaration because a
+//     box can be reconfigured between the connect and the next packet, and because a declaration
+//     that disagrees with the wire is the bug we want reported, not obeyed.
+//  3. The declaration. Before  this rung did not exist and the guess below took its place.
+//  4. The RFC 6052 well-known prefix, a guess, and now the last resort rather than the third.
+func newNameService(
+	ctx context.Context, stack tunnelStack, resolver netip.Addr, declared netip.Prefix,
+) *nameService {
 	envPrefix, envSource := NAT64Prefix()
 	_, overridden := nat64PrefixOverride()
 	ns := &nameService{prefix: envPrefix, prefixSource: envSource, hostLookup: lookupOnThisHost}
+	if !overridden && declared.IsValid() {
+		ns.prefix, ns.prefixSource = declared, "the control plane"
+	}
 
 	chosen, why := ns.pickResolver(ctx, stack, resolver)
 	ns.verdict = why
@@ -157,6 +231,10 @@ func newNameService(ctx context.Context, stack tunnelStack, resolver netip.Addr)
 	}
 	discovered, derr := prefixFromIPv4OnlyAnswers(answers)
 	switch {
+	case derr != nil && !overridden && declared.IsValid():
+		// The resolver answers but is not synthesising, and the box already told us which prefix
+		// it translates. That is not a degradation worth a sentence: we are using the value the
+		// control plane named, which is exactly what discovery would have measured.
 	case derr != nil && !overridden:
 		// The resolver answers, but it is not synthesising. Names with only an A record cannot
 		// come back as AAAA, so dialV4OnlyName is what covers them - and it can, because the
@@ -173,6 +251,14 @@ func newNameService(ctx context.Context, stack tunnelStack, resolver netip.Addr)
 				" unset it to follow the network.")
 		}
 	case derr == nil:
+		// The measurement wins over the declaration - but when the two disagree, say so in one
+		// line. A box that names one prefix and translates another is a real fault, and it is
+		// invisible from either end alone.
+		if declared.IsValid() && discovered != declared {
+			ns.appendVerdict("the control plane named " + declared.String() + ", but the resolver" +
+				" synthesises into " + discovered.String() + ". Following the resolver, which is" +
+				" what actually translates; the two disagreeing is worth reporting.")
+		}
 		ns.prefix, ns.prefixSource = discovered, "RFC 7050 discovery via "+chosen.String()
 	}
 	return ns
@@ -205,7 +291,7 @@ func newNameService(ctx context.Context, stack tunnelStack, resolver netip.Addr)
 // NXDOMAIN for that name, so the distinction is not hypothetical.
 func (n *nameService) pickResolver(ctx context.Context, stack tunnelStack, named netip.Addr) (netip.Addr, string) {
 	if !named.IsValid() {
-		if fallback, ok := n.probeRecursion(ctx, stack, whisperPublicResolver()); ok {
+		if fallback, ok := n.probeFallbacks(ctx, stack, netip.Addr{}); ok {
 			return fallback, "the control plane returned no in-tunnel resolver, so names are being" +
 				" resolved through " + fallback.String() + " inside the tunnel instead. They still" +
 				" leave from your /128."
@@ -214,16 +300,24 @@ func (n *nameService) pickResolver(ctx context.Context, stack tunnelStack, named
 			" inside the tunnel answered, so names are being resolved on this host. They no longer" +
 			" leave from your /128. The tunnel itself is carrying traffic - this is DNS, not routing."
 	}
-	if _, ok := n.probeRecursion(ctx, stack, named); ok {
+	_, ok, refusal := n.probeRecursion(ctx, stack, named)
+	if ok {
 		return named, "" // exactly what the box asked for, and it works: say nothing
 	}
 	// Rung 1 is broken. Say precisely how, because "the resolver we were handed does not resolve"
 	// is a Whisper-side fault and the user must not be left thinking it is theirs.
 	broken := "the in-tunnel resolver " + named.String() + " does not resolve names outside" +
-		" Whisper (it does not answer for " + strings.TrimSuffix(wellKnownIPv4OnlyName, ".") +
-		", which every recursive resolver answers). This is a fault on the Whisper side, not on" +
-		" yours, and the tunnel is carrying traffic normally. "
-	if fallback, ok := n.probeRecursion(ctx, stack, whisperPublicResolver()); ok {
+		" Whisper (it does not answer for " + strings.TrimSuffix(recursionProbeName, ".") +
+		", which every recursive resolver answers). "
+	if refusal != "" {
+		// The resolver told us why. Repeat it rather than attributing the fault ourselves: the
+		// commonest cause is the caller's own policy, and blaming Whisper for it wastes their time.
+		broken += "The resolver's own reason: " + refusal + ". The tunnel is carrying traffic normally. "
+	} else {
+		broken += "This is a fault on the Whisper side, not on yours, and the tunnel is carrying" +
+			" traffic normally. "
+	}
+	if fallback, ok := n.probeFallbacks(ctx, stack, named); ok {
 		return fallback, broken + "Names are being resolved through " + fallback.String() +
 			" inside the tunnel instead, so they still leave from your /128."
 	}
@@ -231,13 +325,48 @@ func (n *nameService) pickResolver(ctx context.Context, stack tunnelStack, named
 		" resolved on this host instead and no longer leave from your /128."
 }
 
-// probeRecursion asks one resolver the control question and reports whether it recurses.
-func (n *nameService) probeRecursion(ctx context.Context, stack tunnelStack, r netip.Addr) (netip.Addr, bool) {
+// probeRecursion asks one resolver the control question and reports whether it recurses, plus the
+// resolver's OWN account of any refusal.
+//
+// The third return is the part that matters. Before it, a failed probe was reported as "a fault on
+// the Whisper side, not on yours", which is a guess dressed as a finding: the dominant real cause
+// turned out to be the caller's OWN tenant policy set to default-block, and telling that user the
+// fault was ours sent them looking in the one place it could not be. If the resolver attached an
+// RFC 8914 Extended DNS Error we now repeat what it said instead of inventing an attribution.
+func (n *nameService) probeRecursion(ctx context.Context, stack tunnelStack, r netip.Addr) (netip.Addr, bool, string) {
 	if !r.IsValid() {
-		return netip.Addr{}, false
+		return netip.Addr{}, false, ""
 	}
-	rcode, answers, err := dnsQuery(ctx, stack, r, wellKnownIPv4OnlyName, dnsTypeA)
-	return r, err == nil && rcode == 0 && len(answers) > 0
+	rcode, answers, raw, err := dnsQueryRaw(ctx, stack, r, recursionProbeName, dnsTypeA)
+	if err == nil && rcode == 0 && len(answers) > 0 {
+		return r, true, ""
+	}
+	if err == nil && raw != nil {
+		if code, text, ok := parseExtendedError(raw); ok {
+			return r, false, describeExtendedError(code, text)
+		}
+	}
+	return r, false, ""
+}
+
+// probeFallbacks walks the second-rung candidates in order and returns the first that recurses.
+//
+// Order is the whole point: same-plane first, so an agent that has to fall back still gets a
+// NAT64 prefix its own tunnel can translate. See agentPlaneResolvers for the measurement.
+func (n *nameService) probeFallbacks(ctx context.Context, stack tunnelStack, named netip.Addr) (netip.Addr, bool) {
+	for _, r := range fallbackResolvers() {
+		// Never re-probe the resolver that just failed as rung 1. The control plane can name a
+		// SHARED agent resolver rather than a per-tenant one, in which case rung 1 and the first
+		// candidate here are the same address: asking it twice costs a timeout and, if it somehow
+		// answered the second time, would hand back a resolver the ladder has already rejected.
+		if named.IsValid() && r == named {
+			continue
+		}
+		if addr, ok, _ := n.probeRecursion(ctx, stack, r); ok {
+			return addr, true
+		}
+	}
+	return netip.Addr{}, false
 }
 
 // appendVerdict adds a second sentence without losing the first: a tunnel can be degraded in
@@ -336,13 +465,22 @@ var errNoSuchAddress = errors.New("the name has no address of that family")
 // resolver could not be reached" are different faults with different remedies, and collapsing
 // them into one error is how a user ends up guessing.
 func dnsQuery(ctx context.Context, stack tunnelStack, server netip.Addr, name string, qtype uint16) (uint8, []netip.Addr, error) {
+	rcode, answers, _, err := dnsQueryRaw(ctx, stack, server, name, qtype)
+	return rcode, answers, err
+}
+
+// dnsQueryRaw is dnsQuery plus the response bytes, so a caller that wants to know WHY a name was
+// refused can read the Extended DNS Error out of them. dnsQuery stays the common path: most callers
+// only want the addresses, and handing them a buffer they must remember to ignore is how a parser
+// ends up being called on a message that was never checked.
+func dnsQueryRaw(ctx context.Context, stack tunnelStack, server netip.Addr, name string, qtype uint16) (uint8, []netip.Addr, []byte, error) {
 	q, err := buildQuery(name, qtype)
 	if err != nil {
-		return 0, nil, err
+		return 0, nil, nil, err
 	}
 	conn, err := stack.DialContext(ctx, "tcp", net.JoinHostPort(server.String(), "53"))
 	if err != nil {
-		return 0, nil, errors.New("the in-tunnel resolver could not be reached")
+		return 0, nil, nil, errors.New("the in-tunnel resolver could not be reached")
 	}
 	defer conn.Close()
 	if dl, ok := ctx.Deadline(); ok {
@@ -354,21 +492,22 @@ func dnsQuery(ctx context.Context, stack tunnelStack, server netip.Addr, name st
 	binary.BigEndian.PutUint16(framed, uint16(len(q)))
 	copy(framed[2:], q)
 	if _, err := conn.Write(framed); err != nil {
-		return 0, nil, errors.New("the in-tunnel resolver closed the connection")
+		return 0, nil, nil, errors.New("the in-tunnel resolver closed the connection")
 	}
 	var lenBuf [2]byte
 	if _, err := readFull(conn, lenBuf[:]); err != nil {
-		return 0, nil, errors.New("the in-tunnel resolver returned no answer")
+		return 0, nil, nil, errors.New("the in-tunnel resolver returned no answer")
 	}
 	n := int(binary.BigEndian.Uint16(lenBuf[:]))
 	if n < 12 || n > 65535 {
-		return 0, nil, errors.New("the in-tunnel resolver returned a malformed answer")
+		return 0, nil, nil, errors.New("the in-tunnel resolver returned a malformed answer")
 	}
 	resp := make([]byte, n)
 	if _, err := readFull(conn, resp); err != nil {
-		return 0, nil, errors.New("the in-tunnel resolver returned a truncated answer")
+		return 0, nil, nil, errors.New("the in-tunnel resolver returned a truncated answer")
 	}
-	return parseAnswers(resp, qtype)
+	rcode, answers, perr := parseAnswers(resp, qtype)
+	return rcode, answers, resp, perr
 }
 
 // readFull is io.ReadFull without pulling io into a file that needs nothing else from it.
@@ -423,6 +562,23 @@ func buildQuery(name string, qtype uint16) ([]byte, error) {
 	msg = append(msg, body...)
 	msg = binary.BigEndian.AppendUint16(msg, qtype)
 	msg = binary.BigEndian.AppendUint16(msg, dnsClassIN)
+
+	// An OPT record, so the resolver is ALLOWED to tell us why (RFC 6891, RFC 8914).
+	//
+	// This query used to carry ARCOUNT 0. Without an OPT a resolver cannot attach an Extended
+	// DNS Error, so "I am broken" and "I am refusing you" arrive as the same bare rcode and the
+	// client cannot tell them apart. They need opposite remedies - one is ours to fix, the other
+	// is a tenant policy - and that ambiguity is part of why a resolver answering NXDOMAIN for
+	// every external name went unexplained for so long.
+	//
+	// Advertising 1232 is the conservative DNS flag-day figure: large enough to avoid needless
+	// truncation, small enough to stay under the path MTU we can actually carry.
+	msg = append(msg, 0)                                     // root name for OPT
+	msg = binary.BigEndian.AppendUint16(msg, dnsTypeOPT)     // TYPE = OPT
+	msg = binary.BigEndian.AppendUint16(msg, ednsUDPPayload) // CLASS = requestor's payload size
+	msg = binary.BigEndian.AppendUint32(msg, 0)              // extended rcode + version 0, no DO
+	msg = binary.BigEndian.AppendUint16(msg, 0)              // RDLEN 0
+	binary.BigEndian.PutUint16(msg[10:], 1)                  // ARCOUNT = 1
 	return msg, nil
 }
 
@@ -507,4 +663,136 @@ func skipName(msg []byte, off int) (int, error) {
 			off += 1 + l
 		}
 	}
+}
+
+// ednsOptionExtendedError is EDNS option code 15, the RFC 8914 Extended DNS Error.
+const ednsOptionExtendedError = 15
+
+// parseExtendedError pulls an RFC 8914 Extended DNS Error out of a response's OPT record.
+//
+// Why this exists. A resolver that refuses a name by policy and a resolver that is simply broken
+// hand back the same bare rcode, and the two need opposite remedies: one is a setting the operator
+// can change, the other is ours to fix. The EDE is the only thing on the wire that tells them
+// apart, and until this function existed we sent the OPT that invites one and then threw the answer
+// away. A server that explains itself into a client that does not listen is not an explanation.
+//
+// The walk is deliberately bounds-checked at every step and never follows a compression pointer
+// (skipName ends a name at the first pointer), so a hostile or truncated response cannot loop or
+// read past the end. Anything it cannot parse is reported as absent, never as a guess: a wrong
+// reason is worse here than no reason, because a user acts on it.
+func parseExtendedError(msg []byte) (infoCode uint16, extraText string, ok bool) {
+	if len(msg) < 12 {
+		return 0, "", false
+	}
+	qd := int(binary.BigEndian.Uint16(msg[4:]))
+	an := int(binary.BigEndian.Uint16(msg[6:]))
+	ns := int(binary.BigEndian.Uint16(msg[8:]))
+	ar := int(binary.BigEndian.Uint16(msg[10:]))
+	if ar == 0 {
+		return 0, "", false
+	}
+
+	off := 12
+	for i := 0; i < qd; i++ {
+		next, err := skipName(msg, off)
+		if err != nil {
+			return 0, "", false
+		}
+		off = next + 4
+		if off > len(msg) {
+			return 0, "", false
+		}
+	}
+	// The answer and authority sections are skipped wholesale: the OPT is only ever in ADDITIONAL.
+	for i := 0; i < an+ns; i++ {
+		next, err := skipRR(msg, off)
+		if err != nil {
+			return 0, "", false
+		}
+		off = next
+	}
+
+	for i := 0; i < ar; i++ {
+		start, err := skipName(msg, off)
+		if err != nil {
+			return 0, "", false
+		}
+		if start+10 > len(msg) {
+			return 0, "", false
+		}
+		rrType := binary.BigEndian.Uint16(msg[start:])
+		rdLen := int(binary.BigEndian.Uint16(msg[start+8:]))
+		rd := start + 10
+		if rd+rdLen > len(msg) {
+			return 0, "", false
+		}
+		if rrType == dnsTypeOPT {
+			// OPT RDATA is a sequence of {code uint16, length uint16, value}. Walk it rather than
+			// assuming the EDE is first: a resolver may legitimately send other options alongside.
+			p := rd
+			for p+4 <= rd+rdLen {
+				code := binary.BigEndian.Uint16(msg[p:])
+				olen := int(binary.BigEndian.Uint16(msg[p+2:]))
+				p += 4
+				if p+olen > rd+rdLen {
+					return 0, "", false
+				}
+				if code == ednsOptionExtendedError && olen >= 2 {
+					text := ""
+					if olen > 2 {
+						// EXTRA-TEXT is UTF-8 and is NOT null-terminated (RFC 8914 section 2);
+						// trailing NULs appear in the wild anyway, so trim them rather than
+						// rendering a control character into a user-facing line.
+						text = strings.TrimRight(string(msg[p+2:p+olen]), "\x00")
+					}
+					return binary.BigEndian.Uint16(msg[p:]), text, true
+				}
+				p += olen
+			}
+		}
+		off = rd + rdLen
+	}
+	return 0, "", false
+}
+
+// skipRR advances past one resource record and returns the offset just after it.
+func skipRR(msg []byte, off int) (int, error) {
+	next, err := skipName(msg, off)
+	if err != nil {
+		return 0, err
+	}
+	if next+10 > len(msg) {
+		return 0, errors.New("dns: truncated record header")
+	}
+	rdLen := int(binary.BigEndian.Uint16(msg[next+8:]))
+	end := next + 10 + rdLen
+	if end > len(msg) {
+		return 0, errors.New("dns: rdata past the end of the message")
+	}
+	return end, nil
+}
+
+// describeExtendedError turns an EDE into one line a person can act on. The two codes a Whisper
+// resolver actually emits on a policy denial are named explicitly, because they have OPPOSITE
+// remedies and that is the whole reason the server bothers to distinguish them: FILTERED is the
+// tenant's own rule and the operator can change it, BLOCKED is the platform threat floor and they
+// cannot. Anything else is reported with its number rather than guessed at.
+func describeExtendedError(infoCode uint16, extraText string) string {
+	var s string
+	switch infoCode {
+	case 15:
+		s = "blocked by Whisper's threat policy (this one is not optional)"
+	case 16:
+		s = "blocked to meet an external requirement"
+	case 17:
+		s = "refused by your own DNS policy - check `whisper policy`, the default may be block"
+	case 18:
+		s = "this resolver does not serve you"
+	default:
+		s = fmt.Sprintf("the resolver reported extended error %d", infoCode)
+	}
+	if extraText != "" {
+		s += " (" + extraText + ")"
+	}
+	return s
 }

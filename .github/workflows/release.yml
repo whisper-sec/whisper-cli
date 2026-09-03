@@ -20,6 +20,27 @@ name: Release
 #
 # So the tag trigger is gone. What remains is a manual escape hatch for a client-only build,
 # behind a confirmation nobody types by accident, and it should be a very unusual thing to run.
+#
+# THE ESCAPE HATCH DOES NOT PUBLISH EITHER, AND CANNOT.
+#
+# Removing the tag trigger left the publishing half standing: a manual dispatch still created a
+# Release and uploaded dist/whisper-* into it, and install.sh reads
+# /releases/latest/download. One dispatch would therefore have replaced the installed product
+# for everyone, which is the same outcome the tag trigger was removed to prevent, reached by a
+# different button.
+#
+# The macOS assets make it worse than a client-only swap. A `whisper-darwin-*` that people
+# download has to be signed with the Developer ID key and notarized by Apple, or Gatekeeper
+# refuses to run it. That key is NOT in this repository's secrets and must never be: a public
+# repository has a fork and contributor surface a private one does not, and signing material
+# does not go near it. This workflow therefore cannot produce a macOS binary anyone can run,
+# and a Release that carries one is a Release that breaks every Mac it reaches.
+#
+# The build itself is still useful, so nothing is dropped: every binary, checksum and signature
+# is uploaded to the workflow run, where a maintainer can download and inspect it. What is gone
+# is the Release, the tag it created, and the `contents: write` that let it. An escape hatch
+# that hands you the bytes is the design this file already describes; one that publishes them
+# was never the design, only the leftover.
 
 on:
   workflow_dispatch:
@@ -32,8 +53,13 @@ on:
           Type "client-only" to confirm you intend to publish a build WITHOUT the endpoint half.
         required: true
 
+# Read-only, deliberately. The job builds and hands the result back through the run's own
+# artifact store, which needs no repository write of any kind. Anything that tried to create a
+# Release, move a tag or edit an asset would fail on the token, not on someone remembering why
+# it must not. The self-check in the first step is the other half of that: it refuses to run at
+# all if a publishing step, or this line saying `write`, ever comes back.
 permissions:
-  contents: write   # required to create the GitHub Release and upload assets
+  contents: read
 
 jobs:
   release:
@@ -56,6 +82,41 @@ jobs:
           fi
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      # A decision that lives only in a comment is one edit away from being undone by somebody
+      # who reads this as a release workflow with a broken ending and helpfully fixes it. So
+      # the file checks itself, before it builds anything: if a step that can create or move a
+      # Release comes back, or the permission that would let it, the run stops here and says
+      # why. Both patterns are anchored at the line shape they are looking for (`uses:` for the
+      # action, the start of a line for the permission), so this step does not match itself.
+      - name: Refuse to run if this workflow can publish again
+        run: |
+          set -eu
+          wf=.github/workflows/release.yml
+          # A missing file makes every grep below find nothing, and finding nothing is how
+          # this step says "all clear". Rename or move the workflow and the check would pass
+          # by having read no workflow at all, so it asserts the file is there first.
+          [ -f "$wf" ] || {
+            echo "::error::$wf is not here - the self-check cannot read what it guards" >&2
+            echo "If the workflow was renamed, point this check at the new path in the same" >&2
+            echo "commit that renames it. Do not delete the check." >&2
+            exit 1
+          }
+          bad=0
+          if grep -nE '^[[:space:]]*-?[[:space:]]*uses:.*(action-gh-release|create-release)' "$wf"; then bad=1; fi
+          if grep -nE 'gh release (create|upload|edit|delete)' "$wf"; then bad=1; fi
+          if grep -nE '^[[:space:]]*contents:[[:space:]]*write' "$wf"; then bad=1; fi
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::this workflow can publish a release again - refusing to run" >&2
+            echo "The lines above put a Release back within reach of a manual dispatch." >&2
+            echo "Everything this tree builds is the client half, and its darwin binaries" >&2
+            echo "are unsigned and unnotarized, so a Release cut here breaks both the" >&2
+            echo "product people installed and every Mac it reaches. The build result" >&2
+            echo "belongs on the workflow run; the Releases are cut by the tree that has" >&2
+            echo "both halves and the signing key." >&2
+            exit 1
+          fi
+          echo "no publishing step and no contents: write - this run cannot cut a release"
 
       - name: Set up Go
         uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
@@ -86,8 +147,8 @@ jobs:
       #   dist/whisper-<os>-<arch>[.exe].sha256 its SHA-256
       # These names match exactly what install.sh / install.ps1 download.
       # The version reaches the shell as an ENVIRONMENT variable, never interpolated into
-      # the script text. A `${{ }}` here is a command-injection sink in a job that holds
-      # contents: write and signs the release assets one step later.
+      # the script text. A `${{ }}` here is a command-injection sink in a job that imports a
+      # signing key one step later.
       - name: Cross-compile all platforms
         env:
           VERSION: ${{ steps.ver.outputs.version }}
@@ -96,8 +157,10 @@ jobs:
       # PGP-sign each binary into a detached .asc. The key is imported into an ephemeral
       # keyring; nothing is hardcoded. Signing is ALL-OR-NOTHING: SECURITY.md and both
       # installers tell people to verify a detached signature against a pinned fingerprint,
-      # so a release that quietly ships without one turns a documented security step into a
-      # dead end. An absent key fails the job instead of publishing unsigned.
+      # so bytes that leave this job without one turn a documented security step into a dead
+      # end. An absent key fails the job instead of handing back unsigned binaries. It says
+      # nothing about macOS: a PGP signature is not a Developer ID signature, and Gatekeeper
+      # does not read it.
       - name: Sign artifacts (PGP)
         env:
           PGP_SIGNING_KEY: ${{ secrets.PGP_SIGNING_KEY }}
@@ -105,12 +168,16 @@ jobs:
         run: |
           set -eu
           if [ -z "${PGP_SIGNING_KEY:-}" ] || [ -z "${PGP_PASSPHRASE:-}" ]; then
-            echo "::error::no signing key configured, refusing to publish an unsigned release" >&2
+            echo "::error::no signing key configured, refusing to hand back unsigned binaries" >&2
             echo "SECURITY.md and the installers both instruct users to verify a detached" >&2
-            echo "signature; shipping without one silently breaks that instruction." >&2
+            echo "signature; producing bytes without one silently breaks that instruction." >&2
             exit 1
           fi
-          export GNUPGHOME="$(mktemp -d)"
+          # Assigned then exported, not both at once: `export X="$(cmd)"` takes the exit
+          # status of `export`, so a failing mktemp would sail past `set -e` and the
+          # keyring would be built in whatever directory GNUPGHOME already named.
+          GNUPGHOME="$(mktemp -d)"
+          export GNUPGHOME
           chmod 700 "$GNUPGHOME"
           printf '%s' "$PGP_SIGNING_KEY" | gpg --batch --import
           signed=0
@@ -152,13 +219,42 @@ jobs:
           echo "----- checksums.txt -----"
           cat checksums.txt
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+      # Where a Release used to be created. The bytes go to the run, not to the world:
+      # downloadable by anyone who can see the run, reachable by no installer, no package
+      # channel and no /releases/latest/download. `if-no-files-found: error` keeps the old
+      # `fail_on_unmatched_files` property, because a green run that uploaded nothing is the
+      # shape of an absence that reads as a pass.
+      - name: Upload the build to this workflow run
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          tag_name: v${{ steps.ver.outputs.version }}
-          name: v${{ steps.ver.outputs.version }}
-          generate_release_notes: true
-          fail_on_unmatched_files: true
-          files: |
+          name: whisper-client-only-${{ steps.ver.outputs.version }}
+          if-no-files-found: error
+          path: |
             dist/whisper-*
             dist/checksums.txt
+
+      # Say it in the run, not only in this file. Whoever dispatched this was reaching for a
+      # release; they get a build instead, and they should be told exactly what they are
+      # holding while they are still looking at it.
+      - name: What this build is, and what it is not
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+        run: |
+          set -eu
+          echo "::warning::v$VERSION was BUILT, not released. No GitHub Release was created."
+          echo "::warning::The darwin binaries are UNSIGNED: no Developer ID signature, no"
+          echo "::warning::Apple notarization. Gatekeeper will refuse them. Do not distribute."
+          {
+            echo "## Client-only build v$VERSION"
+            echo
+            echo "Downloadable from this run. **Not published, and not installable by anyone.**"
+            echo
+            echo "- No GitHub Release was created and no tag was moved. \`install.sh\` reads"
+            echo "  \`/releases/latest/download\`, which this run did not touch."
+            echo "- This tree is the client half only: no \`service\`, no \`sensor\`, no \`posture\`."
+            echo "- The \`whisper-darwin-*\` binaries carry no Developer ID signature and are not"
+            echo "  notarized, because the signing material is deliberately not in this repository."
+            echo "  Gatekeeper refuses them. They are here to be inspected, not handed to anyone."
+            echo "- The real release assets are built, signed and published by the tree that has"
+            echo "  both halves. Nothing here can replace them."
+          } >> "$GITHUB_STEP_SUMMARY"

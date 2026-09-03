@@ -19,7 +19,7 @@ type command struct {
 	run     func(*App) (tea.Model, tea.Cmd)
 }
 
-// palette is the Ctrl-P /: command palette: a fuzzy-filtered command list with an
+// palette is the Ctrl-P / : command palette: a fuzzy-filtered command list with an
 // op-preview column. Keyboard-only; the whole surface is reachable from here.
 type palette struct {
 	app      *App

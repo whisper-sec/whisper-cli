@@ -188,7 +188,7 @@ func TestExploreNavIsSynchronous(t *testing.T) {
 	}
 }
 
-// TestExploreOverlaysOpenClose asserts o /: open the CATALOG / REPL shells and esc closes.
+// TestExploreOverlaysOpenClose asserts o / : open the CATALOG / REPL shells and esc closes.
 func TestExploreOverlaysOpenClose(t *testing.T) {
 	a := newExploreApp(t, 100, 34, false, fixtureCloudflare())
 	v := a.exploreVw

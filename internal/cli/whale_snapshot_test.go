@@ -104,7 +104,7 @@ func TestWhaleStatus_TheDivergenceWarningReachesTheScreen(t *testing.T) {
 	if !strings.Contains(stderr, "THE NODES DISAGREE") {
 		t.Fatalf("a divergent pair must be warned about on screen:\n%s", stderr)
 	}
-	if !strings.Contains(stderr, "may still be admitted") {
+	if !strings.Contains(stderr, "unreliable until") {
 		t.Fatalf("the consequence must reach the screen, not just the fact:\n%s", stderr)
 	}
 }

@@ -16,13 +16,12 @@ import (
 )
 
 // whale_snapshot.go reads how stale each authoritative node's copy of the agent zone is,
-// which is finding I-03's mitigation and the line `whisper whale ssh` shipped without.
+// which is the staleness signal `whisper whale ssh` shipped without.
 //
 // It asks EACH nameserver directly rather than asking a recursive resolver once. That is
 // the whole point: a recursive answer tells you what some node said, and the question is
-// whether the nodes AGREE. Two boxes serving different snapshots is the state that lets a
-// principal you removed keep logging in to whichever one is behind, and it is invisible
-// through a cache.
+// whether the nodes AGREE. Two boxes serving different snapshots is invisible through a
+// cache, which is why each is asked directly.
 //
 // Every leg is fail-open and bounded. This runs on `whale status`, a verb people run all
 // day, so it gets its own short budget, it runs alongside the rest rather than in front of

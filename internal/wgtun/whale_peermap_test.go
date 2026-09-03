@@ -247,7 +247,7 @@ func TestDirectPeer_PromotesOnARealHandshakeAndFallsBackToTheRelayWhenItDies(t *
 	other := startPeerSide(t, clientPubHex, clientIP)
 
 	cfg, err := FromWgQuick(box.pubB64, netip.AddrPortFrom(mustAddr(t, "::1"), uint16(box.udpPort)).String(),
-		clientIP.String(), box.serverIP.String(), "", kp.PrivateKeyHex)
+		clientIP.String(), box.serverIP.String(), "", "", kp.PrivateKeyHex)
 	if err != nil {
 		t.Fatalf("FromWgQuick: %v", err)
 	}
@@ -327,7 +327,7 @@ func TestSetDirectPeers_RemovingARowRemovesThePeerFromTheDevice(t *testing.T) {
 	other := startPeerSide(t, clientPubHex, clientIP)
 
 	cfg, _ := FromWgQuick(box.pubB64, netip.AddrPortFrom(mustAddr(t, "::1"), uint16(box.udpPort)).String(),
-		clientIP.String(), box.serverIP.String(), "", kp.PrivateKeyHex)
+		clientIP.String(), box.serverIP.String(), "", "", kp.PrivateKeyHex)
 	tun, err := Start(cfg, Options{HealthInterval: 100 * time.Millisecond, DirectDeadAfter: time.Second})
 	if err != nil {
 		t.Fatalf("Start: %v", err)

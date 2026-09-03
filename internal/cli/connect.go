@@ -141,6 +141,17 @@ func newConnectCmd() *cobra.Command {
 					} else if created.name != "" {
 						sel = created.name
 					}
+					// - and REMEMBER it, or this binding lasts exactly one command.
+					// Without this the next connect starts with no selector again, finds
+					// len(existing) != 0 so it skips this branch, and asks the server for
+					// its default. That is the shape behind a live report of one machine
+					// showing up as two nodes: enrol, then reconnect, and the second call
+					// no longer names the agent the first one created. Best-effort on
+					// purpose - a read-only or full HOME must not fail a working connect,
+					// and the server-side reuse now covers the case where it does.
+					if serr := client.SaveAgent(agentFile, sel); serr != nil {
+						debugf("could not persist the agent selector (%v); the next connect will rely on the server default", serr)
+					}
 				}
 			}
 			if sel != "" {

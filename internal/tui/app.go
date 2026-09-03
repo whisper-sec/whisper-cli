@@ -367,7 +367,7 @@ func (a *App) View() string {
 	}
 	// Belt-and-braces: clamp the frame to the terminal so a width-math slip in any one
 	// view degrades to a clipped edge, never a scrolled/wrapped full-screen collapse
-	// Conservative in what we emit.
+	//. Conservative in what we emit.
 	return a.th.App.MaxWidth(a.width).MaxHeight(a.height).Render(frame)
 }
 

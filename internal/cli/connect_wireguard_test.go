@@ -303,7 +303,8 @@ func TestParseConnectEnvelope_WireGuard(t *testing.T) {
 	}
 	// And it must feed a valid wgtun.Config when combined with a local key.
 	kp, _ := wgtun.GenerateKeypair()
-	cfg, err := wgtun.FromWgQuick(ce.wgServerPubKey, ce.wgEndpoint, ce.address, ce.wgDNS, ce.wgQuick, kp.PrivateKeyHex)
+	cfg, err := wgtun.FromWgQuick(
+		ce.wgServerPubKey, ce.wgEndpoint, ce.address, ce.wgDNS, ce.wgNat64Prefix, ce.wgQuick, kp.PrivateKeyHex)
 	if err != nil {
 		t.Fatalf("FromWgQuick from parsed envelope: %v", err)
 	}

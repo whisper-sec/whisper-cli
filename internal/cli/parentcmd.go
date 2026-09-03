@@ -12,7 +12,7 @@ import (
 
 // parentcmd.go - a parent command must never answer a typo with success.
 //
-//	$ whisper whale zzznotacommand; echo $?
+//	$ whisper whale zzznotacommand ; echo $?
 //	<the whale command help>
 //	0
 //

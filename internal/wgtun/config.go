@@ -51,13 +51,18 @@ func GenerateKeypair() (Keypair, error) {
 // FromWgQuick builds a Config from the op:connect{tier:wireguard} result fields plus the
 // locally-held private key (hex). It is LIBERAL in what it accepts (Postel): it prefers the
 // structured fields the control plane returns (server_public_key, endpoint, address, dns,
-// allowed_ips) but falls back to PARSING the wg-quick `wireguard_config` blob for any that
-// are missing - so a future server that returns only the blob still works.
+// nat64_prefix, allowed_ips) but falls back to PARSING the wg-quick `wireguard_config` blob for
+// any that are missing - so a future server that returns only the blob still works.
+//
+// nat64Prefix is 's column. An absent or unusable value is not an error and not a warning:
+// it is every server older than that column, and the node simply keeps guessing the way it did
+// before. There is no wg-quick spelling of it to fall back to, by design - wg-quick has no such
+// directive, and inventing a comment convention would put a second parser on the path.
 //
 // privKeyHex is OUR key (we generated it; the server never returns it because we supplied the
 // public half). If the server DID mint and return a base64 client_private_key (the zero-key
 // path), the caller converts it to hex and passes it here. Keys are converted base64→hex.
-func FromWgQuick(serverPubB64, endpoint, address, dns, wgQuick, privKeyHex string) (Config, error) {
+func FromWgQuick(serverPubB64, endpoint, address, dns, nat64Prefix, wgQuick, privKeyHex string) (Config, error) {
 	cfg := Config{PrivateKeyHex: strings.TrimSpace(privKeyHex)}
 
 	// Pull anything missing from the wg-quick blob (lenient INI-ish parse).
@@ -87,6 +92,10 @@ func FromWgQuick(serverPubB64, endpoint, address, dns, wgQuick, privKeyHex strin
 	dnsStr := firstNonEmpty(strings.TrimSpace(dns), firstField(pq["DNS"]))
 	if d, err := netip.ParseAddr(dnsStr); err == nil {
 		cfg.DNS = d
+	}
+
+	if p, perr := ParseNAT64Prefix(nat64Prefix); perr == nil {
+		cfg.NAT64Prefix = p
 	}
 
 	if k := pq["PersistentKeepalive"]; k != "" {
