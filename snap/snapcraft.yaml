@@ -1,6 +1,6 @@
 name: whisper-cli
 base: core24
-version: '0.213.1'
+version: '0.214.0'
 summary: A routable Whisper IPv6 identity and safe egress for agents
 description: |
   The official Whisper CLI: give an AI agent a real, routable IPv6 /128 identity
@@ -42,7 +42,7 @@ parts:
   whisper:
     plugin: go
     source: https://github.com/whisper-sec/whisper-cli.git
-    source-tag: v0.213.1
+    source-tag: v0.214.0
     build-snaps: [go]
     build-environment:
       - CGO_ENABLED: "0"
