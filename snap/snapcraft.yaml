@@ -1,6 +1,6 @@
 name: whisper-cli
 base: core24
-version: '0.211.0'
+version: '0.213.1'
 summary: A routable Whisper IPv6 identity and safe egress for agents
 description: |
   The official Whisper CLI: give an AI agent a real, routable IPv6 /128 identity
@@ -42,12 +42,38 @@ parts:
   whisper:
     plugin: go
     source: https://github.com/whisper-sec/whisper-cli.git
-    source-tag: v0.211.0
+    source-tag: v0.213.1
     build-snaps: [go]
     build-environment:
       - CGO_ENABLED: "0"
     override-build: |
-      go build -trimpath -ldflags "-s -w -X github.com/whisper-sec/whisper-cli/internal/cli.Version=0.211.0" -o "$CRAFT_PART_INSTALL/bin/whisper" ./cmd/whisper
+      # The version is DERIVED from `version:` above, never typed here. It WAS typed here and it
+      # drifted: the ldflag on this line still said 0.211.0 while `version:` and `source-tag:`
+      # moved on, so the snap would have declared one version in the store and shipped a binary
+      # reporting another. internal/cli/root.go honours an ldflag verbatim and deliberately
+      # skips its build-info fallback when one was applied, so nothing downstream could have
+      # corrected it - and `whisper --version` is how a person, or a scanner, decides whether
+      # they are exposed to an advisory.
+      #
+      # BOTH names, on purpose, because which ones are set depends on the base. core22 routes
+      # through snapcraft/parts/lifecycle.py and sets SNAPCRAFT_PROJECT_VERSION only; core24 -
+      # which this snap is - routes through craft-application, and snapcraft/services/project.py
+      # calls BOTH its parent (CRAFT_PROJECT_VERSION) and set_global_environment
+      # (SNAPCRAFT_PROJECT_VERSION), so on core24 both exist and read the same `version:` key.
+      # Written as a fallback rather than picking one because the answer is base-dependent and
+      # a wrong single name fails the build: the docs table lists SNAPCRAFT_PROJECT_VERSION
+      # with no CRAFT_ counterpart, which is true of the core22 path it describes and reads as
+      # a general rule. Both were read out of the installed snapcraft, not out of the docs.
+      #
+      # The `:?` on the fallback is load-bearing: `set -u`, which craft-parts applies to this
+      # scriptlet, catches UNSET and not SET-TO-EMPTY, and empty is reachable - snapcraft reads
+      # the literal `version:` key, so switching this file to adopt-info yields an empty string.
+      # An empty ldflag builds GREEN and ships a binary with no --version flag at all, because
+      # cobra does not register one when Version is empty. That is worse than a stale literal:
+      # a stale version at least answers.
+      go build -trimpath \
+        -ldflags "-s -w -X github.com/whisper-sec/whisper-cli/internal/cli.Version=${SNAPCRAFT_PROJECT_VERSION:-${CRAFT_PROJECT_VERSION:?neither SNAPCRAFT_PROJECT_VERSION nor CRAFT_PROJECT_VERSION was set by snapcraft}}" \
+        -o "$CRAFT_PART_INSTALL/bin/whisper" ./cmd/whisper
 
 apps:
   whisper:
