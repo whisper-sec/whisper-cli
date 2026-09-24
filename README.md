@@ -17,6 +17,45 @@ you run `whisper` on a terminal with no subcommand. And it talks to the
 
 ---
 
+## Use it from an AI assistant, with no account
+
+The MCP server needs no API key and no install. Put this in your client's config and 45
+tools are available, including the keyless half:
+
+```json
+{
+  "mcpServers": {
+    "whisper": {
+      "command": "npx",
+      "args": ["-y", "@whisper-security/whisper-mcp"]
+    }
+  }
+}
+```
+
+Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline and Zed all take the same
+three lines. Already installed the CLI? `whisper mcp` is the identical server.
+
+What works before you have a key:
+
+- `whisper_verify` - is this address or hostname a real agent, and whose? Checks the
+  DANE pin against DNSSEC-signed DNS, from the IANA root.
+- `whisper_rdap` - the public registration record for any `/128`.
+- `explain_indicator` - one-call assessment of a domain, IP, ASN or hash.
+- `query` - Cypher against the infrastructure graph.
+- `read_docs`, `list_workflows`, `run_workflow`.
+
+Add a key and the same server registers agents, sets resolver policy, hands out egress
+configuration, reads per-agent activity and revokes an identity.
+
+Verifying somebody else's agent needs nothing at all, not even the client:
+
+```
+curl -s https://rdap.whisper.online/verify-identity/2a04:2a01:b69a:6717:e3b0:51ff:3bf7:f478
+```
+
+---
+
 ## Install
 
 The one-liner fetches the signed binary straight from this repo's **GitHub Releases**,
