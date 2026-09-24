@@ -1,6 +1,8 @@
 {
   "name": "@whisper-security/whisper-mcp",
-  "version": "0.219.2",
+  "version": "0.219.3",
+  "mcpName": "io.github.whisper-sec/whisper",
+  "whisperCliVersion": "0.219.2",
   "description": "Give an AI agent a real, routable IPv6 identity, verifiable egress and DNS policy. Keyless: verify any agent's identity and query the infrastructure graph. With a key: register, govern and route agents.",
   "keywords": [
     "mcp",

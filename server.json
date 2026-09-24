@@ -19,7 +19,7 @@
     {
       "registryType": "npm",
       "identifier": "@whisper-security/whisper-mcp",
-      "version": "0.219.2",
+      "version": "0.219.3",
       "transport": {
         "type": "stdio"
       }

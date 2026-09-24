@@ -24,9 +24,17 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 
-const VERSION = require('../package.json').version;
+const PKG = require('../package.json');
+/*
+ * The CLI release this wrapper resolves, which is NOT the wrapper's own version. They move
+ * independently: a packaging fix bumps `version` while still fetching the same audited binary,
+ * and a CLI release bumps `whisperCliVersion`. Deriving one from the other looked tidy and meant
+ * that publishing a patch pointed the download at a release tag that did not exist.
+ */
+const CLI_VERSION = PKG.whisperCliVersion || PKG.version;
+const VERSION = CLI_VERSION;
 const REPO = 'whisper-sec/whisper-cli';
-const BASE = `https://github.com/${REPO}/releases/download/v${VERSION}`;
+const BASE = `https://github.com/${REPO}/releases/download/v${CLI_VERSION}`;
 
 /** stderr only. See the header: stdout is the protocol. */
 function note(msg) {
