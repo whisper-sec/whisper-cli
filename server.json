@@ -3,7 +3,7 @@
   "name": "io.github.whisper-sec/whisper",
   "description": "One real IPv6 per AI agent: verify any agent keyless; with a key, register, govern and route.",
   "title": "Whisper",
-  "version": "0.219.2",
+  "version": "0.219.3",
   "repository": {
     "url": "https://github.com/whisper-sec/whisper-cli",
     "source": "github"
