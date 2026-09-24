@@ -1,0 +1,43 @@
+{
+  "name": "@whisper-security/whisper-mcp",
+  "version": "0.219.2",
+  "description": "Give an AI agent a real, routable IPv6 identity, verifiable egress and DNS policy. Keyless: verify any agent's identity and query the infrastructure graph. With a key: register, govern and route agents.",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "agent-identity",
+    "ipv6",
+    "rdap",
+    "dnssec",
+    "dane",
+    "egress",
+    "threat-intelligence",
+    "claude",
+    "cursor",
+    "ai-agents"
+  ],
+  "homepage": "https://whisper.online",
+  "bugs": "https://github.com/whisper-sec/whisper-cli/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/whisper-sec/whisper-cli.git",
+    "directory": "npm-mcp"
+  },
+  "license": "MIT",
+  "author": "Whisper Security (viaGraph B.V.)",
+  "type": "commonjs",
+  "bin": {
+    "whisper-mcp": "bin/whisper-mcp.js"
+  },
+  "files": [
+    "bin/whisper-mcp.js",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
