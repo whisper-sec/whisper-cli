@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
   "name": "io.github.whisper-sec/whisper",
-  "description": "One real IPv6 per AI agent: verify any agent keyless; with a key, register, govern and route.",
+  "description": "One routable IPv6 per AI agent, verifiable from the DNS root. Keyless tools need no signup.",
   "title": "Whisper",
-  "version": "0.219.3",
+  "version": "0.219.4",
   "repository": {
     "url": "https://github.com/whisper-sec/whisper-cli",
     "source": "github"
@@ -13,6 +13,12 @@
     {
       "src": "https://whisper.online/logo.png",
       "mimeType": "image/png"
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://whisper.online/mcp"
     }
   ],
   "packages": [

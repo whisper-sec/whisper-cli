@@ -19,8 +19,9 @@ you run `whisper` on a terminal with no subcommand. And it talks to the
 
 ## Use it from an AI assistant, with no account
 
-The MCP server needs no API key and no install. Put this in your client's config and 45
-tools are available, including the keyless half:
+No API key and no install. Put this in your client's config and five tools appear, and all five
+answer with no key. Add a key, by env var or by `whisper login` once on the machine, and the same
+server lists 45:
 
 ```json
 {
@@ -36,17 +37,45 @@ tools are available, including the keyless half:
 Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline and Zed all take the same
 three lines. Already installed the CLI? `whisper mcp` is the identical server.
 
-What works before you have a key:
+The five, measured against the server with no key anywhere on the machine:
 
 - `whisper_verify` - is this address or hostname a real agent, and whose? Checks the
   DANE pin against DNSSEC-signed DNS, from the IANA root.
 - `whisper_rdap` - the public registration record for any `/128`.
-- `explain_indicator` - one-call assessment of a domain, IP, ASN or hash.
-- `query` - Cypher against the infrastructure graph.
-- `read_docs`, `list_workflows`, `run_workflow`.
+- `whisper_assess` - a verdict on a domain, IP, ASN or file hash, with its evidence.
+- `whisper_identify` - what an indicator is: category, vendor, band.
+- `whisper_explain` - the scored explanation behind a verdict, with its sources.
 
-Add a key and the same server registers agents, sets resolver policy, hands out egress
-configuration, reads per-agent activity and revokes an identity.
+Add a key and the same server lists 45: the graph in full, plus registering agents, setting
+resolver policy, handing out egress configuration, reading per-agent activity and revoking an
+identity.
+
+### Or connect to a URL and run nothing at all
+
+```
+https://whisper.online/mcp
+```
+
+Most clients take that URL and nothing else. Claude Code, for one:
+`claude mcp add --transport http whisper https://whisper.online/mcp`.
+
+Streamable HTTP. `initialize` and `tools/list` answer with no credential, so a client that takes
+a bare URL needs nothing else. It is a different server from the one above and it lists a
+different set: 15 tools with no key, every one of which works with no key, and 37 once you send
+your key as the `X-API-Key` header.
+
+The keyless 15 are the graph: `whisper_assess`, `whisper_identify`, `whisper_explain`,
+`whisper_walk`, `whisper_watch`, `whisper_variants`, `whisper_origins`, `whisper_history`,
+`whisper_asset`, `whisper_psl`, `whisper_threatintel`, `whisper_lookuptlsfingerprint`,
+`whisper_lookuptorrelay`, `whisper_topasnsbyprefixcount`, and `whisper_signup`, which issues you
+an API key from an email address alone. The 22 a key adds are the provisioning and governance
+set, 21 of them `whisper_agents_*` and the 22nd `whisper_submit`, which writes a claim into the
+graph and so needs to be attributable.
+
+What the URL does NOT yet serve is `whisper_verify` and `whisper_rdap`. Those are on the local
+server above, keyless, and on the plain HTTPS endpoint below that needs no client at all. There is
+a `whisper_agents_verify` in the keyed set, but that verifies a domain you control, not somebody
+else's agent, so it is not the same thing.
 
 Verifying somebody else's agent needs nothing at all, not even the client:
 
