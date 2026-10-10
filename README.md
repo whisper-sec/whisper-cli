@@ -61,21 +61,20 @@ Most clients take that URL and nothing else. Claude Code, for one:
 
 Streamable HTTP. `initialize` and `tools/list` answer with no credential, so a client that takes
 a bare URL needs nothing else. It is a different server from the one above and it lists a
-different set: 15 tools with no key, every one of which works with no key, and 37 once you send
+different set: 17 tools with no key, every one of which works with no key, and 39 once you send
 your key as the `X-API-Key` header.
 
-The keyless 15 are the graph: `whisper_assess`, `whisper_identify`, `whisper_explain`,
-`whisper_walk`, `whisper_watch`, `whisper_variants`, `whisper_origins`, `whisper_history`,
-`whisper_asset`, `whisper_psl`, `whisper_threatintel`, `whisper_lookuptlsfingerprint`,
-`whisper_lookuptorrelay`, `whisper_topasnsbyprefixcount`, and `whisper_signup`, which issues you
-an API key from an email address alone. The 22 a key adds are the provisioning and governance
-set, 21 of them `whisper_agents_*` and the 22nd `whisper_submit`, which writes a claim into the
-graph and so needs to be attributable.
+The keyless 17 are the identity checks and the graph: `whisper_verify`, `whisper_rdap`,
+`whisper_assess`, `whisper_identify`, `whisper_explain`, `whisper_walk`, `whisper_watch`,
+`whisper_variants`, `whisper_origins`, `whisper_history`, `whisper_asset`, `whisper_psl`,
+`whisper_threatintel`, `whisper_lookupTlsFingerprint`, `whisper_lookupTorRelay`,
+`whisper_topAsnsByPrefixCount`, and `whisper_signup`, which issues you an API key from an email
+address alone. The 22 a key adds are the provisioning and governance set, 21 of them
+`whisper_agents_*` and the 22nd `whisper_submit`, which writes a claim into the graph and so
+needs to be attributable.
 
-What the URL does NOT yet serve is `whisper_verify` and `whisper_rdap`. Those are on the local
-server above, keyless, and on the plain HTTPS endpoint below that needs no client at all. There is
-a `whisper_agents_verify` in the keyed set, but that verifies a domain you control, not somebody
-else's agent, so it is not the same thing.
+`whisper_verify` and `whisper_rdap` check somebody else's agent. `whisper_agents_verify` in the
+keyed set verifies a domain you control, which is not the same thing.
 
 Verifying somebody else's agent needs nothing at all, not even the client:
 

@@ -20,17 +20,23 @@ Zed: same three lines.
 
 ## It does something useful with no account
 
-No key, no signup, 45 tools, real answers:
+No key, no signup, five tools, real answers:
 
-- `whisper_verify` - is this address or hostname a real Whisper agent, and whose?
-- `whisper_rdap` - the IP-anchored registration record for a `/128`
-- `explain_indicator` - one-call threat assessment for a domain, IP, ASN or hash
-- `query` - Cypher against WhisperGraph, the internet's infrastructure graph
-- `read_docs`, `list_workflows`, `run_workflow` - documentation and ready-made investigations
+- `whisper_verify` - is this address or hostname a real Whisper agent, and whose? The full
+  keyless trust chain: reverse DNS, the DANE-EE TLSA pin, DNSSEC, the signed identity document.
+- `whisper_rdap` - the IP-anchored registration record for a `/128`: who operates the
+  identity, since when, under which tenant.
+- `whisper_identify` - the vendor, category and operator roles behind a host or IP, with a
+  confidence band.
+- `whisper_assess` - a labelled threat posture for a host or IP: malicious, benign or
+  unknown, with the severity band, coverage and evidence behind it.
+- `whisper_explain` - an indicator scored against the threat feeds, with the feeds it is
+  listed in and exactly why.
 
-Add an API key and the same server also registers agents, sets resolver policy, hands out
-egress configuration and reads your agents' activity. Nothing is hidden behind the key
-that could have been answered without it.
+Add an API key and the same server lists 45 tools: it registers agents, sets resolver
+policy, hands out egress configuration, reads your agents' activity, and opens the graph
+(`query`, `explain_indicator`, `read_docs`, `list_workflows`, `run_workflow`, `text2cypher`
+and the investigation procedures).
 
 ## Getting a key
 
