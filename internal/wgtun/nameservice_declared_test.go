@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// nameservice_declared_test.go pins 's rung of the ladder: the prefix op:connect NAMED.
+// nameservice_declared_test.go pins one rung of the ladder: the prefix op:connect NAMED.
 //
 // The ladder is env pin, then RFC 7050 discovery, then the declaration, then the well-known
 // guess. Every test here varies exactly one rung and holds the rest fixed, because the whole

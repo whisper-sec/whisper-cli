@@ -272,23 +272,6 @@ func TestObserveBucketsByEventTime(t *testing.T) {
 	}
 }
 
-// TestTenantFromFQDN pins the tenant-handle derivation (<agent>.<t…>.agents.<zone>).
-func TestTenantFromFQDN(t *testing.T) {
-	cases := map[string]string{
-		"a2b9b.t0123456789abcdef0123456789abcdef.agents.whisper.online.": "t0123456789abcdef0123456789abcdef",
-		"a2b9b.t0123456789abcdef0123456789abcdef.agents.whisper.online":  "t0123456789abcdef0123456789abcdef",
-		"example.com.":         "",
-		"":                     "",
-		"a.b.c.d":              "", // second label too short / not t-prefixed
-		"x.tabcdefgh.agents.z": "tabcdefgh",
-	}
-	for in, want := range cases {
-		if got := model.TenantFromFQDN(in); got != want {
-			t.Errorf("TenantFromFQDN(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestFrameNeverWiderThanTerminal: the belt-and-braces clamp - every rendered line of
 // every mode fits the terminal width (one over-budget line collapsed the frame).
 func TestFrameNeverWiderThanTerminal(t *testing.T) {

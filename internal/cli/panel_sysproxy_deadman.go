@@ -4,10 +4,13 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -97,12 +100,35 @@ func disarmSysProxyDeadMan() {
 // names and the command surface does not accept would ship a safety net that can never open.
 var sysProxyDeadManArgv = []string{"panel", "system-proxy", "dead-man"}
 
-// spawnSysProxyDeadMan starts the detached watchdog. A package var so the enable path's ORDERING
-// can be asserted from a test without a second process ever being created.
-var spawnSysProxyDeadMan = func() error {
+// ErrDeadManFromTestBinary is returned rather than re-executing a Go test binary as the watchdog.
+//
+// os.Executable() under `go test` is the TEST binary, not the CLI. Handing it the watchdog argv
+// does not run the watchdog: the testing framework does not recognise those arguments, so it runs
+// the WHOLE SUITE again, which reaches this spawn again, which starts another one. It is a fork
+// bomb with a doubling time of about a second. It took this build host to a load average above
+// 600 and 800 live processes before it was caught, so the refusal lives in the product path and
+// not only in a test helper.
+var ErrDeadManFromTestBinary = errors.New(
+	"refusing to start the system-proxy watchdog: this executable is a Go test binary, and " +
+		"re-executing it would re-run the test suite rather than the watchdog")
+
+// executableIsGoTestBinary reports whether exe looks like a binary produced by `go test`, which
+// names it after the package under test with a .test suffix (plus .exe on Windows).
+func executableIsGoTestBinary(exe string) bool {
+	base := strings.TrimSuffix(filepath.Base(exe), ".exe")
+	return strings.HasSuffix(base, ".test")
+}
+
+// buildSysProxyDeadManCmd constructs the detached watchdog command WITHOUT starting it.
+//
+// Split out from the spawn so the stdio and detach decisions can be inspected by a test that
+// never creates a second process. The returned Closer owns the log file handle and must be
+// closed by the caller once the command has been started or abandoned; it is nil when no log
+// could be opened, which is not fatal because the watchdog's judgement does not depend on it.
+func buildSysProxyDeadManCmd() (*exec.Cmd, io.Closer, error) {
 	exe, err := os.Executable()
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	cmd := exec.Command(exe, sysProxyDeadManArgv...)
 	// No inherited pipes, ever. A caller that reads our stderr to EOF - which the macOS panel
@@ -112,11 +138,28 @@ var spawnSysProxyDeadMan = func() error {
 	cmd.Stdout, cmd.Stderr = nil, nil
 	logPath := sysProxyDeadManLogPath()
 	_ = os.MkdirAll(filepath.Dir(logPath), 0o700)
+	var closer io.Closer
 	if log, lerr := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600); lerr == nil {
 		cmd.Stdout, cmd.Stderr = log, log
-		defer log.Close()
+		closer = log
 	}
 	applyDetach(cmd)
+	return cmd, closer, nil
+}
+
+// spawnSysProxyDeadMan starts the detached watchdog. A package var so the enable path's ORDERING
+// can be asserted from a test without a second process ever being created.
+var spawnSysProxyDeadMan = func() error {
+	cmd, closer, err := buildSysProxyDeadManCmd()
+	if err != nil {
+		return err
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
+	if executableIsGoTestBinary(cmd.Path) {
+		return ErrDeadManFromTestBinary
+	}
 	if err := cmd.Start(); err != nil {
 		return err
 	}

@@ -54,7 +54,8 @@ func GenerateKeypair() (Keypair, error) {
 // nat64_prefix, allowed_ips) but falls back to PARSING the wg-quick `wireguard_config` blob for
 // any that are missing - so a future server that returns only the blob still works.
 //
-// nat64Prefix is 's column. An absent or unusable value is not an error and not a warning:
+// nat64Prefix is the declared column. An absent or unusable value is not an error and
+// not a warning:
 // it is every server older than that column, and the node simply keeps guessing the way it did
 // before. There is no wg-quick spelling of it to fall back to, by design - wg-quick has no such
 // directive, and inventing a comment convention would put a second parser on the path.

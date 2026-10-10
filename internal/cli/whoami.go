@@ -7,13 +7,14 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strconv"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
 
 	"github.com/whisper-sec/whisper-cli/internal/buildid"
 	"github.com/whisper-sec/whisper-cli/internal/client"
-	"github.com/whisper-sec/whisper-cli/internal/model"
 )
 
 // whoami.go covers the two commands an agent/LLM naturally guesses at: `whisper
@@ -56,7 +57,8 @@ func newWhoamiCmd() *cobra.Command {
 			// dashboard's tenant lookup).
 			if view.KeyPresent {
 				if c, err := resolveClient(false, false); err == nil {
-					view.Tenant, view.Agents, view.reachErr = whoamiFleet(c)
+					view.Tenant, view.AgentTenants, view.Agents, view.agentsKnown, view.reachErr =
+						whoamiFleet(c)
 				}
 			}
 			if g.jsonOut {
@@ -67,20 +69,29 @@ func newWhoamiCmd() *cobra.Command {
 			if view.KeyPresent {
 				keyCell = "set (" + view.KeySource + ")"
 			}
+			// Per-cell, not per-request: the two facts come from two reads, so one of them
+			// failing must not blank the other. A failed fleet read used to discard a
+			// tenant handle that had answered perfectly well.
 			tenantCell := orDash(view.Tenant)
-			agentsCell := fmt.Sprintf("%d", view.Agents)
-			if view.reachErr != nil {
-				tenantCell, agentsCell = "-", "-"
-			}
-			if !view.KeyPresent {
-				agentsCell = "-"
+			agentsCell := "-"
+			if view.KeyPresent && view.agentsKnown {
+				agentsCell = fmt.Sprintf("%d", view.Agents)
 			}
 			rows := [][]string{
 				{"key", keyCell},
 				{"tenant", tenantCell},
 				{"agents", agentsCell},
-				{"selected", orVal(view.Selected, "none - run: whisper use <agent>")},
 			}
+			// Said only when there is something to say. An owner whose agents file their
+			// activity under their own handles cannot aggregate a fleet by the one
+			// handle above, and learning that from a surprising op:logs result is how a
+			// long investigation began once. An agent key, where the two coincide,
+			// sees no such row.
+			if view.AgentTenants != nil && *view.AgentTenants > 0 {
+				rows = append(rows, []string{"agent tenants", fmt.Sprintf(
+					"%d - each agent logs under its own, not yours", *view.AgentTenants)})
+			}
+			rows = append(rows, []string{"selected", orVal(view.Selected, "none - run: whisper use {agent}")})
 			printTable([]string{"FIELD", "VALUE"}, rows)
 			if view.reachErr != nil {
 				fmt.Fprintf(os.Stderr, "whisper: could not reach the control plane - %s\n", friendly(view.reachErr))
@@ -96,45 +107,137 @@ func newWhoamiCmd() *cobra.Command {
 type whoamiView struct {
 	KeyPresent bool   `json:"key_present"`
 	KeySource  string `json:"key_source"`
-	Tenant     string `json:"tenant,omitempty"`
-	Agents     int    `json:"agents"`
-	Selected   string `json:"selected_agent"`
-	reachErr   error  // control-plane reachability, human note only (never in JSON)
+	// Tenant is the handle the CALLER'S OWN key files activity under - the one op:logs
+	// scopes by for this key. It is NOT any agent's; see callerTenant.
+	Tenant string `json:"tenant,omitempty"`
+	// AgentTenants is how many OTHER handles this key's agents log under, each agent logging
+	// under its own rather than its owner's. It is a pointer so that null (the plane did
+	// not say) and 0 (nothing logs elsewhere) stay different answers on a machine surface.
+	// `agents` below is an int because it already was one and a script reading it predates
+	// this; its unknown case is the "-" in the table.
+	AgentTenants *int   `json:"agent_tenants"`
+	Agents       int    `json:"agents"`
+	Selected     string `json:"selected_agent"`
+	agentsKnown  bool   // whether the fleet read answered at all (drives the "-" cell)
+	reachErr     error  // control-plane reachability, human note only (never in JSON)
 }
 
-// whoamiFleet asks op:list for the caller's agents and distils the tenant handle (an
-// explicit tenant/holder field, else derived from an fqdn's second label) plus the
-// fleet size. Bounded short so whoami stays snappy; any failure is returned for the
-// caller's degrade path, never propagated as a command error.
-func whoamiFleet(c *client.Client) (tenant string, agents int, err error) {
+// whoamiFleet answers the two halves of "who am I" with two cheap reads, run
+// concurrently so the wall time is the slower of them rather than their sum (measured
+// against the live plane on a 385-agent account, both around half a second).
+//
+// They are two reads because they are two facts, and conflating them was the
+// defect. The tenant is the handle the CALLER'S key files activity under; the fleet size
+// is how many agents that key holds. A registered agent's events live under the AGENT'S
+// handle, so the first can never be read off the second value.
+//
+// Bounded short so whoami stays snappy; any failure is returned for the caller's degrade
+// path, never propagated as a command error.
+func whoamiFleet(c *client.Client) (
+	tenant string, agentTenants *int, agents int, agentsKnown bool, err error) {
 	cx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	env, aerr := c.Agents(cx, "list", map[string]any{"kind": "agents"})
+	var (
+		wg               sync.WaitGroup
+		ownErr, fleetErr error
+	)
+	wg.Add(2)
+	go func() { defer wg.Done(); tenant, agentTenants, ownErr = callerTenant(cx, c) }()
+	go func() { defer wg.Done(); agents, fleetErr = fleetSize(cx, c) }()
+	wg.Wait()
+	// Each read degrades its OWN cell and nothing else. Substituting a handle we could not
+	// confirm is the defect this fixes; discarding one that DID answer because the other read
+	// was shed by a 429 is the same mistake pointed the other way.
+	if ownErr != nil {
+		tenant, agentTenants = "", nil
+	}
+	// The note on stderr is about reachability, so either failure earns it.
+	if ownErr != nil {
+		err = ownErr
+	}
+	if fleetErr != nil {
+		err = fleetErr
+	}
+	return tenant, agentTenants, agents, fleetErr == nil, err
+}
+
+// callerTenant asks the plane what the CALLER'S OWN key files activity under:
+// op:list kind:'activityTenants' view:'self', which answers in one row and
+// carries agent_tenants, the number of other handles this key's agents log under.
+//
+// This is deliberately the only way the CLI learns the value. It cannot be computed here
+// (the CLI never sees a userId), and what used to stand in for it was the FIRST agent's
+// handle, derived off that agent's fqdn. That is a different tenant by construction, and
+// a convincing one: right shape, stable, and genuinely belonging to something the caller
+// owns. A real investigation was spent on it before it was recognised. An
+// empty return means the plane did not say, and every caller then shows "-" rather than a
+// substitute.
+func callerTenant(cx context.Context, c *client.Client) (own string, agentTenants *int, err error) {
+	env, aerr := c.Agents(cx, "list", map[string]any{"kind": "activityTenants", "view": "self"})
 	if aerr != nil {
-		return "", 0, aerr
+		return "", nil, aerr
 	}
 	if perr := envelopeError(env); perr != nil {
-		return "", 0, perr
+		return "", nil, perr
+	}
+	// self is the plane's own marker, not an ordering we assume: the row order is documented and
+	// stable, but a handle printed under the label "tenant" must not rest on a convention one
+	// refactor can change. So every row is read and EXACTLY one must be marked - breaking on the
+	// first would quietly let a second self row decide the answer by arriving earlier, which is
+	// the ordering dependence this comment claims not to have.
+	marked := 0
+	for _, rec := range env.Result.Records() {
+		item := rec
+		if m, ok := rec["item"].(map[string]any); ok {
+			item = m
+		}
+		if field(item, "self") != "true" {
+			continue
+		}
+		marked++
+		own = field(item, "tenant")
+		// Absent (an older plane that predates the field) stays nil rather than becoming 0:
+		// "nothing logs elsewhere" and "I was not told" are different answers. A negative count
+		// is not an answer at all, so it is nil too - the field is a cardinality.
+		if n, cerr := strconv.Atoi(field(item, "agent_tenants")); cerr == nil && n >= 0 {
+			agentTenants = &n
+		} else {
+			agentTenants = nil
+		}
+	}
+	if own == "" || marked != 1 {
+		return "", nil, nil
+	}
+	return own, agentTenants, nil
+}
+
+// fleetSize is op:list kind:'agents' mode:'count': the true total as one synthetic
+// row. The count used to come from walking the full listing, which is the same number and
+// roughly 435 KB of it, against about 300 bytes for the count, measured on the live plane.
+// A question about a number should not have to download the roster to answer it.
+func fleetSize(cx context.Context, c *client.Client) (int, error) {
+	env, aerr := c.Agents(cx, "list", map[string]any{"kind": "agents", "mode": "count"})
+	if aerr != nil {
+		return 0, aerr
+	}
+	if perr := envelopeError(env); perr != nil {
+		return 0, perr
 	}
 	for _, rec := range env.Result.Records() {
 		item := rec
 		if m, ok := rec["item"].(map[string]any); ok {
 			item = m
 		}
-		if field(item, "agent", "id", "label", "address", "addr128") == "" {
-			continue
-		}
-		agents++
-		if tenant == "" {
-			if v := field(item, "tenant", "holder"); v != "" {
-				tenant = v
-			} else {
-				// The fqdn carries the handle as its second label.
-				tenant = model.TenantFromFQDN(field(item, "fqdn"))
-			}
+		if n, cerr := strconv.Atoi(field(item, "count")); cerr == nil {
+			return n, nil
 		}
 	}
-	return tenant, agents, nil
+	// No parseable count: an ERROR, so the cell shows "-" and the reader is told. Returning 0 here
+	// would print "agents 0" beside a tenant that answered fine, with no dash and no note, and the
+	// count mode's own contract is that it must never hand back "a fabricated 0 presented as a
+	// real total". Three reply shapes reach this line: a note row instead of a count,
+	// ok:true with no result, and ok:true with no rows.
+	return 0, fmt.Errorf("the control plane answered op:list mode:'count' without a count")
 }
 
 // newVersionCmd is the spelled-out `whisper version` (the flag form --version already
@@ -149,6 +252,18 @@ func whoamiFleet(c *client.Client) (tenant string, agents int, err error) {
 // bare `--quiet` value stays the version and nothing else, because that is what
 // scripts read - and it is omitted entirely when unrecorded rather than printed
 // as "unknown", so what is shown is always something a reader can look up.
+// printSourceRef names the PUBLIC tree these bytes came from, when one is known
+// to exist. The build id is the private commit that compiled the binary,
+// which is truthful and unresolvable to a holder, so the version output used to
+// lead only somewhere they could not go. This is the line that goes somewhere
+// they can. Absent on a development build, and absent means silence: a guessed
+// tag is the same lie the build id was introduced to stop.
+func printSourceRef() {
+	if src := buildid.Source(); src != "" {
+		fmt.Fprintf(os.Stdout, "source: %s\n", src)
+	}
+}
+
 func newVersionCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "version",
@@ -162,7 +277,8 @@ func newVersionCmd() *cobra.Command {
 					Version   string `json:"version"`
 					Build     string `json:"build,omitempty"`
 					BuildTime string `json:"build_time,omitempty"`
-				}{Version, buildid.ID(), buildid.Time()})
+					Source    string `json:"source,omitempty"`
+				}{Version, buildid.ID(), buildid.Time(), buildid.Source()})
 				return nil
 			}
 			if g.quiet {
@@ -175,9 +291,11 @@ func newVersionCmd() *cobra.Command {
 				} else {
 					fmt.Fprintf(os.Stdout, "whisper version %s (build %s)\n", Version, b)
 				}
+				printSourceRef()
 				return nil
 			}
 			fmt.Fprintf(os.Stdout, "whisper version %s\n", Version)
+			printSourceRef()
 			return nil
 		},
 	}

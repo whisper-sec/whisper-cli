@@ -305,6 +305,7 @@ func TestIP_FallsBackToFreshConnectWhenRecordDead(t *testing.T) {
 // TestRun_ReusesLiveDaemonSessionAndInjectsItsEndpoint: `whisper run` routes the child
 // through the DAEMON's endpoint (ALL_PROXY == the record's endpoint) and never op:connects.
 func TestRun_ReusesLiveDaemonSessionAndInjectsItsEndpoint(t *testing.T) {
+	skipWithoutPOSIXShell(t)
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}

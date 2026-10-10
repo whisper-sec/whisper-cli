@@ -96,6 +96,10 @@ func WriteFile(path string, data []byte) error {
 	if werr != nil {
 		return werr
 	}
+	// Under sudo this may have landed in the INVOKING user's home owned by root,
+	// which leaves them unable to read their own file. Hand it back. Narrow and
+	// best-effort - see ReownForSudo.
+	ReownForSudo(path)
 	return cerr
 }
 
@@ -160,6 +164,9 @@ func MkdirAll(path string) error {
 		// this call is not the place to overrule them.
 		return nil
 	}
+	// A directory this process CREATED under sudo inside the invoking user's home
+	// goes back to them too, or the next non-root write into it fails.
+	ReownForSudo(path)
 	return HardenDir(path)
 }
 

@@ -38,7 +38,7 @@ func newLoginCmd() *cobra.Command {
 			"the prompt entirely. The key is saved to the key file (mode 600) so every later\n" +
 			"command uses it with no further config, then verified with a quick op:list.\n\n" +
 			"  whisper login                 # press Enter to sign in via browser, or paste a key\n" +
-			"  whisper login <key>           # save a key non-interactively\n" +
+			"  whisper login {key}           # save a key non-interactively\n" +
 			"  whisper login --web           # force the browser device flow (no prompt)\n" +
 			"  whisper login --manual        # force the manual key prompt",
 		Args: cobra.MaximumNArgs(1),

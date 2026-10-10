@@ -18,25 +18,27 @@ import (
 //
 // - KEYLESS (always): `whisper domain verify <apex>` runs the public trust chain (DANE-EE +
 // DNSSEC + JWS) for a name under your own domain - real value with no API key.
-// - KEY-GATED: submit a domain for onboarding, opt it into browser-trusted (WebPKI) certs, and
-// read its status/list - the control half over op:domain.
+// - KEY-GATED: submit a domain for onboarding and read its status/list - the control half
+// over op:domain.
 //
-// WebPKI opt-in: with --webpki, `submit` asks Whisper to additionally obtain a
-// browser-trusted Let's Encrypt leaf (via DNS-01 in your delegated, DNSSEC-signed BYOD zone),
-// served ALONGSIDE the default DANE-EE leaf. Without it, the domain stays DANE-EE-only.
+// WebPKI is NOT available for a domain you bring. A browser-trusted leaf is issued today only
+// for apexes we operate, and no self-serve opt-in exists, so --webpki refuses with that
+// explanation rather than accepting the request. It used to send acme:true and print that a
+// leaf would be issued; the control plane reads no such argument, so the sentence was the
+// flag's only effect. A domain submitted without it verifies and gets its DANE-EE leaf, which
+// is the trust anchor either way.
 func newDomainCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "domain",
-		Short: "Bring your own domain: verify (keyless), submit, opt into WebPKI, and check status",
+		Short: "Bring your own domain: verify (keyless), submit, and check status",
 		Long: "Onboard and govern a bring-your-own-domain (BYOD) apex whose agents get a Whisper /128\n" +
 			"under YOUR name. Two-tier:\n\n" +
 			"  domain verify <apex>          KEYLESS - run the public DANE-EE + DNSSEC + JWS trust chain\n" +
-			"  domain submit <apex> [--webpki]  submit for onboarding; --webpki also requests a\n" +
-			"                                browser-trusted Let's Encrypt leaf (additive to DANE-EE)\n" +
+			"  domain submit <apex>          submit for onboarding (DANE-EE, the trust anchor)\n" +
 			"  domain status <apex>          the onboarding + trust state of your domain\n" +
 			"  domain list                   your submitted domains\n\n" +
-			"Trust default is DANE-EE (no public CA); --webpki ADDS a WebPKI leaf for browser clients,\n" +
-			"never replacing the DANE anchor.",
+			"Trust is DANE-EE (no public CA). A browser-trusted WebPKI leaf is not offered for a\n" +
+			"domain you bring yet; --webpki refuses and says so.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			return usageErr("pick a subcommand: verify | submit | status | list (see `whisper domain --help`)")
@@ -85,34 +87,36 @@ func newDomainVerifyCmd() *cobra.Command {
 	}
 }
 
-// newDomainSubmitCmd is the KEY-GATED submit, with the --webpki opt-in. It calls the one
-// control verb (op:domain, sub-op submit); with --webpki it sets acme:true so the backend also
-// pursues a browser-trusted leaf for the opted-in apex (additive to the DANE-EE default).
+// newDomainSubmitCmd is the KEY-GATED submit. It calls the one control verb (op:domain,
+// sub-op submit). --webpki is kept so the flag a user may already have scripted refuses
+// visibly instead of disappearing, which is the same reason it no longer claims success.
 func newDomainSubmitCmd() *cobra.Command {
 	var webpki bool
 	cmd := &cobra.Command{
 		Use:   "submit <apex>",
-		Short: "Submit a domain for BYOD onboarding; --webpki also requests a browser-trusted leaf",
+		Short: "Submit a domain for BYOD onboarding (DANE-EE)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			apex := strings.TrimSpace(args[0])
 			if apex == "" {
 				return usageErr("domain submit needs an apex, e.g. `whisper domain submit example.com`")
 			}
-			wire := map[string]any{"op": "submit", "domain": apex}
 			if webpki {
-				wire["acme"] = true // opt into a browser-trusted WebPKI leaf (additive to DANE-EE)
+				return fmt.Errorf("--webpki is not available yet: browser-trusted (WebPKI) leaves are\n" +
+					"issued today only for apexes we operate, and there is no self-serve opt-in for a\n" +
+					"domain you bring. Re-run without --webpki to submit the domain: verification and\n" +
+					"the DANE-EE leaf both work, and the WebPKI leaf is additive when it lands")
 			}
-			return runDomainOp(wire, func() {
-				if webpki && !g.quiet && !g.jsonOut {
-					fmt.Fprintln(os.Stderr, "whisper: WebPKI requested - a browser-trusted leaf will be issued "+
-						"alongside the DANE-EE leaf once the domain verifies.")
-				}
-			})
+			// The selector key is `name`, with `zone` accepted as a synonym. A third spelling is
+			// not refused - it is IGNORED, and op:domain then answers from the unselected listing, so
+			// `domain:` returned another domain's rows with ok=true 200, for any input including one
+			// that cannot exist. A wrong answer, not an error.
+			wire := map[string]any{"op": "submit", "name": apex}
+			return runDomainOp(wire, nil)
 		},
 	}
 	cmd.Flags().BoolVar(&webpki, "webpki", false,
-		"also request a browser-trusted Let's Encrypt leaf (additive to the DANE-EE default)")
+		"request a browser-trusted Let's Encrypt leaf (not available yet: refuses with an explanation)")
 	return cmd
 }
 
@@ -123,7 +127,7 @@ func newDomainStatusCmd() *cobra.Command {
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			apex := strings.TrimSpace(args[0])
-			return runDomainOp(map[string]any{"op": "status", "domain": apex}, nil)
+			return runDomainOp(map[string]any{"op": "status", "name": apex}, nil)
 		},
 	}
 }

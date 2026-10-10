@@ -113,7 +113,7 @@ func newWhaleDNSRecordSetCmd() *cobra.Command {
 		Short: "Publish or replace one record",
 		Long: "Publish a record in your fleet's namespace, replacing any record of the same\n" +
 			"name and type.\n\n" +
-			"  whisper whale dns record set api CNAME db-01.t<hash>.agents.whisper.online.\n" +
+			"  whisper whale dns record set api CNAME db-01.t{hash}.agents.whisper.online.\n" +
 			"  whisper whale dns record set _proof TXT 'whisper-site-verification=...'\n" +
 			"  whisper whale dns record set gateway AAAA 2a04:2a01:...\n\n" +
 			"The type is accepted in any case. Which types are allowed, and which names are\n" +
@@ -126,7 +126,7 @@ func newWhaleDNSRecordSetCmd() *cobra.Command {
 			value := strings.TrimSpace(args[2])
 			if name == "" || rtype == "" || value == "" {
 				return usageErr("a record needs a name, a type and a value, e.g. " +
-					"`whisper whale dns record set api CNAME db-01.t<hash>.agents.whisper.online.`")
+					"`whisper whale dns record set api CNAME db-01.t{hash}.agents.whisper.online.`")
 			}
 			c, err := resolveClient(true, false)
 			if err != nil {

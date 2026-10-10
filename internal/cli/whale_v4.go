@@ -97,7 +97,7 @@ func whaleV4Status(sessions []statusSession, measured *v4Probe) whaleV4View {
 			"IPv6 /128 %s. IPv4 DESTINATIONS are carried by NAT64 (%s): the local listener at %s is itself "+
 			"IPv4, so a v4-only client library needs no changes, and an IPv4 target is wrapped into that "+
 			"prefix before it goes down the tunnel.%s Point it at the listener: "+
-			"curl -4 --proxy socks5h://%s http://<a v4-only host>/. %s",
+			"curl -4 --proxy socks5h://%s http://{a-v4-only-host}/. %s",
 			orDash(s.Address), v.NAT64Prefix, v.Endpoint, prefixSourceClause(v.NAT64PrefixSource),
 			v.Endpoint, measuredClause(v.Measured))
 		return v
@@ -106,7 +106,7 @@ func whaleV4Status(sessions []statusSession, measured *v4Probe) whaleV4View {
 	v.Note = fmt.Sprintf("This node has no IPv4 address, and it does not need one. Its identity is the "+
 		"IPv6 /128 %s. IPv4 DESTINATIONS are the box's job on this tier: the local listener at %s is itself "+
 		"IPv4, and the box resolves and dials the target. Point a v4-only client at the listener: "+
-		"curl -4 --proxy socks5h://%s http://<a v4-only host>/. %s",
+		"curl -4 --proxy socks5h://%s http://{a-v4-only-host}/. %s",
 		orDash(s.Address), v.Endpoint, v.Endpoint, measuredClause(v.Measured))
 	return v
 }

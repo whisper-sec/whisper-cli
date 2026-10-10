@@ -115,8 +115,8 @@ type whaleNode struct {
 	// Name is the SHORT name a person calls the node: its agent id, or the label the
 	// fleet holds it under. It is a display name and nothing looks it up.
 	Name string
-	// FQDN is the node's DNS name, set only when we actually learnt one. this is
-	// the field a verb resolves records under - `whale ssh` looks the SSHFP up here -
+	// FQDN is the node's DNS name, set only when we actually learnt one. This is the
+	// field a verb resolves records under - `whale ssh` looks the SSHFP up here -
 	// and it is separate from Name because they are different strings for a registered
 	// agent (`agent-a<hex>` against `a<hex>.t<hash>.agents.whisper.online.`). Looking a
 	// record up under an id returns NXDOMAIN and reads as "no SSHFP is published",

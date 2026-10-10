@@ -160,44 +160,45 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 		noteTierIfDifferent(reused, selTier)
 		sess = reused
 	} else {
-		args := map[string]any{}
+		// Run the SAME connect body `whisper connect` runs, rather than a second,
+		// thinner copy of it.
+		//
+		// This used to build op:connect args inline and call connectAndVerify once.
+		// That worked from a warm state and failed from a cold one: a fresh user who
+		// stopped a working `whisper connect` and then ran a standalone `whisper run`
+		// got "egress CONNECT reply unreadable" and exit 1, while `whisper connect`
+		// on the identical agent recovered immediately by falling back to Tier-1.5.
+		// The two commands disagreed because only one of them negotiated.
+		//
+		// connectTierAttempt and negotiateConnect are that shared body. Going through
+		// them gives run per-tier key preparation, the birth-pin self-heal, the
+		// Tier-1 attempt under its own bounded timeout with an automatic Tier-1.5
+		// fallback, and - when nothing works - the single collapsed error rather than
+		// whichever failure happened to surface first. connectTierAttempt's own
+		// comment already called itself "the one connect body BOTH the forced --tier
+		// path and each auto-negotiation leg run, so the two modes can never drift
+		// apart"; run had drifted precisely because it was not one of them.
+		base := map[string]any{}
 		if sel != "" {
-			args["agent"] = sel
+			base["agent"] = sel
 		}
-		if selTier != "" {
-			args["tier"] = selTier
-		}
-		// --tier wireguard: mint a local WG keypair, inject ONLY the public half into the
-		// op:connect args; our private key never leaves this host. No-op otherwise; wgKey threads
-		// the private key into the userspace tunnel bring-up.
-		wgKey, werr := prepareWireGuard(selTier, args)
-		if werr != nil {
-			return werr
-		}
-		// Alongside it, the agent-held identity keypair (routed tier only).
-		idKey, ierr := prepareIdentityKey(selTier, args, sel)
-		if ierr != nil {
-			return ierr
-		}
-		keys := &connectKeys{wg: wgKey, identity: idKey}
-		// cx is the SHORT control-plane ctx: it bounds op:connect and the one-shot verify HTTP
-		// GET, and is cancelled the moment they return. It does NOT bound the local proxy - the
-		// proxy keeps its own Background-rooted lifetime (see egress.StartLocalProxy) and only
-		// Stop() ends it. So cancelling cx here leaves the proxy LIVE for the child below.
+		// cx is the SHORT control-plane ctx: it bounds op:connect and the one-shot verify
+		// HTTP GET, and is cancelled the moment they return. It does NOT bound the local
+		// proxy - the proxy keeps its own Background-rooted lifetime (see
+		// egress.StartLocalProxy) and only Stop() ends it. So cancelling cx here leaves
+		// the proxy LIVE for the child below.
 		cx, cancel := ctx()
-		env, err := c.Agents(cx, "connect", args)
-		if err != nil {
-			cancel()
-			return err
+		var cerr error
+		if selTier != "" {
+			// An explicit --tier is still honoured exactly, with no silent downgrade:
+			// a person who names a tier is owed that tier or a clear failure.
+			sess, cerr = connectTierAttempt(cx, c, base, selTier, sel, 0)
+		} else {
+			sess, cerr = negotiateConnect(cx, c, base, sel, 0)
 		}
-		if perr := envelopeError(env); perr != nil {
-			cancel()
-			return perr
-		}
-		sess, err = connectAndVerify(cx, c, env.Result, "", keys)
 		cancel() // ends ONLY the control ctx; the proxy stays up (its lifetime is Stop(), below)
-		if err != nil {
-			return err
+		if cerr != nil {
+			return cerr
 		}
 	}
 	defer sess.Stop() // OUR proxy lives exactly as long as the child; a REUSED session no-ops

@@ -168,12 +168,20 @@ func freeEphemeralPort(t *testing.T) int {
 	return p
 }
 
-// TestRunConnectDaemon_BindFirstGuard: a duplicate daemon spawned onto a port another daemon
-// already holds must fail-fast to nil (already-ensured) INSTANTLY - never doing op:connect,
-// never lingering. This is the hard guarantee that a raced/false-negative --ensure can never
-// leave a zombie daemon (the bug the live e2e caught). Without the guard, runConnectDaemon
-// would fall through to resolveClient/op:connect (and hang or error), so a held port that
-// returns nil promptly proves the guard is in front of all network work.
+// TestRunConnectDaemon_BindFirstGuard: a duplicate daemon spawned onto a port ANOTHER
+// WHISPER DAEMON already holds must fail-fast to nil (already-ensured) INSTANTLY - never
+// doing op:connect, never lingering. This is the hard guarantee that a raced/false-negative
+// --ensure can never leave a zombie daemon (the bug the live e2e caught). Without the guard,
+// runConnectDaemon would fall through to resolveClient/op:connect (and hang or error), so a
+// held port that returns nil promptly proves the guard is in front of all network work.
+//
+// The stand-in used to be a bare net.Listen, on the reading that a busy pinned port could
+// only ever be our own twin. That reading was safe while the port came from `whisper init`
+// and stopped being safe once a HOST install pinned the documented default, which other
+// things take: a stranger on the port must NOT be read as "already up" (see
+// TestABusyPortIsNotProofTheDaemonIsAlreadyUp). So the listener now answers the SOCKS5
+// probe, which is what actually makes it a stand-in for a live daemon rather than for any
+// process at all - and the guarantee this test exists for is unchanged.
 func TestRunConnectDaemon_BindFirstGuard(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0") // stand in for the live daemon holding the port
 	if err != nil {
@@ -181,11 +189,14 @@ func TestRunConnectDaemon_BindFirstGuard(t *testing.T) {
 	}
 	defer ln.Close()
 	port := ln.Addr().(*net.TCPAddr).Port
+	prevProbe := probeWhisperProxy
+	probeWhisperProxy = func(p int) bool { return p == port }
+	defer func() { probeWhisperProxy = prevProbe }()
 
 	p := projcfg.PathsFor(t.TempDir())
 	done := make(chan error, 1)
 	go func() {
-		done <- runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01::9", Tier: "socks5"})
+		done <- runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01::9", Tier: "socks5"}, false)
 	}()
 	select {
 	case err := <-done:

@@ -187,9 +187,10 @@ func newCreateCmd() *cobra.Command {
 			"auto-bind uses this so an upgrade or re-run preserves the endpoint's identity\n" +
 			"(a reuse cannot re-show the agent's API key; only a fresh mint carries one).\n\n" +
 			"Typed identity (one of): register the object under a domain-specific identifier it\n" +
-			"already carries, so its /128 is attributed to that identifier (fleet device\n" +
-			"attribution - the owner-private device_id `whisper list` surfaces). Passing one\n" +
-			"implies --register (the object gets its own routable /128 + key):\n" +
+			"already carries, and its /128 is DERIVED from that identifier - the same id always\n" +
+			"yields the same address, on either nameserver and after any restart, so re-running\n" +
+			"this command for the same object returns the same agent rather than a second one.\n" +
+			"Passing one implies --register (the object gets its own routable /128 + key):\n" +
 			"  --vin (+ --ecu-serial)  a vehicle / ECU (automotive)\n" +
 			"  --nf-instance-id        a 5G network function (telecom)\n" +
 			"  --lfdi                  a DER / smart-grid device (energy, IEEE 2030.5)\n" +
@@ -197,9 +198,12 @@ func newCreateCmd() *cobra.Command {
 			"  --applicationuri        an OPC-UA / MUD industrial asset (OT)\n" +
 			"  --c2pa-serial           a C2PA / CAWG content signer\n" +
 			"  --agent-id              an A2A / AP2 / x402 commerce agent id\n" +
-			"These are mutually exclusive; each is sent as the derivation's device_id. For a\n" +
-			"DETERMINISTIC /128 derived from the device's OWN key (same key+id => same address),\n" +
-			"use `whisper connect --tier wireguard --vin <VIN>` - the device holds the key.\n\n" +
+			"These are mutually exclusive; each is sent as the derivation's device_id. The\n" +
+			"derivation is scoped to YOUR account, so the same VIN under a different account\n" +
+			"gives a different address and a public identifier is not a lookup table for\n" +
+			"anyone else. When the object holds its OWN hardware key, `whisper connect --tier\n" +
+			"wireguard --vin <VIN>` derives from that key as well, so the binding is provable\n" +
+			"by the device rather than only by us.\n\n" +
 			"With --wallet, additionally pin an x402 wallet (EOA) to the new /128 as a\n" +
 			"resolvable TXT binding (via op:host) so a facilitator can tie the wallet to the\n" +
 			"verifiable, revocable agent identity.\n\n" +
@@ -445,6 +449,11 @@ func (f *identifierFlags) resolve() (string, error) {
 	}
 	var set []pick
 	if v := strings.TrimSpace(f.vin); v != "" {
+		// Upper-case, because a VIN is upper-case by ISO 3779 and the derivation binds the exact
+		// bytes: without this, --vin 1hg... and --vin 1HG... are the same car at two addresses,
+		// which is the one thing the flag promises cannot happen. The ECU serial is NOT folded -
+		// vendor serials may legitimately distinguish case.
+		v = strings.ToUpper(v)
 		id := v
 		if s := strings.TrimSpace(f.ecuSerial); s != "" {
 			id = "vin:" + v + ";ecu:" + s // deterministic per-ECU identity
@@ -887,13 +896,68 @@ func resolveAddress(c *client.Client, target string) (string, error) {
 		if m, ok := rec["item"].(map[string]any); ok {
 			item = m
 		}
-		if field(item, "agent", "id", "label") == target || field(item, "address", "addr128") == target {
+		if agentItemMatches(item, target) {
 			if addr := field(item, "address", "addr128"); addr != "" {
 				return addr, nil
 			}
 		}
 	}
 	return "", &client.ProblemError{Status: 404, Detail: fmt.Sprintf("agent %q not found in your account", target)}
+}
+
+// agentItemMatches answers whether one list row IS the agent the user named.
+//
+// The match used to be `field(item, "agent", "id", "label") == target`, and
+// field() returns the FIRST of those keys that is present and non-empty. Every
+// row carries "agent", so "label" was never reached and `whisper use
+// my-first-agent` rejected an agent that `whisper list` had just displayed under
+// exactly that name. Selecting it by IPv6 worked, and `connect --agent` accepted
+// the name, so the account was fine and only this lookup disagreed.
+//
+// field() is the right helper for RENDERING a row (show the best name available)
+// and the wrong one for MATCHING it: a target may equal ANY identifier the row
+// carries, not merely the first one that happens to exist. So every candidate is
+// compared individually.
+//
+// Exact matches are tried across all fields before any case-insensitive one, so
+// two agents differing only in case can never resolve to each other while an
+// exact name is on the table. The fold exists because these are DNS labels and a
+// person who types the name they were shown, in the case they remember it,
+// should not get "not in your account".
+func agentItemMatches(item map[string]any, target string) bool {
+	// The trailing dot is trimmed on BOTH sides: `whisper list` prints the fqdn in
+	// its wire form with the root dot, and a person pasting it back has the same
+	// name either way. Trimming only the candidate (the first version of this)
+	// meant the exact string list had just shown did not match itself.
+	t := strings.TrimSuffix(strings.TrimSpace(target), ".")
+	if t == "" {
+		return false
+	}
+	cands := agentItemIdentifiers(item)
+	for _, c := range cands {
+		if c == t {
+			return true
+		}
+	}
+	for _, c := range cands {
+		if strings.EqualFold(c, t) {
+			return true
+		}
+	}
+	return false
+}
+
+// agentItemIdentifiers lists every name one row may legitimately be called by.
+// A trailing dot is trimmed from the fqdn so the wire form and the form a person
+// types both match.
+func agentItemIdentifiers(item map[string]any) []string {
+	var out []string
+	for _, k := range []string{"agent", "id", "label", "name", "address", "addr128", "fqdn"} {
+		if v := strings.TrimSpace(asString(item[k])); v != "" {
+			out = append(out, strings.TrimSuffix(v, "."))
+		}
+	}
+	return out
 }
 
 // --- small helpers ---------------------------------------------------------------

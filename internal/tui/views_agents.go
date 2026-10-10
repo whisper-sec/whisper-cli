@@ -18,8 +18,8 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/tui/theme"
 )
 
-// sortKey orders the fleet table (Shift-K cycles). last-active leads and is the DEFAULT
-// : fresh traffic moves an agent up, so the busy fleet reads newest-first with
+// sortKey orders the fleet table (Shift-K cycles). last-active leads and is the DEFAULT:
+// fresh traffic moves an agent up, so the busy fleet reads newest-first with
 // zero configuration; Shift-F freezes the order in place while you read.
 type sortKey int
 

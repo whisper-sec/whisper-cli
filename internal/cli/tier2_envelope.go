@@ -50,7 +50,7 @@ func tier2FromRecord(rec map[string]any) tier2Endpoints {
 	var out tier2Endpoints
 	// DoH is HTTPS by definition (RFC 8484); anything else must never reach an OS DoH template.
 	if v := strings.TrimSpace(field(rec, "doh_url")); strings.HasPrefix(v, "https://") {
-		out.DoHURL = v
+		out.DoHURL = substituteDoHKey(v, rec)
 	}
 	// Only a parseable IP literal may become a nameserver line; canonical or not, pass the
 	// server's own literal through unchanged (the server emits the canonical form).
@@ -80,4 +80,29 @@ func tier2FromEnvelope(env *client.Envelope) tier2Endpoints {
 		return tier2Endpoints{}
 	}
 	return tier2FromResult(env.Result)
+}
+
+// dohKeyPlaceholder is what the control plane now emits where it used to interpolate the raw
+// credential. The server stopped returning the secret twice under two names, only one of which
+// announced itself; the URL still needs the key to work, so the substitution happens here,
+// against the credential that rides in the SAME record.
+const dohKeyPlaceholder = "{api_key}"
+
+// substituteDoHKey fills the placeholder from the credential in the same record. The column is
+// api_key on an agent mint and token on a device mint, so both are tried.
+//
+// If neither is present the placeholder is LEFT IN PLACE rather than papered over: a URL that
+// visibly says {api_key} tells its reader what is missing, and one silently missing its key
+// would be written into an OS resolver profile and fail later, somewhere with no explanation.
+// A URL without the placeholder is returned untouched, so an older server keeps working.
+func substituteDoHKey(url string, rec map[string]any) string {
+	if !strings.Contains(url, dohKeyPlaceholder) {
+		return url
+	}
+	for _, col := range []string{"api_key", "token"} {
+		if k := strings.TrimSpace(field(rec, col)); k != "" {
+			return strings.ReplaceAll(url, dohKeyPlaceholder, k)
+		}
+	}
+	return url
 }

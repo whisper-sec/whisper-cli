@@ -764,8 +764,47 @@ func TestPanelSystemProxy_RefusesWhenTheEgressCannotCarryIPv4(t *testing.T) {
 // would pass it and would then refuse on every train, plane and flaky cafe wifi in the world.
 //
 // Both legs failing is a statement about the machine, not about the egress.
+// panelStubDeadManSpawn replaces the watchdog spawn with one that records the arm and
+// starts nothing, and returns the recorder.
+//
+// It is deliberately NOT part of panelIsolation. spawnSysProxyDeadMan refuses to
+// re-execute a Go test binary because doing so does not run the watchdog, it re-runs
+// the whole suite, which reaches the spawn again: a fork bomb that once took this
+// build host past a load average of 600. TestSysProxyDeadMan_RefusesToReExecuteATestBinary
+// calls panelIsolation and then the REAL spawner to prove that refusal is still there,
+// so a stub in the shared helper would disarm the one test standing between us and that
+// bomb. Each test that needs the enable path to get PAST the arm asks for the stub by
+// name instead..
+func panelStubDeadManSpawn(t *testing.T) *panelDeadManSpawns {
+	t.Helper()
+	rec := &panelDeadManSpawns{}
+	saved := spawnSysProxyDeadMan
+	spawnSysProxyDeadMan = func() error {
+		rec.mu.Lock()
+		defer rec.mu.Unlock()
+		rec.n++
+		return nil
+	}
+	t.Cleanup(func() { spawnSysProxyDeadMan = saved })
+	return rec
+}
+
+// panelDeadManSpawns counts arms without ever creating a process.
+type panelDeadManSpawns struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (r *panelDeadManSpawns) count() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.n
+}
+
 func TestPanelSystemProxy_DoesNotRefuseWhenTheMachinesOwnNetworkIsDown(t *testing.T) {
+	skipWithoutPOSIXPaths(t)
 	panelIsolation(t)
+	_ = panelStubDeadManSpawn(t)
 	deepencli_globals(t, globalFlags{})
 	mac := (&panelSysProxyMac{}).install(t)
 	sess := panelSysProxySession(t, "2a04:2a01:9::abcd", 55312)
@@ -789,7 +828,9 @@ func TestPanelSystemProxy_DoesNotRefuseWhenTheMachinesOwnNetworkIsDown(t *testin
 // TestPanelSystemProxy_ForceOverridesAndSaysWhatItOverrode. An override that goes quiet is how
 // somebody ends up debugging a dead browser having never learned we warned them.
 func TestPanelSystemProxy_ForceOverridesAndSaysWhatItOverrode(t *testing.T) {
+	skipWithoutPOSIXPaths(t)
 	panelIsolation(t)
+	_ = panelStubDeadManSpawn(t)
 	deepencli_globals(t, globalFlags{})
 	mac := (&panelSysProxyMac{}).install(t)
 	sess := panelSysProxySession(t, "2a04:2a01:9::abcd", 55312)
@@ -816,7 +857,9 @@ func TestPanelSystemProxy_ForceOverridesAndSaysWhatItOverrode(t *testing.T) {
 // that machine means putting THAT back, not turning the proxy off: a person who ends up off their
 // company network because our toggle failed has been broken in a second, quieter way.
 func TestPanelSystemProxy_DeadManRestoresTheExactPreviousState(t *testing.T) {
+	skipWithoutPOSIXPaths(t)
 	panelIsolation(t)
+	armed := panelStubDeadManSpawn(t)
 	deepencli_globals(t, globalFlags{})
 	prev := systemProxyState{Supported: true, Enabled: true, Host: "proxy.corp.example", Port: 1080, Service: "Wi-Fi"}
 	mac := (&panelSysProxyMac{current: prev}).install(t)
@@ -842,6 +885,10 @@ func TestPanelSystemProxy_DeadManRestoresTheExactPreviousState(t *testing.T) {
 	if err == nil {
 		t.Fatal("the setting was applied, nothing could be fetched through it, and the command still " +
 			"reported success")
+	}
+	if armed.count() != 1 {
+		t.Fatalf("the watchdog was never armed (%d arms), so whatever restored below was not the "+
+			"dead man and this test would pass with the safety net removed", armed.count())
 	}
 	restores := mac.restores()
 	if len(restores) != 1 {
@@ -1076,7 +1123,9 @@ func TestPanelSystemProxy_PreflightVerdictIsCachedWithItsAge(t *testing.T) {
 // at a port that is long gone. That is the exact broken state this whole surface exists to undo,
 // reinstated by the repair itself, and it is only visible on the second enable.
 func TestPanelSystemProxy_ReEnablingKeepsTheORIGINALPreviousState(t *testing.T) {
+	skipWithoutPOSIXPaths(t)
 	panelIsolation(t)
+	_ = panelStubDeadManSpawn(t)
 	deepencli_globals(t, globalFlags{})
 	mac := (&panelSysProxyMac{current: systemProxyState{
 		Supported: true, Enabled: true, Host: "proxy.corp.example", Port: 1080, Service: "Wi-Fi",

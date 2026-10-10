@@ -42,6 +42,33 @@ type BoundIdentity struct {
 // fail-soft, mirroring ReadAgentFile: a missing/unreadable/garbled file is NOT an error -
 // it returns ok=false and the caller treats the endpoint as unbound. Unknown lines are
 // ignored; only a parseable IPv6 address= line makes the identity usable (ok=true).
+// BoundFileUnreadable reports that a bind marker EXISTS at path but this
+// process cannot read it.
+//
+// ReadBoundFile collapses every failure into "not bound", so a marker
+// written by `sudo enroll` - root-owned, 0600, in the invoking user's own home -
+// reads to that user as though enrolment never happened. The sensor reads it
+// fine and reports; only the human is told it is broken, and the remediation
+// they are given writes the same file again. A permission error reported as
+// absence is what makes that a loop rather than a message.
+//
+// Callers use it to say WHICH of the two it is. It deliberately does not try to
+// read the contents: the question is only whether the door is shut.
+func BoundFileUnreadable(path string) bool {
+	if path == "" {
+		path = DefaultBoundFile()
+	}
+	if _, err := os.Stat(path); err != nil {
+		return false // absent, or unstattable: not the case this names
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return true
+	}
+	_ = f.Close()
+	return false
+}
+
 func ReadBoundFile(path string) (BoundIdentity, bool) {
 	if path == "" {
 		path = DefaultBoundFile()

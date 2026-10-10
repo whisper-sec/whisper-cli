@@ -105,7 +105,9 @@ func renderDeviceAdded(res *client.Result) error {
 	}
 	rec := recs[0]
 	token := field(rec, "token")
-	doh := field(rec, "doh_url")
+	// The control plane emits a {api_key} placeholder rather than the credential, so the
+	// paste-able value is assembled here from the token in the same record.
+	doh := substituteDoHKey(field(rec, "doh_url"), rec)
 
 	if g.quiet {
 		// The device's paste-able value is its encrypted-DNS URL.

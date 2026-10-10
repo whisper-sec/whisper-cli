@@ -29,7 +29,9 @@ func newPolicyCmd() *cobra.Command {
 			"*.evil.com spelling is accepted and means the same rule. --mode picks how names resolve\n" +
 			"(graph-only | hybrid | always-forward); --retention sets how many days ordinary\n" +
 			"DNS/query logs are kept (0-3650). Only the flags you pass are changed - anything\n" +
-			"you leave off keeps its current value.",
+			"you leave off keeps its current value, the lists included: omitting --allow keeps the\n" +
+			"allow list you already have. To CLEAR a list rather than keep it, pass it explicitly\n" +
+			"empty over the API (allow: []).",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			args := map[string]any{}

@@ -119,6 +119,7 @@ func TestReadAgentFile(t *testing.T) {
 }
 
 func TestSaveAgentMode600AndRemoveOnEmpty(t *testing.T) {
+	skipWithoutPOSIXPerms(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "agent")
 	// write trims + 0600.
@@ -148,6 +149,7 @@ func TestSaveAgentMode600AndRemoveOnEmpty(t *testing.T) {
 }
 
 func TestSaveKeyMode600(t *testing.T) {
+	skipWithoutPOSIXPerms(t)
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "key")
 	if err := SaveKey(path, "  the-key  "); err != nil {

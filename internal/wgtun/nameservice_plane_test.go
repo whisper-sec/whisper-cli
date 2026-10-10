@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 viaGraph B.V. (Whisper Security)
+
 package wgtun
 
 import (

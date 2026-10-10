@@ -234,8 +234,8 @@ func (v *monitorView) blockRate(key string) float64 {
 	return blk / tot
 }
 
-// lastBlockedTargets returns the most recent blocked qname and denied peer for a scope
-// : key = one agent's ring, "" = the newest across EVERY ring (the (all) view).
+// lastBlockedTargets returns the most recent blocked qname and denied peer for a scope:
+// key = one agent's ring, "" = the newest across EVERY ring (the (all) view).
 // Empty strings mean none seen this session - the caller renders nothing (honest).
 func (v *monitorView) lastBlockedTargets(key string) (qname, peer string) {
 	var qUS, pUS int64

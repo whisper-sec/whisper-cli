@@ -366,8 +366,8 @@ func (a *App) View() string {
 		return a.renderOverlay(frame)
 	}
 	// Belt-and-braces: clamp the frame to the terminal so a width-math slip in any one
-	// view degrades to a clipped edge, never a scrolled/wrapped full-screen collapse
-	//. Conservative in what we emit.
+	// view degrades to a clipped edge, never a scrolled/wrapped full-screen collapse.
+	// Conservative in what we emit.
 	return a.th.App.MaxWidth(a.width).MaxHeight(a.height).Render(frame)
 }
 
@@ -416,24 +416,15 @@ func (a *App) mergeFleet(fresh []model.Agent) {
 	if a.selected < 0 {
 		a.selected = 0
 	}
-	a.deriveTenant()
 	a.agentsView.syncRows()
 }
 
-// deriveTenant backfills the header's tenant handle from an agent fqdn
-// (<agent>.<t-handle>.agents.<zone>) when the launch-time best-effort lookup came
-// back empty - the fleet we already hold IS the answer (derive, don't fetch).
-func (a *App) deriveTenant() {
-	if a.opts.Tenant != "" {
-		return
-	}
-	for _, ag := range a.agents {
-		if t := model.TenantFromFQDN(ag.FQDN); t != "" {
-			a.opts.Tenant = t
-			return
-		}
-	}
-}
+// There used to be a deriveTenant here that backfilled the header's handle from an agent's
+// fqdn whenever the launch-time lookup came back empty. "Derive, don't fetch" is
+// the right instinct and it was reaching for the wrong value: an agent's handle is not its
+// owner's, so the header confidently showed a stranger's tenant under the label
+// "tenant" exactly when the control plane had declined to say. An empty header is the
+// honest answer, and bestEffortTenant now asks the plane the question directly.
 
 // applyDetail folds an op:agent reply into the matching fleet entry.
 func (a *App) applyDetail(m agentDetailMsg) {

@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"fmt"
 	"net"
 	"os"
 	"os/signal"
@@ -42,7 +43,7 @@ func newConnectDaemonCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runConnectDaemon(p, cfg)
+			return runConnectDaemon(p, cfg, false)
 		},
 	}
 	cmd.Flags().StringVar(&configFlag, "config", "", "path to the project's .whisper/config")
@@ -56,20 +57,18 @@ func newConnectDaemonCmd() *cobra.Command {
 //
 // It is a package var so a command test can stub the daemon body (assert the daemon WOULD run
 // without a live network).
-var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config) error {
+var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool) error {
 	// Fail-fast idempotency guard. If another daemon already holds the pinned port, this is a
 	// duplicate spawn - a raced or false-negative `--ensure` probe. The connection is already
 	// up, so exit cleanly and INSTANTLY: no wasted op:connect, no half-built tunnel, and above
 	// all no lingering process. (A simultaneous double-spawn that both pass this check is still
 	// caught by the real bind collision in connectAndVerifyOnPort below - the loser returns an
 	// error and exits - so a duplicate daemon can never survive.)
-	if cfg.Port > 0 {
-		guard, lerr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(cfg.Port)))
-		if lerr != nil {
-			return nil // port already held by the live daemon - already ensured, nothing to do
-		}
-		_ = guard.Close() // release immediately so the real egress front-end can bind it below
+	port, ensured := resolveDaemonPort(cfg.Port, supervised)
+	if ensured {
+		return nil // a live whisper proxy already answers there - nothing to do
 	}
+	cfg.Port = port
 
 	c, err := resolveClient(true, false)
 	if err != nil {
@@ -150,6 +149,12 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config) error {
 		onEgressSession(sess)
 	}
 
+	// Say where it serves, once, in the form a user pastes. A persistent egress daemon
+	// whose address appears in no log and no status line is a product that stops one line
+	// short of being usable: the port used to be whatever the kernel handed out, it changed
+	// on every restart, and the only way to find it was ss against the unit's MainPID.
+	announceDaemonEndpoint(sess)
+
 	// Refresh the pidfile with OUR pid (the spawn wrote the parent-observed child pid; this is
 	// the authoritative one and lets `whisper status` / teardown find the live daemon).
 	_ = os.WriteFile(p.PIDFile, []byte(strconv.Itoa(os.Getpid())+"\n"), 0o600)
@@ -210,3 +215,85 @@ var holdDaemonUntilSignal = func(p projcfg.Paths, sess *egressSession) {
 // Declared beside its only call site, so the seam is visible from the code that
 // depends on it.
 var onEgressSession func(*egressSession)
+
+// daemonLogf is the daemon's one line out. Stderr, because that is what a service manager
+// captures into the journal and what the rootless daemon's parent shell shows.
+var daemonLogf = func(format string, a ...any) {
+	fmt.Fprintf(os.Stderr, format+"\n", a...)
+}
+
+// announceDaemonEndpoint prints the address the daemon serves and the identity it serves
+// from, in the two lines a reader needs and no more.
+//
+// It is the counterpart of the "connection up on 127.0.0.1:<port>" that interactive
+// `whisper connect` has always printed. The daemon printed nothing, which was survivable
+// while its port came from `whisper init` (the project config named it) and became the whole
+// problem once a host install could bind an ephemeral one.
+func announceDaemonEndpoint(sess *egressSession) {
+	if sess == nil || strings.TrimSpace(sess.endpoint) == "" {
+		return
+	}
+	if addr := strings.TrimSpace(sess.addr); addr != "" {
+		daemonLogf("whisper: connection daemon: serving %s, egress from %s", sess.endpoint, addr)
+	} else {
+		daemonLogf("whisper: connection daemon: serving %s", sess.endpoint)
+	}
+	daemonLogf("whisper: connection daemon: export ALL_PROXY=%s", sess.endpoint)
+}
+
+// resolveDaemonPort decides which loopback port this daemon should serve on, and whether it
+// should run at all.
+//
+// It returns (port, alreadyEnsured). alreadyEnsured means a LIVE Whisper proxy is already
+// answering the pinned port, so this process is a duplicate spawn and should exit cleanly.
+//
+// The distinction it draws is the whole point. The pinned port being busy used to mean
+// exactly one thing, "the daemon is already up", and the process exited 0. That reading was
+// safe while the port came from `whisper init` (derived from the project path, so a
+// collision really was our own twin) and became unsafe the moment a HOST install pinned the
+// documented default: 1080 is a port other things take. A daemon that exits 0 under
+// Restart=always leaves systemd reporting the service active forever while the host has no
+// egress at all, which is worse than either honest outcome.
+//
+// So: ours, exit. Someone else's, take a free port and say so. A pinned port is a
+// preference, not a precondition (be liberal in what we accept), and announceDaemonEndpoint
+// then prints whatever was actually bound.
+func resolveDaemonPort(pinned int, supervised bool) (int, bool) {
+	if pinned <= 0 {
+		return pinned, false
+	}
+	guard, lerr := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(pinned)))
+	if lerr == nil {
+		// Release immediately so the real egress front-end can bind it below. The race
+		// this leaves is closed by the real bind: a loser there returns an error and exits.
+		_ = guard.Close()
+		return pinned, false
+	}
+	ours := probeWhisperProxy(pinned)
+	if ours && !supervised {
+		return pinned, true
+	}
+	held := "something that is not a Whisper proxy"
+	if ours {
+		// A Whisper proxy, but not this service's: an older unit, or a `whisper connect`
+		// somebody left running. Found on a lab host where a legacy whisper-egress unit
+		// had held 1080 since boot, which made the newly installed service exit 0 on every
+		// start while systemd reported it active and the host had no service egress at all.
+		held = "another Whisper proxy this service does not own"
+	}
+	daemonLogf("whisper: connection daemon: 127.0.0.1:%d is held by %s - serving on a free "+
+		"port instead", pinned, held)
+	return 0, false
+}
+
+// supervised, the daemon body's third argument, marks a run as the installed unit's daemon
+// rather than a rootless `connect --ensure` spawn. It is a PARAMETER and not a package-level
+// flag on purpose: a flag set by the run-mode command stays set for the life of the process,
+// which in a test binary is the life of every later test, and the first draft of this leaked
+// exactly that way into TestRunConnectDaemon_BindFirstGuard.
+//
+// The two callers have opposite right answers for one question: what a busy pinned port
+// means. A rootless spawn that finds our proxy already there IS the duplicate it was worried
+// about, and exiting cleanly is correct. A SERVICE was installed and started deliberately,
+// so exiting cleanly leaves systemd reporting it active over a host with no egress, the one
+// outcome worse than a visible failure. Supervised, a busy port is never "already ensured".

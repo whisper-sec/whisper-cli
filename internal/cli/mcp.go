@@ -36,12 +36,14 @@ import (
 //
 // Without a key the keyless tier is listed (graceful degradation, zero friction): the
 // verify/RDAP pair plus the public graph reads - whisper_assess, whisper_identify and
-// whisper_explain, which need no tenant and so are real value rather than a stub
-// With a key the whole control + graph surface unlocks - auth is
-// optional, never demanded. The MCP server
-// itself cannot HOLD egress open (it is a stdio child of the client), so whisper_egress_config
-// hands out the exact ready-to-run config `whisper connect`/`whisper init` use. The stdio
-// transport keeps stdout for protocol bytes ONLY; all diagnostics go to stderr.
+// whisper_explain, which need no tenant and so are real value rather
+// than a stub. With a key the whole control + graph surface unlocks: auth is optional,
+// never demanded.
+//
+// The MCP server itself cannot HOLD egress open (it is a stdio child of the client), so
+// whisper_egress_config hands out the exact ready-to-run config `whisper connect` and
+// `whisper init` use. The stdio transport keeps stdout for protocol bytes ONLY; all
+// diagnostics go to stderr.
 
 // mcpProtocolVersion is the MCP version we implement; we echo the client's requested version when
 // it sends one (per the spec's negotiation), falling back to this.
@@ -772,7 +774,7 @@ func mcpToolEgressConfig(args json.RawMessage) mcpToolResult {
 		"proxy_socks5": fmt.Sprintf("socks5h://127.0.0.1:%d", port),
 		"proxy_env":    string(projcfg.ProxyEnvContent(port)),
 		"start":        start + "   # brings the tunnel up and holds it (Ctrl-C to stop)",
-		"one_shot":     "whisper run <command>   # run ONE command with egress, no held-open terminal",
+		"one_shot":     "whisper run {command}   # run ONE command with egress, no held-open terminal",
 		"verify":       "whisper run curl -s https://api64.ipify.org   # prints the agent's /128 when egress is live",
 	}
 	b, err := json.MarshalIndent(out, "", "  ")

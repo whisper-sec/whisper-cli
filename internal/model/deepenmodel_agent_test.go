@@ -43,28 +43,6 @@ func TestDeepenModelStringSummary(t *testing.T) {
 	}
 }
 
-func TestDeepenModelTenantFromFQDN(t *testing.T) {
-	cases := []struct {
-		name string
-		fqdn string
-		want string
-	}{
-		{"canonical", "web-scraper.t4f9a2b8c1.agents.whisper.online", "t4f9a2b8c1"},
-		{"trailing-dot-trimmed", "web-scraper.t4f9a2b8c1.agents.whisper.online.", "t4f9a2b8c1"},
-		{"minimum-handle-length", "a.t12345678.agents.zone", "t12345678"},
-		{"handle-too-short", "a.t1234567.agents.zone", ""},
-		{"handle-not-t-prefixed", "a.x123456789.agents.zone", ""},
-		{"too-few-labels", "t123456789.agents.zone", ""},
-		{"plain-hostname", "example.com", ""},
-		{"empty", "", ""},
-	}
-	for _, c := range cases {
-		if got := TenantFromFQDN(c.fqdn); got != c.want {
-			t.Errorf("%s: TenantFromFQDN(%q) = %q, want %q", c.name, c.fqdn, got, c.want)
-		}
-	}
-}
-
 func TestDeepenModelMergeDetailOverwritesNonEmpty(t *testing.T) {
 	// A detail record with real values MUST replace the stale summary fields,
 	// including via the alias keys (agent, addr128, allocated_at).

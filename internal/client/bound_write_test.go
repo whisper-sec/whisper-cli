@@ -41,6 +41,7 @@ func TestWriteBoundFileRoundTripsThroughTheReader(t *testing.T) {
 // The marker names which /128 a host answers as. That is a reconnaissance gift even
 // though it holds no key, so it is 0600 regardless of the caller's umask.
 func TestWriteBoundFileIsOwnerOnlyWhateverTheUmask(t *testing.T) {
+	skipWithoutPOSIXPerms(t)
 	old := syscallUmask(0)
 	defer syscallUmask(old)
 

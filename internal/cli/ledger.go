@@ -203,7 +203,7 @@ func newLedgerVerifyCmd() *cobra.Command {
 		Short: "Prove a disclosed (salt, event) for an agent /128 is in the signed ledger",
 		Long: "Recompute the leaf hash from the (salt, event) the SUBJECT disclosed to you out-of-band,\n" +
 			"fetch the inclusion proof + signed checkpoint, and verify - entirely with stock crypto:\n\n" +
-			"  whisper ledger verify 2a04:2a01:...::1 --salt <hex-32-bytes> --event-file event.bin\n\n" +
+			"  whisper ledger verify 2a04:2a01:...::1 --salt {hex-32-bytes} --event-file event.bin\n\n" +
 			"The address's transparency feed gives the OPAQUE leaf hash + inclusion proof + checkpoint;\n" +
 			"this confirms the recomputed leaf equals the published one AND folds to the signed root.\n" +
 			"Exit 0 = the disclosure is included in the signed tree; exit 1 = it is not (or no proof).",

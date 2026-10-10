@@ -65,6 +65,7 @@ func TestProxyInjectedEnv_SetsAllVarsAndOverrides(t *testing.T) {
 // SPAWN (not via a prompt). We exec a tiny `sh -c 'echo $ALL_PROXY'` stub and assert the
 // child saw the local endpoint. The connect tail is stubbed (no live egress).
 func TestRun_EnvInjectedAtSpawn(t *testing.T) {
+	skipWithoutPOSIXShell(t)
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}

@@ -62,8 +62,13 @@ func stdGuidedIO() guidedIO {
 // and the domain (zone) its FQDN sits under - so a BYOD-domain identity is distinguishable
 // from a hosted agents.whisper.online one in the picker.
 type agentChoice struct {
-	name   string
-	addr   string
+	name string
+	addr string
+	// The agent id, kept SEPARATELY from name. name takes the label first, so on any
+	// agent that has one the id used to be discarded here - and the id is exactly what
+	// `whisper list` prints in its AGENT column, so the string a user copies out of our own
+	// output could never be matched and came back as "that agent isn't in your account".
+	id     string
 	domain string
 }
 
@@ -190,10 +195,12 @@ func choicesFromResult(res *client.Result) []agentChoice {
 		}
 		name := field(item, "label", "agent", "id")
 		addr := field(item, "address", "addr128")
+		// Read the id in its own right rather than only as a fallback for a missing label.
+		id := field(item, "agent", "id")
 		if name == "" && addr == "" {
 			continue
 		}
-		out = append(out, agentChoice{name: name, addr: addr, domain: agentDomain(field(item, "fqdn"))})
+		out = append(out, agentChoice{name: name, addr: addr, id: id, domain: agentDomain(field(item, "fqdn"))})
 	}
 	return out
 }

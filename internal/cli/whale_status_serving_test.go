@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -42,16 +43,15 @@ func servingState() whale.ServeState {
 		Scope:   whale.ScopeFleet,
 		Target:  "http://127.0.0.1:3000",
 		Port:    443,
-		Address: "2a04:2a01:c899:2496:141a:459a:3d13:9c33",
-		FQDN:    "a141a459a3d139c33.t0.agents.whisper.online",
+		Address: "2a04:2a01:0:cafe:0f0f:0f0f:0f0f:0f0f",
+		FQDN:    "a0f0f0f0f0f0f0f0f.t0.agents.whisper.online",
 		PID:     0, // filled by the caller: a record naming a dead pid reads as OFF by design
 		Since:   time.Now(),
 	}
 }
 
 func TestStatusDoesNotSayNotConnectedWhileAServeIsCarryingTraffic(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testenv.HermeticHome(t)
 	st := servingState()
 	st.PID = os.Getpid()
 	writeServeState(t, home, st)
@@ -86,8 +86,7 @@ func TestStatusDoesNotSayNotConnectedWhileAServeIsCarryingTraffic(t *testing.T) 
 // The control. Without a serve, the wording is unchanged, so the test above is measuring the serve and not
 // some blanket rewrite of the cell.
 func TestStatusStillSaysNotConnectedWhenNothingIsServing(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testenv.HermeticHome(t)
 
 	view := buildWhaleStatus(context.Background(), filepath.Join(home, "agent"), false, false)
 
@@ -103,8 +102,7 @@ func TestStatusStillSaysNotConnectedWhenNothingIsServing(t *testing.T) {
 // And the second control: a record whose holder is gone already reads as OFF, so it must not rescue the
 // connection cell either. A stale file that cries wolf teaches an operator to ignore the file.
 func TestAStaleServeRecordDoesNotRescueTheConnectionCell(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testenv.HermeticHome(t)
 	st := servingState()
 	st.PID = 0x7FFFFFF0 // a pid nothing on this host holds
 	writeServeState(t, home, st)

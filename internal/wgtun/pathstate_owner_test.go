@@ -40,7 +40,7 @@ func tunnelAt(dir, address string) *Tunnel {
 
 func TestClearPathsLeavesAnotherProcessRecordAlone(t *testing.T) {
 	dir := t.TempDir()
-	const addr = "2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd"
+	const addr = "2a04:2a01:0:beef:dead:beef:dead:1"
 	// The surviving resident tunnel published this. Its pid is not ours.
 	path := writePathRecordFor(t, dir, addr, os.Getpid()+1)
 
@@ -55,7 +55,7 @@ func TestClearPathsLeavesAnotherProcessRecordAlone(t *testing.T) {
 
 func TestClearPathsRemovesOurOwnRecord(t *testing.T) {
 	dir := t.TempDir()
-	const addr = "2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd"
+	const addr = "2a04:2a01:0:beef:dead:beef:dead:1"
 	path := writePathRecordFor(t, dir, addr, os.Getpid())
 
 	tunnelAt(dir, addr).clearPaths()
@@ -69,7 +69,7 @@ func TestClearPathsRemovesOurOwnRecord(t *testing.T) {
 // belongs to somebody else, and leaving it would strand a claim no sweep can retire.
 func TestClearPathsRemovesAPidlessRecord(t *testing.T) {
 	dir := t.TempDir()
-	const addr = "2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd"
+	const addr = "2a04:2a01:0:beef:dead:beef:dead:1"
 	path := writePathRecordFor(t, dir, addr, 0)
 
 	tunnelAt(dir, addr).clearPaths()

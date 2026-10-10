@@ -80,7 +80,7 @@ func newGraphListCmd() *cobra.Command {
 				rows = append(rows, []string{e.ID, e.Exec.Mode, e.Title, e.DocsURL()})
 			}
 			printTable([]string{"RECIPE", "MODE", "TITLE", "DOCS"}, rows)
-			fmt.Fprintf(os.Stderr, "%d recipe(s) - run one: whisper graph <recipe> [inputs...]\n", len(entries))
+			fmt.Fprintf(os.Stderr, "%d recipe(s) - run one: whisper graph {recipe} [inputs...]\n", len(entries))
 			return nil
 		},
 	}

@@ -86,6 +86,32 @@ func resolveAgentArg(c *client.Client, cx context.Context, sel string, fromFile 
 	return resolved, nil
 }
 
+// choiceMatchesSelector reports whether sel names this agent, by any string a user can
+// copy out of `whisper list`: the LABEL column, the AGENT column (the id) or the ADDRESS
+// column. Case-insensitive on the two textual forms.
+//
+// This exists as ONE function because the id check was previously absent from both
+// call sites and adding it twice is how they drift. The id had no home on agentChoice at
+// all - choicesFromResult folded label-or-id into a single field with the label winning -
+// so on any labelled agent the id we PRINTED could never be matched, and we answered "that
+// agent isn't in your account" about an agent we had just listed.
+func choiceMatchesSelector(ch agentChoice, sel string) bool {
+	sel = strings.TrimSpace(sel)
+	if sel == "" {
+		return false
+	}
+	if ch.name == sel || ch.addr == sel || ch.id == sel {
+		return true
+	}
+	if ch.name != "" && strings.EqualFold(ch.name, sel) {
+		return true
+	}
+	if ch.id != "" && strings.EqualFold(ch.id, sel) {
+		return true
+	}
+	return sameIP(ch.addr, sel)
+}
+
 // agentKnownToAccount reports whether sel (a /128, id, or label) matches one of
 // the caller's agents per op:list. Conservative on doubt: a listing that cannot
 // be fetched returns TRUE, so the caller keeps the selector and the connect
@@ -101,7 +127,10 @@ func agentKnownToAccount(c *client.Client, cx context.Context, sel string) bool 
 		return true
 	}
 	for _, ch := range choices {
-		if ch.name == sel || ch.addr == sel || sameIP(ch.addr, sel) || strings.EqualFold(ch.name, sel) {
+		// One shared matcher, so this and resolveConnectAgent cannot drift. Without the
+		// id here a persisted agent-<hex> reads as "not in the account" and silently falls back
+		// to the server default, which is the same defect wearing a quieter face.
+		if choiceMatchesSelector(ch, sel) {
 			return true
 		}
 	}
@@ -120,7 +149,7 @@ func noteStaleAgentFallback(sel, agentFile string) {
 	if path == "" {
 		path = client.DefaultAgentFile()
 	}
-	fmt.Fprintf(os.Stderr, "whisper: the saved agent %s (from %s) isn't in your account - using your default agent instead (repair it with 'whisper use <agent>', or delete that file)\n", sel, path)
+	fmt.Fprintf(os.Stderr, "whisper: the saved agent %s (from %s) isn't in your account - using your default agent instead (repair it with 'whisper use {agent}', or delete that file)\n", sel, path)
 }
 
 // isNotFoundProblem reports whether err is the resolver's clear "no agent

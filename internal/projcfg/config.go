@@ -15,6 +15,7 @@
 package projcfg
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -149,9 +150,16 @@ func Load(p Paths) (*Config, error) {
 		}
 		return nil, fmt.Errorf("could not read %s: %w", p.ConfigFile, err)
 	}
+	// Liberal-accept, part one: a UTF-8 BOM. Windows PowerShell 5.1's
+	// `Set-Content -Encoding utf8` writes one on every file it touches, and
+	// encoding/json refuses the leading U+FEFF with "invalid character 'ï'
+	// looking for beginning of value" - which reads as file damage and sends the
+	// reader off to re-run init on a config that is perfectly good. A BOM is a
+	// difference of encoding, not of content, so we skip it and carry on.
+	b = bytes.TrimPrefix(b, []byte{0xEF, 0xBB, 0xBF})
 	var c Config
 	if err := json.Unmarshal(b, &c); err != nil {
-		return nil, fmt.Errorf("%s is corrupt (re-run `whisper init claude --force`): %w", p.ConfigFile, err)
+		return nil, fmt.Errorf("%s is corrupt (rewrite it, or re-run the `whisper init` that wrote it, with --force): %w", p.ConfigFile, err)
 	}
 	// Liberal-accept: normalise the tier; default a blank one to socks5.
 	c.Tier = normalizeTier(c.Tier)

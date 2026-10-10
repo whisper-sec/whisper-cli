@@ -121,6 +121,7 @@ func TestPanelBundleInstalledNeedsTheExecutableNotJustTheName(t *testing.T) {
 // override, the order of the candidates, and the refusal a person reads when the panel
 // is not installed anywhere.
 func TestFindPanelAppSearchesInOrderAndSaysWhereItLooked(t *testing.T) {
+	skipWithoutPOSIXPaths(t)
 	installedSet := func(paths ...string) func(string) bool {
 		return func(p string) bool { return hasString(paths, p) }
 	}
@@ -215,6 +216,7 @@ func TestFindPanelAppSearchesInOrderAndSaysWhereItLooked(t *testing.T) {
 // TestPanelOpenArgvIsTheCommandThatOpensTheRunningPanel pins the argv, because it is
 // the whole contract with macOS and every part of it is load-bearing.
 func TestPanelOpenArgvIsTheCommandThatOpensTheRunningPanel(t *testing.T) {
+	skipWithoutPOSIXPaths(t)
 	app := "/opt/whisper/" + panelBundleName
 	got := panelOpenArgv(app)
 	want := []string{"/usr/bin/open", "-a", app, "--args", "--open"}

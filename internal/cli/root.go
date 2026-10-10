@@ -23,7 +23,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
-	"github.com/whisper-sec/whisper-cli/internal/model"
 	"github.com/whisper-sec/whisper-cli/internal/tui"
 	"github.com/whisper-sec/whisper-cli/internal/tui/theme"
 )
@@ -397,32 +396,22 @@ func runMonitorDashboard(agentAddr string) error {
 }
 
 // bestEffortTenant tries to surface the opaque tenant handle for the header via a quick
-// op:list (the rows can carry a tenant on enriched items). It is purely cosmetic: any
-// error yields an empty handle and the header shows "-" (fail-open, never blocks the
-// dashboard from opening).
+// op:list, asking the plane for the CALLER'S own handle by name rather than deriving one
+// from a row. It is purely cosmetic: any error yields an empty handle and the header shows
+// "-" (fail-open, never blocks the dashboard from opening).
 func bestEffortTenant(c *client.Client) string {
 	if c == nil || c.Credential().IsZero() {
 		return ""
 	}
 	cx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
-	env, err := c.Agents(cx, "list", map[string]any{"kind": "agents"})
-	if err != nil || env == nil || !env.Ok || env.Result == nil {
-		return ""
+	// The header says "tenant", so it shows the CALLER'S handle, asked for by name.
+	// It used to show the first agent's, derived off that agent's fqdn, which is a different
+	// handle whenever the caller holds registered agents - the same substitution whoami
+	// made, in a place a reader is even less likely to question it.
+	own, _, err := callerTenant(cx, c)
+	if err != nil {
+		return "" // cosmetic: the header shows "-", never a handle we could not confirm
 	}
-	for _, rec := range env.Result.Records() {
-		item := rec
-		if m, ok := rec["item"].(map[string]any); ok {
-			item = m
-		}
-		if v := field(item, "tenant", "holder"); v != "" {
-			return v
-		}
-		// No explicit tenant field: the agent fqdn carries the handle as its second
-		// label (<agent>.<t-handle>.agents.<zone>) - derive it.
-		if v := model.TenantFromFQDN(field(item, "fqdn")); v != "" {
-			return v
-		}
-	}
-	return ""
+	return own
 }

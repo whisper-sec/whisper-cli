@@ -409,7 +409,8 @@ func TestDeepenCLI_DomainStatusCmd_WireShape(t *testing.T) {
 		t.Fatalf("domain status errored: %v", err)
 	}
 	body, ok := bodyForOp(seen, "domain")
-	if !ok || !strings.Contains(body, "op:'status'") || !strings.Contains(body, "domain:'example.com'") {
+	// `name:`, not `domain:` - see the note in domain_cmd_test.go.
+	if !ok || !strings.Contains(body, "op:'status'") || !strings.Contains(body, "name:'example.com'") {
 		t.Fatalf("domain status must fire op:domain{op:'status'}, body=%q", body)
 	}
 }
@@ -662,6 +663,7 @@ func TestDeepenCLI_LoginCmd_HeadlessNoKeyIsGuidedUsageError(t *testing.T) {
 }
 
 func TestDeepenCLI_LoginCmd_KeyArgSavesModeSixHundredAndVerifies(t *testing.T) {
+	skipWithoutPOSIXPerms(t)
 	deepencli_hermeticEnv(t)
 	var seen []recordedCall
 	srv := recordingServer(t, nil, &seen)
@@ -736,28 +738,45 @@ func TestDeepenCLI_BestEffortTenant(t *testing.T) {
 	if got := bestEffortTenant(client.New(client.Config{})); got != "" {
 		t.Fatalf("keyless client tenant = %q (must not call anything)", got)
 	}
-	// An explicit tenant field on a row wins.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// The header says "tenant", so the handle must be the CALLER'S, which only the plane
+	// can say. This used to assert the opposite - that an agent row's tenant
+	// field, and failing that its fqdn's second label, WAS the answer - and it passed
+	// for years because it was written from the code rather than from the question.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(raw), "'activityTenants'") {
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],` +
+				`"rows":[["activityTenants",{"tenant":"towner0001","agents":1,"self":true,` +
+				`"agent_tenants":1}]]}}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],` +
-			`"rows":[["agent",{"agent":"a1","tenant":"t-abc123"}]]}}`))
+			`"rows":[["agent",{"agent":"a1","tenant":"t-abc123",` +
+			`"fqdn":"a1.t-abcdef12.agents.whisper.online."}]]}}`))
 	}))
 	defer srv.Close()
 	c := client.New(client.Config{ControlURL: srv.URL, Cred: client.Credential{Value: "whisper_live_x"}})
-	if got := bestEffortTenant(c); got != "t-abc123" {
-		t.Fatalf("explicit tenant = %q", got)
+	if got := bestEffortTenant(c); got != "towner0001" {
+		t.Fatalf("header tenant = %q, want the caller's own handle (never an agent's)", got)
 	}
-	// No tenant field: the handle is derived from the fqdn's second label (a t-handle
-	// is at least 9 chars starting with 't' - see model.TenantFromFQDN).
-	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	// A roster that is perfectly readable, with both an explicit tenant field and an
+	// fqdn, is still not a source for this value. The header shows "-" instead.
+	srv2 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(raw), "'activityTenants'") {
+			w.WriteHeader(500) // the plane declines to say
+			return
+		}
 		_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],` +
-			`"rows":[["agent",{"agent":"a1","fqdn":"a1.t-abcdef12.agents.whisper.online."}]]}}`))
+			`"rows":[["agent",{"agent":"a1","tenant":"t-abc123",` +
+			`"fqdn":"a1.t-abcdef12.agents.whisper.online."}]]}}`))
 	}))
 	defer srv2.Close()
 	c2 := client.New(client.Config{ControlURL: srv2.URL, Cred: client.Credential{Value: "whisper_live_x"}})
-	if got := bestEffortTenant(c2); got != "t-abcdef12" {
-		t.Fatalf("fqdn-derived tenant = %q", got)
+	if got := bestEffortTenant(c2); got != "" {
+		t.Fatalf("an agent's handle must never fill the tenant header; got %q", got)
 	}
 	// A control-plane failure is cosmetic: empty handle, never an error.
 	srv3 := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

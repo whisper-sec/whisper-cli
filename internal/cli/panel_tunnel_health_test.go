@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 viaGraph B.V. (Whisper Security)
+
 package cli
 
 import (
 	"encoding/json"
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -39,8 +43,7 @@ func writePanelRecord(t *testing.T, home, addr string, body map[string]any) {
 }
 
 func TestThePanelReportsAFlappingTunnelAsUnhealthyEvenWhileTheRecordIsFresh(t *testing.T) {
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testenv.HermeticHome(t)
 	addr := "2a04:2a01:4::11"
 	writePanelRecord(t, home, addr, map[string]any{
 		"pid":            os.Getpid(),
@@ -64,8 +67,7 @@ func TestThePanelReportsAFlappingTunnelAsUnhealthyEvenWhileTheRecordIsFresh(t *t
 func TestThePanelStillTrustsAHolderThatSaysHealthy(t *testing.T) {
 	// CONTROL. A fix that simply reported everything unhealthy would pass the test above and be
 	// useless, so the healthy case is pinned in the same breath.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testenv.HermeticHome(t)
 	addr := "2a04:2a01:4::12"
 	writePanelRecord(t, home, addr, map[string]any{
 		"pid":            os.Getpid(),
@@ -84,8 +86,7 @@ func TestThePanelStillTrustsAHolderThatSaysHealthy(t *testing.T) {
 func TestAnOlderHolderWithNoOpinionFallsBackToFreshness(t *testing.T) {
 	// Backward compatibility: a record written before this field existed must not be read as a
 	// confident "unhealthy" that nobody published.
-	home := t.TempDir()
-	t.Setenv("HOME", home)
+	home := testenv.HermeticHome(t)
 	addr := "2a04:2a01:4::13"
 	writePanelRecord(t, home, addr, map[string]any{
 		"pid":     os.Getpid(),

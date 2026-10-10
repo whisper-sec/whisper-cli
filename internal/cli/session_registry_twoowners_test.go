@@ -48,8 +48,8 @@ func portsOf(recs []sessionRecord) []int {
 func TestTwoSessionsForOneAgentAreTwoRows(t *testing.T) {
 	stubSessionsDir(t)
 
-	resident := heldSession("2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd", 1080)
-	interactive := heldSession("2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd", 51234)
+	resident := heldSession("2a04:2a01:0:beef:dead:beef:dead:1", 1080)
+	interactive := heldSession("2a04:2a01:0:beef:dead:beef:dead:1", 51234)
 	writeSessionRecord(resident)
 	writeSessionRecord(interactive)
 
@@ -65,7 +65,7 @@ func TestStoppingOneSessionLeavesTheOtherRegistered(t *testing.T) {
 	stubSessionsDir(t)
 	stubProbe(t, true, nil)
 
-	addr := "2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd"
+	addr := "2a04:2a01:0:beef:dead:beef:dead:1"
 	resident := heldSession(addr, 1080)
 	interactive := heldSession(addr, 51234)
 	writeSessionRecord(resident)
@@ -100,7 +100,7 @@ func TestStoppingOneSessionLeavesTheOtherRegistered(t *testing.T) {
 func TestClearNeverRemovesARecordThisProcessDidNotWrite(t *testing.T) {
 	stubSessionsDir(t)
 
-	addr := "2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd"
+	addr := "2a04:2a01:0:beef:dead:beef:dead:1"
 	// A record for the same address and port, held by SOME OTHER process.
 	foreign := sessionRecord{
 		Addr:     addr,
@@ -133,7 +133,7 @@ func TestClearNeverRemovesARecordThisProcessDidNotWrite(t *testing.T) {
 func TestClearRemovesExactlyTheFileThisSessionWrote(t *testing.T) {
 	dir := stubSessionsDir(t)
 
-	addr := "2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd"
+	addr := "2a04:2a01:0:beef:dead:beef:dead:1"
 	mine := heldSession(addr, 51234)
 	writeSessionRecord(mine)
 	if mine.recordPath == "" {
@@ -159,7 +159,7 @@ func TestALegacyNamedRecordIsStillSweepable(t *testing.T) {
 	dir := stubSessionsDir(t)
 	stubProbe(t, false, nil) // nothing answers: every record here is stale
 
-	addr := "2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd"
+	addr := "2a04:2a01:0:beef:dead:beef:dead:1"
 	legacy := sessionRecord{Addr: addr, Endpoint: "socks5h://127.0.0.1:1080", Tier: "wireguard", Port: 1080, PID: 4242}
 	b, err := json.Marshal(legacy)
 	if err != nil {

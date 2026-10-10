@@ -325,8 +325,12 @@ func TestMergeFleetPreservesEnrichment(t *testing.T) {
 	if got.Contact != "ops@example.org" {
 		t.Error("an empty fresh contact must not clobber the known one")
 	}
-	if a.opts.Tenant != "t0123456789" {
-		t.Errorf("the tenant should derive from the fleet's fqdn; got %q", a.opts.Tenant)
+	// The header must NOT backfill from an agent's fqdn. An agent logs under its
+	// own handle, so that derivation put a stranger's tenant in a header labelled
+	// "tenant" precisely when the control plane had declined to say. Empty is the honest
+	// answer and the layout renders it as "-".
+	if a.opts.Tenant != "" {
+		t.Errorf("the header must not derive a tenant from an agent fqdn; got %q", a.opts.Tenant)
 	}
 
 	// Selection clamps when the fleet shrinks under it.

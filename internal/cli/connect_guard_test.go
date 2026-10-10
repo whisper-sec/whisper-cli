@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -47,11 +49,19 @@ func stubEgressTail(t *testing.T) func() {
 
 func recordingServer(t *testing.T, agents []agentChoice, seen *[]recordedCall) *httptest.Server {
 	t.Helper()
+	// `whisper whoami` now makes two control calls CONCURRENTLY, and httptest serves
+	// each request on its own goroutine, so the recorder below is written from two at once.
+	// Unguarded it is a `go test -race` failure (a required check) and, worse, an append that
+	// can LOSE a recorded call - which would make opsSeen() nondeterministic and the "which op
+	// ran" assertions flaky in the direction of passing.
+	var mu sync.Mutex
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		raw, _ := io.ReadAll(r.Body)
 		op := sniffOp(string(raw))
 		if seen != nil {
+			mu.Lock()
 			*seen = append(*seen, recordedCall{op: op, body: string(raw)})
+			mu.Unlock()
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
@@ -66,8 +76,24 @@ func recordingServer(t *testing.T, agents []agentChoice, seen *[]recordedCall) *
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["record_id","fqdn","type","value","ttl","status"],"rows":[["rec-1","_x402.created-name","TXT","x402-wallet=0xabc",300,"upserted"]]}}`))
 		case "domain":
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["domain",{"label":"example.com","fqdn":"example.com.","state":"pending"}]]}}`))
-		default: // list
-			_, _ = w.Write([]byte(listJSON(agents)))
+		default: // list - the shape depends on the kind/mode asked for
+			switch body := string(raw); {
+			// The CALLER'S OWN handle, which the plane answers in ONE row. The
+			// stub models it separately from the roster because they are different
+			// handles - an agent logs under its own - and modelling them as one
+			// value is exactly the defect these tests exist to catch. The owner handle
+			// here is deliberately unlike any agent fqdn in listJSON.
+			case strings.Contains(body, "'activityTenants'"):
+				_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],` +
+					`"rows":[["activityTenants",{"tenant":"towner00000000000000000000000000",` +
+					`"agents":1,"self":true,"agent_tenants":` + strconv.Itoa(len(agents)) + `}]]}}`))
+			// Count mode returns the true total as one synthetic row, never the roster.
+			case strings.Contains(body, "mode:'count'"):
+				_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],` +
+					`"rows":[["count",{"count":` + strconv.Itoa(len(agents)) + `}]]}}`))
+			default:
+				_, _ = w.Write([]byte(listJSON(agents)))
+			}
 		}
 	}))
 }

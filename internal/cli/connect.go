@@ -274,8 +274,9 @@ func resolveConnectAgent(c *client.Client, cx context.Context, sel string) (stri
 	var ciMatch *agentChoice
 	for i := range choices {
 		ch := &choices[i]
-		if ch.name == sel || ch.addr == sel {
-			// Exact id/label/address match - unchanged behaviour, prefer the /128.
+		// The shared matcher, which accepts the LABEL, the AGENT id and the ADDRESS -
+		// every column `whisper list` prints. Prefer the /128 for the returned selector.
+		if choiceMatchesSelector(*ch, sel) {
 			return firstNonBlank(ch.addr, ch.name), nil
 		}
 		if ch.name != "" {

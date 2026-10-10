@@ -12,7 +12,7 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
-// connect_nat64_prefix_test.go is 's anti-unreachable proof on the client side.
+// connect_nat64_prefix_test.go is the anti-unreachable proof on the client side.
 //
 // The defect this repo ships most often is a field nothing populates, or one populated and never
 // read. Both halves are covered here by driving a REAL op:connect answer, in the column shape the

@@ -241,8 +241,8 @@ func (t *Tunnel) Stop() {
 // a shared/wildcard listener) terminates the port. Runs for the tunnel's lifetime; Stop() closes
 // it alongside everything else. A bind failure is returned to the caller (best-effort: the tunnel
 // itself is unaffected either way - this is additive proof surface, not the egress data path).
-// ServedDoc is one static document the in-tunnel identity listener serves over the DANE-pinned TLS
-// : a gateway-signed identity-doc / JWKS / did:web the agent fetched at connect time. The agent
+// ServedDoc is one static document the in-tunnel identity listener serves over the DANE-pinned
+// TLS: a gateway-signed identity-doc / JWKS / did:web the agent fetched at connect time. The agent
 // is a THIN server here - the bytes are gateway-signed, nothing is signed in-tunnel.
 type ServedDoc struct {
 	Path        string // exact request path, e.g. "/.well-known/whisper-identity"

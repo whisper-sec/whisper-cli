@@ -6,6 +6,7 @@ package cli
 import (
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -456,17 +457,88 @@ func TestSysProxyDeadMan_AnUnknownVerbIsStillRefused(t *testing.T) {
 // would sit there looking hung for exactly as long as the safety net lasts. So the spawn is built
 // and inspected here rather than trusted.
 func TestSysProxyDeadMan_TheSpawnHoldsNoneOfTheParentsPipes(t *testing.T) {
+	skipWithoutPOSIXPaths(t)
 	dir := panelIsolation(t)
-	if err := spawnSysProxyDeadMan(); err != nil {
-		t.Skipf("the test binary cannot re-exec itself here: %v", err)
+
+	// BUILT, never started. This test used to call spawnSysProxyDeadMan for real, and under
+	// `go test` os.Executable() is the test binary: the child did not run the watchdog, it re-ran
+	// the whole suite, reached this line again, and spawned another. 800 processes and a load
+	// average over 600. Building the command gives this test everything it actually asserts.
+	cmd, closer, err := buildSysProxyDeadManCmd()
+	if err != nil {
+		t.Fatalf("the watchdog command could not even be built: %v", err)
+	}
+	if closer != nil {
+		defer closer.Close()
+	}
+
+	if cmd.Stdin != nil {
+		t.Error("the watchdog inherited a stdin; it must hold none of the parent's pipes")
 	}
 	// The log it was pointed at is the only stdio it has, and it lives beside the record.
 	if !strings.HasPrefix(sysProxyDeadManLogPath(), dir) {
 		t.Fatalf("the watchdog log is not in this test's isolated home: %q", sysProxyDeadManLogPath())
 	}
 	if _, err := os.Stat(sysProxyDeadManLogPath()); err != nil {
-		t.Fatalf("the watchdog was started with no log to write to, so nothing it decides can ever be "+
+		t.Fatalf("the watchdog was pointed at no log to write to, so nothing it decides can ever be "+
 			"read back: %v", err)
+	}
+	logFile, ok := cmd.Stdout.(*os.File)
+	if !ok {
+		t.Fatalf("the watchdog's stdout is not the log file it must be: %T", cmd.Stdout)
+	}
+	if logFile.Name() != sysProxyDeadManLogPath() {
+		t.Errorf("stdout = %q, want the watchdog log %q", logFile.Name(), sysProxyDeadManLogPath())
+	}
+	if cmd.Stderr != cmd.Stdout {
+		t.Error("stderr must be the same log as stdout, or half of what it decides is lost")
+	}
+	if len(cmd.Args) < 2 || !slices.Equal(cmd.Args[1:], sysProxyDeadManArgv) {
+		t.Errorf("argv = %v, want the spawner to use %v", cmd.Args, sysProxyDeadManArgv)
+	}
+}
+
+// TestSysProxyDeadMan_RefusesToReExecuteATestBinary.
+//
+// The guard that stops the fork bomb, tested against the exact condition that caused it. A Go
+// test binary handed the watchdog argv does not run the watchdog: the testing framework ignores
+// the arguments and runs the suite again, reaching the spawn again. This test runs INSIDE such a
+// binary, so if the refusal is ever removed this test starts a real second process, which is
+// itself the failure being guarded against.
+func TestSysProxyDeadMan_RefusesToReExecuteATestBinary(t *testing.T) {
+	skipWithoutPOSIXPaths(t)
+	panelIsolation(t)
+
+	exe, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot determine this executable: %v", err)
+	}
+	if !executableIsGoTestBinary(exe) {
+		t.Fatalf("this test must run from a Go test binary for the guard to mean anything, got %q", exe)
+	}
+
+	if err := spawnSysProxyDeadMan(); !errors.Is(err, ErrDeadManFromTestBinary) {
+		t.Fatalf("spawnSysProxyDeadMan() = %v, want ErrDeadManFromTestBinary. Without this refusal "+
+			"the spawn re-runs the whole test suite as its own child and forks without bound", err)
+	}
+}
+
+// TestSysProxyDeadMan_TestBinaryDetectionCoversTheNamesGoActuallyProduces.
+func TestSysProxyDeadMan_TestBinaryDetectionCoversTheNamesGoActuallyProduces(t *testing.T) {
+	for _, c := range []struct {
+		exe  string
+		want bool
+	}{
+		{"/tmp/go-build3121740254/b001/cli.test", true},
+		{`C:\Users\x\AppData\Local\Temp\go-build1\b001\cli.test.exe`, true},
+		{"cli.test", true},
+		{"/usr/local/bin/whisper", false},
+		{"/opt/whisper/whisper.exe", false},
+		{"/home/alice/latest.testing", false},
+	} {
+		if got := executableIsGoTestBinary(c.exe); got != c.want {
+			t.Errorf("executableIsGoTestBinary(%q) = %v, want %v", c.exe, got, c.want)
+		}
 	}
 }
 

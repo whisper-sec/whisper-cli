@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 
@@ -70,6 +71,43 @@ func defaultSessionsDir() string {
 	return filepath.Join(home, ".config", "whisper", "sessions")
 }
 
+// machineSessionsDirFn resolves the MACHINE-WIDE registry: where a supervised daemon records
+// the session it holds for the whole host, rather than for one login. A package var for the
+// same reason as sessionsDirFn.
+var machineSessionsDirFn = defaultMachineSessionsDir
+
+// defaultMachineSessionsDir is a volatile, host-scoped location, deliberately not under any
+// user's home.
+//
+// The installed connection service runs as root and holds NO capabilities at all: its unit
+// sets an empty AmbientCapabilities and an empty CapabilityBoundingSet, because a userspace
+// egress needs none and a daemon that can hold none is a daemon that cannot be turned into
+// one that does. A root process without CAP_DAC_OVERRIDE is an ordinary process as far as
+// file permissions go, so it cannot write into the installing user's 0700 ~/.config/whisper,
+// and the registry write failed with EACCES on every start. `whisper status` then reported
+// "not connected - run: whisper connect" about a daemon carrying real traffic, and its remedy
+// would have opened a second session for an agent that already had one.
+//
+// The fix belongs here rather than in the unit: loosening the capability set, or the home's
+// mode, to let a daemon file a status record would be paying for a status line with the
+// hardening that makes the daemon safe. Volatile is also simply correct for what this is - a
+// record of a session that cannot outlive the boot it was made in, so the reboot sweep is the
+// operating system's job and not ours.
+func defaultMachineSessionsDir() string {
+	if runtime.GOOS == "windows" {
+		if pd := strings.TrimSpace(os.Getenv("ProgramData")); pd != "" {
+			return filepath.Join(pd, "Whisper", "sessions")
+		}
+		return ""
+	}
+	for _, base := range []string{"/run", "/var/run"} {
+		if fi, err := os.Stat(base); err == nil && fi.IsDir() {
+			return filepath.Join(base, "whisper", "sessions")
+		}
+	}
+	return ""
+}
+
 // sessionRecordPath maps ONE SESSION to its record file: the /128 AND the local port it bound.
 // Colons are not portable in filenames (Windows), so they are flattened; the Addr INSIDE the
 // record stays the real literal.
@@ -84,8 +122,13 @@ func defaultSessionsDir() string {
 // The port is the discriminator that costs nothing: two holders cannot bind the same one, and
 // an interactive connect already takes a random port while the resident daemon holds 1080.
 func sessionRecordPath(addr string, port int) string {
-	name := strings.ReplaceAll(strings.TrimSpace(addr), ":", "_")
-	return filepath.Join(sessionsDirFn(), fmt.Sprintf("%s-%d.json", name, port))
+	return filepath.Join(sessionsDirFn(), fmt.Sprintf("%s-%d.json", flattenAddr(addr), port))
+}
+
+// flattenAddr renders a /128 as a filename component. Colons are not portable in filenames
+// (Windows), so they are flattened; the Addr INSIDE the record stays the real literal.
+func flattenAddr(addr string) string {
+	return strings.ReplaceAll(strings.TrimSpace(addr), ":", "_")
 }
 
 // writeSessionRecord registers a HELD session we own (sess.local != nil) in the local registry.
@@ -112,13 +155,36 @@ func writeSessionRecord(sess *egressSession) {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(sessionsDirFn(), 0o700); err != nil {
-		return
-	}
-	path := sessionRecordPath(sess.addr, rec.Port)
-	if os.WriteFile(path, b, 0o600) == nil {
-		// Remember exactly what we wrote, so teardown removes THAT file and nothing else.
-		sess.recordPath = path
+	// The user's own registry first: an interactive `whisper connect` belongs to a login, and
+	// that is where every surface has always looked. A supervised daemon usually cannot write
+	// there (see defaultMachineSessionsDir), so a refusal falls through to the host-scoped
+	// registry rather than leaving the session unrecorded and every status surface wrong.
+	name := fmt.Sprintf("%s-%d.json", flattenAddr(sess.addr), rec.Port)
+	for _, dst := range []struct {
+		dir  string
+		mode os.FileMode
+		// dirMode is 0700 for a login's own registry and 0755 for the host-scoped one,
+		// which has to be READABLE by the user asking `whisper status` about their own
+		// machine. The record carries no secret by contract (see sessionRecord): an
+		// address that is public DNS, and a loopback port any local user can see in
+		// `ss -lnt` already.
+		dirMode os.FileMode
+	}{
+		{sessionsDirFn(), 0o600, 0o700},
+		{machineSessionsDirFn(), 0o644, 0o755},
+	} {
+		if strings.TrimSpace(dst.dir) == "" {
+			continue
+		}
+		if err := os.MkdirAll(dst.dir, dst.dirMode); err != nil {
+			continue
+		}
+		path := filepath.Join(dst.dir, name)
+		if os.WriteFile(path, b, dst.mode) == nil {
+			// Remember exactly what we wrote, so teardown removes THAT file and nothing else.
+			sess.recordPath = path
+			return
+		}
 	}
 }
 
@@ -174,25 +240,36 @@ func removeSessionRecordAt(path string) {
 // readSessionRecords loads every parseable record in the registry (unreadable/garbled files are
 // skipped - liberal in what we accept; the probe is the real gate anyway).
 func readSessionRecords() []sessionRecord {
-	entries, err := os.ReadDir(sessionsDirFn())
-	if err != nil {
-		return nil
-	}
+	// BOTH registries, because a host can hold both kinds of session at once: the user's own
+	// `whisper connect` in one terminal, and the installed service holding the machine's
+	// connection. Reading only the login's own was what made `whisper status` answer "not
+	// connected" on a host whose service was connected.
 	var out []sessionRecord
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+	seen := map[string]bool{}
+	for _, dir := range []string{sessionsDirFn(), machineSessionsDirFn()} {
+		if strings.TrimSpace(dir) == "" || seen[dir] {
 			continue
 		}
-		b, rerr := os.ReadFile(filepath.Join(sessionsDirFn(), e.Name()))
-		if rerr != nil {
-			continue
+		seen[dir] = true
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue // no registry there is simply no session there, never an error
 		}
-		var rec sessionRecord
-		if json.Unmarshal(b, &rec) != nil || rec.Addr == "" || rec.Endpoint == "" || rec.Port <= 0 {
-			continue
+		for _, e := range entries {
+			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+				continue
+			}
+			b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
+			if rerr != nil {
+				continue
+			}
+			var rec sessionRecord
+			if json.Unmarshal(b, &rec) != nil || rec.Addr == "" || rec.Endpoint == "" || rec.Port <= 0 {
+				continue
+			}
+			rec.path = filepath.Join(dir, e.Name())
+			out = append(out, rec)
 		}
-		rec.path = filepath.Join(sessionsDirFn(), e.Name())
-		out = append(out, rec)
 	}
 	return out
 }

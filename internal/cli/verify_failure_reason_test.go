@@ -52,7 +52,7 @@ func TestVerifyFailureNamesTheDeadTunnelNotTheSessionToken(t *testing.T) {
 
 	sess := &egressSession{
 		endpoint: p.Endpoint(),
-		addr:     "2a04:2a01:fa55:9adb:7b3c:624c:c037:b3cd",
+		addr:     "2a04:2a01:0:beef:dead:beef:dead:1",
 		tier:     "wireguard",
 		local:    p,
 	}

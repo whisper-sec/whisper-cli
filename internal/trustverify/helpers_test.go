@@ -56,19 +56,48 @@ type testKey struct {
 	signer crypto.Signer
 }
 
+// genKey mints a fresh signing key for a test zone.
+//
+// It retries while the computed key tag is ZERO. A DNSKEY's key tag is a 16-bit
+// checksum over the key material, so a freshly generated key has about a 1-in-65536 chance
+// of computing exactly 0 - and miekg/dns refuses to sign with one:
+//
+//	// s.Inception and s.Expiration may be 0 (rollover etc.), the rest must be set
+//	if rr.KeyTag == 0 || len(rr.SignerName) == 0 || rr.Algorithm == 0 {
+//	    return ErrKey
+//	}
+//
+// With 11 call sites across this package and several keys per fixture, that surfaced every
+// few thousand CI runs as `sign DNSKEY in ...: dns: bad key` on a random test, passing on
+// the commit before and the commit after. It looks exactly like a flake and is not one.
+// Measured: 1 of 200,000 freshly generated ECDSAP256SHA256 keys computes tag 0.
+//
+// Real DNSSEC key generators do the same thing, and for the same reason (they also avoid
+// tag collisions within a zone, which a test hierarchy this small cannot hit).
+// TestGenKeyNeverReturnsAnUnsignableZeroTag pins why this loop is here.
 func genKey(t *testing.T, zone string, flags uint16) testKey {
 	t.Helper()
-	k := &dns.DNSKEY{
-		Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
-		Flags:     flags,
-		Protocol:  3,
-		Algorithm: dns.ECDSAP256SHA256,
+	// Bounded: the chance of N consecutive zeros is 65536^-N, so 8 is already absurd. A
+	// bound rather than `for {}` because a hang in a fixture is the worst way to learn that
+	// key generation has started returning something constant.
+	for attempt := 0; attempt < 8; attempt++ {
+		k := &dns.DNSKEY{
+			Hdr:       dns.RR_Header{Name: dns.Fqdn(zone), Rrtype: dns.TypeDNSKEY, Class: dns.ClassINET, Ttl: 3600},
+			Flags:     flags,
+			Protocol:  3,
+			Algorithm: dns.ECDSAP256SHA256,
+		}
+		priv, err := k.Generate(256)
+		if err != nil {
+			t.Fatalf("generate DNSKEY for %s: %v", zone, err)
+		}
+		if k.KeyTag() != 0 {
+			return testKey{dnskey: k, signer: priv.(crypto.Signer)}
+		}
 	}
-	priv, err := k.Generate(256)
-	if err != nil {
-		t.Fatalf("generate DNSKEY for %s: %v", zone, err)
-	}
-	return testKey{dnskey: k, signer: priv.(crypto.Signer)}
+	t.Fatalf("8 consecutive DNSKEYs for %s computed a key tag of 0, which is not chance "+
+		"(65536^-8) - key generation is returning something constant", zone)
+	return testKey{}
 }
 
 // signRRSet returns an RRSIG over rrset made by key, signed for the given signer zone.
@@ -239,3 +268,48 @@ func (f *fakeFetcher) GetPinned(_ context.Context, hostport, sni, path string, _
 type errString string
 
 func (e errString) Error() string { return string(e) }
+
+// TestGenKeyNeverReturnsAnUnsignableZeroTag pins WHY genKey loops, so the loop is not
+// removed later as a pointless retry.
+//
+// A DNSKEY's key tag is a 16-bit checksum over the key material, and miekg/dns refuses to
+// sign with a tag of zero. Roughly one generated key in 65536 computes exactly that, which
+// is rare enough to look like a flake in CI and common enough to hit a suite that mints
+// several keys per fixture on every push.
+//
+// The zero case is constructed rather than waited for: waiting would mean 65536 key
+// generations for one assertion, and a test that only sometimes exercises its subject is
+// the thing this whole guard exists to stop.
+func TestGenKeyNeverReturnsAnUnsignableZeroTag(t *testing.T) {
+	key := genKey(t, "example.", 257)
+	if key.dnskey.KeyTag() == 0 {
+		t.Fatal("genKey returned a key whose tag is zero; it cannot sign anything")
+	}
+
+	rrset := []dns.RR{key.dnskey}
+	now := time.Now()
+	mk := func(tag uint16) *dns.RRSIG {
+		return &dns.RRSIG{
+			Hdr:         dns.RR_Header{Name: "example.", Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+			TypeCovered: dns.TypeDNSKEY,
+			Algorithm:   key.dnskey.Algorithm,
+			Labels:      uint8(dns.CountLabel("example.")),
+			OrigTtl:     3600,
+			Expiration:  uint32(now.Add(time.Hour).Unix()),
+			Inception:   uint32(now.Add(-time.Hour).Unix()),
+			KeyTag:      tag,
+			SignerName:  "example.",
+		}
+	}
+
+	// The control first: the real tag signs. Without it, "zero fails" would also pass on a
+	// key that cannot sign at all, and the loop would be justified by the wrong evidence.
+	if err := mk(key.dnskey.KeyTag()).Sign(key.signer, rrset); err != nil {
+		t.Fatalf("the generated key cannot sign with its own tag: %v", err)
+	}
+	// The case. This is the exact failure a zero-tag key produces, and the reason for the loop.
+	if err := mk(0).Sign(key.signer, rrset); err == nil {
+		t.Fatal("signing with a zero key tag succeeded; if that is now allowed the loop in " +
+			"genKey is dead weight and should go, but it was not allowed when it was written")
+	}
+}

@@ -204,7 +204,8 @@ func lookupOnThisHost(ctx context.Context, network, host string) ([]netip.Addr, 
 //  2. RFC 7050 discovery, a MEASUREMENT of the live path. It outranks the declaration because a
 //     box can be reconfigured between the connect and the next packet, and because a declaration
 //     that disagrees with the wire is the bug we want reported, not obeyed.
-//  3. The declaration. Before  this rung did not exist and the guess below took its place.
+//  3. The declaration, which did not exist before it was added; the guess below
+//     took its place.
 //  4. The RFC 6052 well-known prefix, a guess, and now the last resort rather than the third.
 func newNameService(
 	ctx context.Context, stack tunnelStack, resolver netip.Addr, declared netip.Prefix,

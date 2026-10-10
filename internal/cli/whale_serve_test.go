@@ -325,6 +325,7 @@ func TestAFleetServeRefusesAStranger(t *testing.T) {
 // has forgotten about it ever finds out. It drives the REAL status command, from argv, so
 // removing the record-reading line in whale_status.go fails here.
 func TestAFunnelIsVisibleInWhaleStatus(t *testing.T) {
+	skipWithoutPOSIXSignals(t)
 	control := guidedTestServer(t, []agentChoice{{name: "db-01", addr: "2a04:2a01:9::abcd"}}, nil)
 	defer control.Close()
 	migrateGlobals(t, control.URL)

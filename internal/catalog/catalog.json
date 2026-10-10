@@ -7,8 +7,8 @@
     "envelope": "{columns,rows,statistics}",
     "rowsShape": "rows are OBJECTS keyed by column name",
     "auth": "API key required for all queries (X-API-Key)",
-    "keyed": "unlimited",
-    "playground": "keyless is a rate-limited taste only (100/window); not for production. If it is Cypher it needs a key",
+    "keyed": "attributed to your key; the row cap belongs to the plan, not to the presence of a key",
+    "playground": "keyless answers for real: measured 2026-09-28, the same query returns identically with and without a key. An unbounded read is truncated at the plan row cap and says so in a tier-row-cap-truncated advisory, keyed or not. Send a key to have the call attributed to you.",
     "docsBase": "https://www.whisper.security",
     "flowRun": {
       "endpoint": "https://console.whisper.security/api/gallery/run",

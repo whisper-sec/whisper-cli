@@ -84,6 +84,25 @@ const dirtySuffix = "-dirty"
 var (
 	Stamped     string
 	StampedTime string
+
+	// SourceRef is the PUBLIC tree this binary's source corresponds to, as
+	// `github.com/whisper-sec/whisper-cli@vX.Y.Z`. It answers a different
+	// question from Stamped and must never be confused with it.
+	//
+	// Stamped is which commit BUILT this binary, and that commit is in the
+	// private tree, so a holder of the binary cannot resolve it. That is not a
+	// defect to paper over: it is drift-proof, the toolchain records it without
+	// anyone remembering to, and it is what a user quotes in a bug report so we
+	// know exactly which bytes they have. Overwriting it with a mirror commit
+	// would trade a value that cannot drift for one passed by hand, which is the
+	// precise failure this package was written after.
+	//
+	// SourceRef is the companion: where the corresponding PUBLIC source lives.
+	// It is set only on the release path, because only there is the mirror tag
+	// known to exist. A development build leaves it empty and every consumer
+	// omits the field, per this package's standing rule that an unknown must read
+	// as unknown rather than as an invented value.
+	SourceRef string
 )
 
 var id, buildTime = func() (string, string) {
@@ -102,6 +121,13 @@ func ID() string { return id }
 // without a lookup table from revision to date, which is the question an
 // operator actually asks first.
 func Time() string { return buildTime }
+
+// Source is the public tree this binary's source corresponds to, or empty when
+// this is not a release build. Empty means "no public tag is known to exist for
+// these bytes", which a caller renders by omitting the field - never by guessing
+// a tag from the version string, because a tag that does not exist is worse than
+// no pointer at all.
+func Source() string { return strings.TrimSpace(SourceRef) }
 
 // resolveStamped prefers the value the build passed in and falls back to what
 // the toolchain recorded. Split out from the package variables so a test can

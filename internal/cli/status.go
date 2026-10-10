@@ -123,7 +123,7 @@ func newStatusCmd() *cobra.Command {
 			}
 			rows := [][]string{
 				{"key", keyCell},
-				{"agent", orVal(selected, "none - run: whisper use <agent>")},
+				{"agent", orVal(selected, "none - run: whisper use {agent}")},
 			}
 			if len(live) == 0 {
 				rows = append(rows, []string{"connection", "not connected - run: whisper connect"})

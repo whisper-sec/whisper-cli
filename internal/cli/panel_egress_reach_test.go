@@ -299,6 +299,7 @@ func TestPanelReachCacheIsReusedOnlyForTheSameSessionAndDestination(t *testing.T
 // TestPanelReachCacheExpires: a verdict older than the TTL is not this minute's answer, and a
 // panel that showed one would be reporting a policy that may have changed since.
 func TestPanelReachCacheExpires(t *testing.T) {
+	skipWithoutPOSIXPerms(t)
 	panelIsolation(t)
 	sess := statusSession{Endpoint: "socks5h://127.0.0.1:41080", Address: panelReachAddr, Port: 41080}
 

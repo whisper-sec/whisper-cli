@@ -174,7 +174,7 @@ func TestRunConnectDaemon_RetriesFailedVerifyThenHolds(t *testing.T) {
 
 	p := projcfg.PathsFor(t.TempDir())
 	port := freeEphemeralPort(t)
-	if err := runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01:9::abcd", Tier: "socks5"}); err != nil {
+	if err := runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01:9::abcd", Tier: "socks5"}, false); err != nil {
 		t.Fatalf("the daemon must retry a failed verify and succeed, got %v", err)
 	}
 	if *verifies != 3 {
@@ -206,7 +206,7 @@ func TestRunConnectDaemon_RetryIsBounded(t *testing.T) {
 
 	p := projcfg.PathsFor(t.TempDir())
 	port := freeEphemeralPort(t)
-	err := runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01:9::abcd", Tier: "socks5"})
+	err := runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01:9::abcd", Tier: "socks5"}, false)
 	if err == nil {
 		t.Fatal("an exhausted retry schedule must surface the failure")
 	}
