@@ -3,7 +3,7 @@
   "name": "io.github.whisper-sec/whisper",
   "description": "One routable IPv6 per AI agent, verifiable from the DNS root. Keyless tools need no signup.",
   "title": "Whisper",
-  "version": "0.219.4",
+  "version": "0.220.0",
   "repository": {
     "url": "https://github.com/whisper-sec/whisper-cli",
     "source": "github"
@@ -25,14 +25,14 @@
     {
       "registryType": "npm",
       "identifier": "@whisper-security/whisper-mcp",
-      "version": "0.219.3",
+      "version": "0.220.0",
       "transport": {
         "type": "stdio"
       }
     },
     {
       "registryType": "oci",
-      "identifier": "ghcr.io/whisper-sec/whisper:0.219.2",
+      "identifier": "ghcr.io/whisper-sec/whisper:0.220.0",
       "transport": {
         "type": "stdio"
       },
