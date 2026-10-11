@@ -251,7 +251,7 @@ Run `whisper <command> --help` for details.
 ## Query the security graph
 
 The same [whisper.security](https://www.whisper.security) graph the Whisper resolver
-consults on every lookup - 7.4B nodes (hostnames, IPs, ASNs, certs, threat intel), 39B
+consults on every lookup - 7.5B nodes (hostnames, IPs, ASNs, certs, threat intel), 39.8B
 relationships - is a first-class CLI surface. `whisper query` runs raw parameterised
 Cypher; `whisper graph` runs a named recipe from the embedded catalog:
 
@@ -359,7 +359,7 @@ Multi-arch (amd64/arm64), distroless, ~18 MB.
 
 ## Build from source
 
-Requires Go 1.25+.
+Requires Go 1.26.9+.
 
 ```sh
 git clone https://github.com/whisper-sec/whisper-cli

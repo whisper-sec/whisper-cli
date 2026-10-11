@@ -12,7 +12,7 @@ address, and verifies the result end to end against public DNSSEC, DANE and RDAP
 
 ## Build and test
 
-Requires Go 1.25+. Run all four before proposing a change; CI runs the same set and a
+Requires Go 1.26.9+. Run all four before proposing a change; CI runs the same set and a
 failure in any one of them is a failure.
 
 ```sh
