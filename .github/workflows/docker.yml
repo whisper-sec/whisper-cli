@@ -68,7 +68,7 @@ jobs:
           # line alone. Reject any embedded newline before the pattern check.
           [ "$(printf '%s' "$v" | wc -l)" -eq 0 ] \
             || { echo "version must be a single line" >&2; exit 1; }
-          printf '%s' "$v" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' \
+          grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$' <<<"$v" \
             || { echo "not a release version: $v" >&2; exit 1; }
           echo "version=$v" >> "$GITHUB_OUTPUT"
           echo "Building image version $v"
