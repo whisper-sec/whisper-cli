@@ -178,7 +178,7 @@ func synth(t *testing.T, prefix, v4 string) netip.Addr {
 const nsp = "2a04:2a00:64::/96" // the fleet's dedicated agent NAT64 prefix
 
 // controlA is what a resolver that recurses answers for the RECURSION PROBE name. The probe used to
-// ask for the RFC 7050 name, which whisper-ns answers unconditionally (POLICY_EXEMPT_NAMES), so a
+// ask for the RFC 7050 name, which whisper-ns answers unconditionally, by design, so a
 // resolver refusing every real name still passed it. It now asks a name nothing special-cases, and
 // every fixture that means "this resolver is usable" answers that instead.
 func controlA() []netip.Addr {

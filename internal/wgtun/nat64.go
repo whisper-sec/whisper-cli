@@ -28,9 +28,9 @@ import (
 // bits are the NAT64 prefix and whose bottom 32 bits are the v4 address. We dial that, the
 // box's translator unwraps it, and the connection completes over v4 with Whisper's shared
 // v4 SNAT as its source. That is the same wire form the box's own egress guard already
-// decodes (EgressSsrfGuard treats a NAT64-wrapped target by extracting the embedded v4 and
-// running the IPv4 reserved/SSRF check on it), so the two ends agree by construction rather
-// than by coincidence.
+// decodes (it extracts the embedded v4 from a NAT64-wrapped target and runs the IPv4
+// reserved/SSRF check on it), so the two ends agree by construction rather than by
+// coincidence.
 //
 // WHY WE SYNTHESISE HERE AND NOT ONLY IN DNS. DNS64 covers a NAME that has only an A
 // record. It cannot cover a LITERAL, because there is no lookup to intercept. Doing the

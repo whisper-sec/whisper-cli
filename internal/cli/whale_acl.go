@@ -32,9 +32,9 @@ import (
 // names the grant and says retrying will not obtain it, and this verb prints that sentence
 // rather than reinterpreting it.
 //
-// `test` mutates nothing. It is answered by the compiled artifact that AddressOwnerIndex
-// reads at the CONNECT choke, so it is the enforced answer rather than a second
-// interpretation that would eventually disagree with the first.
+// `test` mutates nothing. It is answered by the same compiled document the egress path
+// enforces at CONNECT, so it is the enforced answer rather than a second interpretation
+// that would eventually disagree with the first.
 
 func newWhaleACLCmd() *cobra.Command {
 	cmd := &cobra.Command{
