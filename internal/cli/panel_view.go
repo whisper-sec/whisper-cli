@@ -136,6 +136,11 @@ type panelConnection struct {
 	Endpoint  string      `json:"endpoint"`
 	Port      int         `json:"port"`
 	Tunnel    panelTunnel `json:"tunnel"`
+	// Refusal is why the last attempt to connect did not start, present ONLY while nothing is
+	// connected and a failed connect left its record behind. A reader coded against the older
+	// document never sees it, and the same sentence is also the first line of `errors`, so a
+	// panel that renders only the banner still says why.
+	Refusal *connectRefusal `json:"refusal,omitempty"`
 }
 
 // panelTunnel is what the process HOLDING the tunnel published about it, which is the only
@@ -420,7 +425,59 @@ func buildPanelView(cx context.Context, agentFile string, probe bool) panelView 
 
 	view.Egress = panelEgress{ProxyApps: prox, SystemApps: sysapp, Direct: direct}
 	view.Errors = errs.drain()
+	if r, ok := panelConnectRefusal(sess); ok {
+		applyConnectRefusal(&view, r)
+	}
 	return view
+}
+
+// panelConnectRefusal returns the last connect's refusal, and only while nothing is connected:
+// a live session is the answer to "why is it not connecting", whatever an older record says.
+func panelConnectRefusal(sess *statusSession) (connectRefusal, bool) {
+	if sess != nil {
+		return connectRefusal{}, false
+	}
+	return readConnectRefusal()
+}
+
+// applyConnectRefusal puts the reason the connection is not starting in the three places the
+// panel could otherwise only say "run: whisper connect", which is the very command that is
+// refusing. The reason and the fix are the connect's own words, not a summary of them.
+//
+// Only ever called with nothing connected: a refusal beside a live session would be a document
+// arguing with itself, and a connect that holds a session removes the record anyway.
+func applyConnectRefusal(view *panelView, r connectRefusal) {
+	view.Connection.Refusal = &r
+	sentence := panelRefusalSentence(r)
+	view.Errors = append([]string{sentence}, view.Errors...)
+	view.Egress.ProxyApps.Detail = "no Whisper connection is up on this host, so nothing is leaving " +
+		"through the Whisper egress. " + upperFirst(sentence)
+	if !view.Egress.SystemApps.CanEnable {
+		view.Egress.SystemApps.CannotEnableReason = "nothing is connected on this host, so there is no " +
+			"Whisper egress to send Safari and other system apps through. " + upperFirst(sentence)
+	}
+}
+
+// panelRefusalSentence is the record as one line, with its age, because a refusal from an hour
+// ago and one from thirty seconds ago are different news.
+func panelRefusalSentence(r connectRefusal) string {
+	s := "the last attempt to connect"
+	if r.AgeSecs > 0 {
+		s += " (" + humanizeAge(time.Duration(r.AgeSecs)*time.Second) + " ago)"
+	}
+	s += " did not start: " + strings.TrimRight(strings.TrimSpace(r.Reason), ".")
+	if r.Fix != "" {
+		s += ". Fix: " + r.Fix
+	}
+	return s
+}
+
+// upperFirst capitalises the first letter of a sentence that starts one.
+func upperFirst(s string) string {
+	if s == "" {
+		return s
+	}
+	return strings.ToUpper(s[:1]) + s[1:]
 }
 
 // buildPanelConnection turns the live session (or its absence) into the connection block. The

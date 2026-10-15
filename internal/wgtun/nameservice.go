@@ -68,7 +68,7 @@ const wellKnownIPv4OnlyName = "ipv4only.arpa."
 // NOT wellKnownIPv4OnlyName.
 //
 // The RFC 7050 name is the right question for NAT64 DISCOVERY and the wrong one for "does this
-// resolver serve me". whisper-ns answers it unconditionally, by design: a tenant whose policy is
+// resolver serve me". The Whisper resolver answers it unconditionally, by design: a tenant whose policy is
 // `default: block` still gets an answer for it while everything else is sinkholed, so a resolver
 // that refuses every real name still passes. Measured
 // on a live tunnel: the per-tenant resolver returned NXDOMAIN for example.com while passing this

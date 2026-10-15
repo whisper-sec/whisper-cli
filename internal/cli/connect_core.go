@@ -897,7 +897,9 @@ func connectAndVerifyOnPort(ctx context.Context, c *client.Client, res *client.R
 	sess.name = strings.TrimSpace(name)
 	if err := verifyEgress(ctx, c, sess); err != nil {
 		sess.Stop()
-		return nil, err
+		// Typed, so a refusal record can pick the fix that matches what the check saw. It
+		// renders exactly as the check's own error.
+		return nil, &egressCheckError{cause: err, addr: firstNonBlank(sess.addr, ce.address)}
 	}
 	return sess, nil
 }

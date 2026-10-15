@@ -253,8 +253,8 @@ func fleetSize(cx context.Context, c *client.Client) (int, error) {
 // scripts read - and it is omitted entirely when unrecorded rather than printed
 // as "unknown", so what is shown is always something a reader can look up.
 // printSourceRef names the PUBLIC tree these bytes came from, when one is known
-// to exist. The build id is the private commit that compiled the binary,
-// which is truthful and unresolvable to a holder, so the version output used to
+// to exist. The build id is the commit that compiled the binary, which is not in this repository,
+// so it is truthful and unresolvable to a holder, and the version output used to
 // lead only somewhere they could not go. This is the line that goes somewhere
 // they can. Absent on a development build, and absent means silence: a guessed
 // tag is the same lie the build id was introduced to stop.

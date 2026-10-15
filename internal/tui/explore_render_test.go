@@ -277,18 +277,26 @@ func TestExploreDefaultLandingIsWhisperSecurity(t *testing.T) {
 	}
 }
 
-// TestExploreRenderBudget renders 200 100-col EXPLORE frames. The FUNCTIONAL half runs
-// everywhere: every frame must be non-empty and never panic (200 renders exercise the
-// width invariants hard). The WALL-CLOCK half - avg <= 4ms so a 4Hz tick + fast walking
-// never stutters - is asserted only in a plain, local run: a shared 2-core CI
-// runner averages ~6ms on the very same code (scheduler noise, not a regression), and
-// the race detector's instrumentation alone is a ~10x slowdown (measured 0.4ms plain vs
-// 4.9ms under -race on one machine), so wall-clock under CI/-short/-race measures the
-// environment, not the code. The real interactivity requirement is the 4Hz tick =
-// 250ms/frame, ~60x above this bar, so nothing is lost; the 4ms budget itself is
-// deliberately NOT loosened (a plain local `go test` still catches a gross render
-// regression), and BenchmarkExploreFrame100 below remains the profiling tool.
-// Machine-independent where machines vary, strict where they don't - never a flake.
+// The 100-col EXPLORE frame's allocation budget, a count and not a time: testing.AllocsPerRun
+// over the same frame gives the same number on every run and every machine at a given
+// toolchain (measured with go1.26.9: 2126 per frame on linux/arm64 and on linux/amd64 under
+// emulation, every run; 2153 or 2154 under -race, whose instrumentation adds about 28). The
+// headroom of 16 is half of what one planted extra pass over the frame's lines costs (a split
+// and a lipgloss.Width per line: +32), so that pass fails the test, and so does anything that
+// renders the frame twice. When a renderer change is meant to cost more, set the baseline to
+// the count the failure prints, in the same commit.
+const (
+	exploreFrameAllocs     = 2126
+	exploreFrameAllocsRace = 2154
+	exploreFrameHeadroom   = 16
+)
+
+// TestExploreRenderBudget renders 100-col EXPLORE frames. Every frame must be non-empty and
+// never panic (200 renders exercise the width invariants hard), and a frame's allocations are
+// held to the budget above. The wall-clock average is printed and never asserted: it measures
+// the machine's load as much as the render (a shared machine under load took 5.9 ms at load 12
+// against a 4 ms bar, with nothing changed), and on a fast machine it is loose enough to
+// miss a real regression. BenchmarkExploreFrame100 below remains the profiling tool.
 func TestExploreRenderBudget(t *testing.T) {
 	a := newExploreApp(t, 100, 34, false, fixtureCloudflare())
 	const iters = 200
@@ -298,14 +306,21 @@ func TestExploreRenderBudget(t *testing.T) {
 			t.Fatalf("frame %d of %d rendered empty", i, iters)
 		}
 	}
-	avg := time.Since(start) / iters
-	t.Logf("100-col EXPLORE frame avg render: %v", avg)
-	if testing.Short() || raceEnabled || os.Getenv("CI") != "" {
-		t.Log("wall-clock budget not asserted under CI/-short/-race (it would measure the environment, not the render)")
-		return
+	t.Logf("100-col EXPLORE frame avg render: %v (information, not asserted)", time.Since(start)/iters)
+
+	base := exploreFrameAllocs
+	if raceEnabled {
+		base = exploreFrameAllocsRace
 	}
-	if avg > 4*time.Millisecond {
-		t.Errorf("100-col EXPLORE frame averaged %v (budget 4ms)", avg)
+	allocs := testing.AllocsPerRun(50, func() { _ = a.exploreVw.view(a.bodyWidth(), a.bodyHeight()) })
+	t.Logf("100-col EXPLORE frame: %.0f allocations (baseline %d, headroom %d, race %v)", allocs, base, exploreFrameHeadroom, raceEnabled)
+	if allocs > float64(base+exploreFrameHeadroom) {
+		t.Errorf("100-col EXPLORE frame allocates %.0f times, over the budget of %d (baseline %d + %d): "+
+			"the renderer does more work per frame; if that is intended, set the baseline to %.0f",
+			allocs, base+exploreFrameHeadroom, base, exploreFrameHeadroom, allocs)
+	}
+	if allocs < float64(base)*0.95 {
+		t.Logf("the frame allocates %.0f times, more than 5%% under the baseline %d: lower the baseline so the budget stays tight", allocs, base)
 	}
 }
 

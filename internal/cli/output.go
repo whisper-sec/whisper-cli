@@ -279,6 +279,12 @@ func promptForKey() (string, error) {
 // problems are mapped to one calm sentence; everything else falls back to the problem's
 // own (already secret-free, helpful) detail, then the wrapped message.
 func friendly(err error) string {
+	// A recorded connect refusal renders as its own line (reason, then fix), which is the
+	// sentence the panel shows too. Checked first because it wraps a problem.
+	var refused *connectRefusedError
+	if errors.As(err, &refused) && refused.refusal.Fix != "" {
+		return refused.Error()
+	}
 	if pe, ok := client.AsProblem(err); ok {
 		if msg := mapProblem(pe); msg != "" {
 			return msg

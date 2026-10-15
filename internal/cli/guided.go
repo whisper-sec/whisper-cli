@@ -70,6 +70,9 @@ type agentChoice struct {
 	// output could never be matched and came back as "that agent isn't in your account".
 	id     string
 	domain string
+	// created is the agent's creation epoch from op:list (0 when the row has none), so a
+	// listing can be shown newest first, the order `whisper list` prints.
+	created int64
 }
 
 // runGuided is the entry point for bare `whisper`. It resolves the credential (guiding
@@ -200,7 +203,8 @@ func choicesFromResult(res *client.Result) []agentChoice {
 		if name == "" && addr == "" {
 			continue
 		}
-		out = append(out, agentChoice{name: name, addr: addr, id: id, domain: agentDomain(field(item, "fqdn"))})
+		out = append(out, agentChoice{name: name, addr: addr, id: id, domain: agentDomain(field(item, "fqdn")),
+			created: parseEpoch(field(item, "created", "allocated_at"))})
 	}
 	return out
 }
@@ -350,7 +354,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 	// of opening a competing op:connect that would clobber (and on exit, kill) the daemon's
 	// server-side peer. The reused session's Stop() is a no-op (local==nil), so neither the
 	// quiet/headless teardown below nor a TTY hold can touch the daemon's tunnel.
-	// D7: a choice may carry only a NAME (an explicit --agent on the guided front
+	// A choice may carry only a NAME (an explicit --agent on the guided front
 	// door, or an op:list row with no address column) - resolve it through the
 	// SHARED resolver so op:connect gets the /128/id it understands. The common
 	// picker path (addr set) passes through with zero extra round-trips. The

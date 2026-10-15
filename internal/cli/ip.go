@@ -38,10 +38,10 @@ func newIPCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			// D7: the shared resolver - `--agent <name>` works here exactly like it
-			// does on connect (a /128 or "" passes through free). D9: a stale
-			// persisted-FILE selector falls back to the server default with one note
-			// instead of failing every zero-config run.
+			// The shared resolver: --agent <name> works here exactly like it does on
+			// connect (a /128 or "" passes through free). A stale
+			// persisted-FILE selector is refused with one clear error naming the
+			// account's agents, never swapped for another device's identity.
 			rawSel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
 			cxSel, cancelSel := ctx()
 			sel, rerr := resolveAgentArg(c, cxSel, rawSel, selFromFile, agentFile)

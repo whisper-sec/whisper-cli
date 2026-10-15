@@ -75,7 +75,7 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 		return err
 	}
 
-	// D7: the project config may carry the agent as a human display name (the same
+	// The project config may carry the agent as a human display name (the same
 	// liberal-accept every interactive surface has) - resolve it through the SHARED
 	// resolver so op:connect gets the /128/id it understands. A /128 or "" passes
 	// through with zero round-trips. Project state is explicit (never the persisted

@@ -222,16 +222,16 @@ func TestConnect_FullCommand_RowLevelFailureSurfacesRealDetail(t *testing.T) {
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 
-	af := filepath.Join(t.TempDir(), "agent")
-	if err := client.SaveAgent(af, staleAddr); err != nil {
-		t.Fatal(err)
-	}
+	// An EXPLICIT --agent, because a stale persisted FILE is now refused before
+	// op:connect is called (the stale-file refusal tests pin that). An explicit /128 still
+	// reaches op:connect with zero extra round-trips, so this is the path whose
+	// row-level failure has to surface the plane's own words.
 	cmd := newConnectCmd()
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
-	cmd.SetArgs([]string{"--agent-file", af})
+	cmd.SetArgs([]string{"--agent", staleAddr, "--agent-file", filepath.Join(t.TempDir(), "absent")})
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatal("connect with a stale persisted agent must error")
+		t.Fatal("connect with an agent the plane does not know must error")
 	}
 	if strings.Contains(err.Error(), "control plane reported failure") {
 		t.Fatalf("must surface the SPECIFIC reason, not the generic fallback: %v", err)

@@ -7,7 +7,7 @@ import "testing"
 // The point of SourceRef is that it is present on a release and ABSENT
 // everywhere else, so both halves are asserted. A test that only checks the
 // present case passes on a build that stamps the tag unconditionally, which is
-// the defect: a development binary claiming a mirror tag that does not exist is
+// the defect: a development binary claiming a release tag that does not exist is
 // a worse pointer than no pointer, and it is the same class of invention the
 // build id was added to stop.
 func TestSourceIsAbsentUnlessStamped(t *testing.T) {

@@ -146,7 +146,6 @@ type panelShowResult struct {
 // newPanelShowCmd is declared here rather than in a darwin-only file so the command
 // surface is identical on every platform: `whisper panel --help` names the same verbs
 // wherever it runs, and the non-macOS answer is a sentence rather than a missing verb.
-// command_surface_test.go pins that premise one level up.
 func newPanelShowCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:     "show",

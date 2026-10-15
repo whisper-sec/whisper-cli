@@ -43,7 +43,9 @@ func newConnectCmd() *cobra.Command {
 			"An explicit --tier is forced exactly as asked - no auto-downgrade.\n\n" +
 			"Which identity it binds: --agent <id|/128> pins a specific one; else the\n" +
 			"agent persisted in ~/.config/whisper/agent (written when you pick/create one);\n" +
-			"else, if you already have an agent, the server's reuse-most-recent default.\n\n" +
+			"else, if you already have an agent, the server's reuse-most-recent default.\n" +
+			"A saved agent your account no longer has is refused, naming your agents, rather\n" +
+			"than swapped for the most recent one, which may be another device's.\n\n" +
 			"If you have NO agent yet, connect creates one first - and every agent has a human\n" +
 			"name, so it asks for --name (a terminal prompts; headless --name is\n" +
 			"required). connect never mints an unnamed agent.",
@@ -57,143 +59,168 @@ func newConnectCmd() *cobra.Command {
 				return runEnsure(configFile, port)
 			}
 
-			// The tier itself is decided below (auto vs forced); args carries everything
-			// tier-independent - each attempt adds its own tier + keys on a copy.
-			args := map[string]any{}
-			// --name / --label both mean the agent's human name → the server LABEL,
-			// consistent with `whisper create`. --name wins; --label is the legacy
-			// spelling. (It is NOT a separate friendly_name field - that left the agent
-			// unnamed.)
-			chosenName := firstNonBlank(name, label)
-			if v := strings.TrimSpace(chosenName); v != "" {
-				args["label"] = v
-			}
-			if email != "" {
-				args["contact_email"] = email
-			}
-			// Automotive vehicle/ECU identity: bind this routed /128 to the vehicle's
-			// own VIN (+ optional ECU serial) as NAMED op:connect args, so the car derives the
-			// SAME identity every time it connects. --ecu-serial needs --vin (the ECU is scoped
-			// within its vehicle). No-op for the non-vehicle common case.
-			if v := strings.TrimSpace(vin); v != "" {
-				args["vin"] = v
-				if s := strings.TrimSpace(ecuSerial); s != "" {
-					args["ecu_serial"] = s
+			// A connect that cannot start says why where a person will look, not only on a
+			// stderr that a launchd job sends to /dev/null: the refusal is recorded for the
+			// panel, and the line printed here names the reason and the fix (connect_refusal.go).
+			// identityGone is the one fact the body learns without a typed error.
+			identityGone := false
+			err := func() error {
+				// The tier itself is decided below (auto vs forced); args carries everything
+				// tier-independent - each attempt adds its own tier + keys on a copy.
+				args := map[string]any{}
+				// --name / --label both mean the agent's human name → the server LABEL,
+				// consistent with `whisper create`. --name wins; --label is the legacy
+				// spelling. (It is NOT a separate friendly_name field - that left the agent
+				// unnamed.)
+				chosenName := firstNonBlank(name, label)
+				if v := strings.TrimSpace(chosenName); v != "" {
+					args["label"] = v
 				}
-			} else if strings.TrimSpace(ecuSerial) != "" {
-				return usageErr("--ecu-serial needs --vin (the ECU is identified within its vehicle)")
-			}
-			// Agent selection, in precedence order (highest first):
-			// 1. --agent <id|/128> explicit flag (overrides everything)
-			// 2. ~/.config/whisper/agent the agent persisted by a prior pick/create
-			// 3. (absent) ⇒ no selector ⇒ server reuse-most-recent default
-			// Empty at every rung ⇒ omit the arg entirely (the zero-config common case).
-			// Provenance (flag vs file) gates the D9 stale-file fallback below.
-			sel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
+				if email != "" {
+					args["contact_email"] = email
+				}
+				// Automotive vehicle/ECU identity: bind this routed /128 to the vehicle's
+				// own VIN (+ optional ECU serial) as NAMED op:connect args, so the car derives the
+				// SAME identity every time it connects. --ecu-serial needs --vin (the ECU is scoped
+				// within its vehicle). No-op for the non-vehicle common case.
+				if v := strings.TrimSpace(vin); v != "" {
+					args["vin"] = v
+					if s := strings.TrimSpace(ecuSerial); s != "" {
+						args["ecu_serial"] = s
+					}
+				} else if strings.TrimSpace(ecuSerial) != "" {
+					return usageErr("--ecu-serial needs --vin (the ECU is identified within its vehicle)")
+				}
+				// Agent selection, in precedence order (highest first):
+				// 1. --agent <id|/128> explicit flag (overrides everything)
+				// 2. ~/.config/whisper/agent the agent persisted by a prior pick/create
+				// 3. (absent) ⇒ no selector ⇒ server reuse-most-recent default
+				// A FILE selector the account no longer knows is refused, never
+				// silently replaced by rung 3.
+				// Empty at every rung ⇒ omit the arg entirely (the zero-config common case).
+				// Provenance (flag vs file) gates the stale-file refusal below.
+				sel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
 
-			c, err := resolveClient(true, false)
+				c, err := resolveClient(true, false)
+				if err != nil {
+					return err
+				}
+
+				// op:connect only understands an agent by /128 or id - a bare human display
+				// name (what `whisper list` shows, and what a caller naturally reaches for,
+				// e.g. --agent scout) needs resolving client-side first (Postel: liberal in
+				// what we accept). A /128 selector, an id, or "" (no selector) pass straight
+				// through with zero extra round-trips. Shared with ip/run/guided/daemon; a
+				// stale persisted-FILE selector is refused rather than replaced.
+				if sel != "" {
+					cxSel, cancelSel := ctx()
+					resolved, rerr := resolveAgentArg(c, cxSel, sel, selFromFile, agentFile)
+					cancelSel()
+					if rerr != nil {
+						return rerr
+					}
+					// A saved selector that resolved to nothing was proven gone on an account
+					// with no agents left. The create path below may still recover; if it cannot
+					// (a headless run has no name to give one), the refusal is about the identity.
+					identityGone = selFromFile && resolved == ""
+					sel = resolved
+				}
+
+				// When connect has NO selector it would otherwise let the server auto-allocate
+				// a /128 - and on a fresh account that /128 would be UNNAMED, bypassing the
+				// mandatory-name rule. Guard it: if the caller has no agent yet, mint a
+				// NAMED one through the SAME requireName/createAgent path as create, then bind
+				// egress to it. Existing agents are untouched (zero-config reuse stays).
+				if sel == "" {
+					cx0, cancel0 := ctx()
+					existing, lerr := listAgents(c, cx0)
+					cancel0()
+					if lerr != nil {
+						return lerr
+					}
+					if len(existing) != 0 {
+						identityGone = false // the account has agents again; nothing is proven
+					}
+					if len(existing) == 0 {
+						gio := stdGuidedIO()
+						nm, nerr := requireName(guidedOptions{name: chosenName, tty: isInteractive() && stdoutIsTTY()}, gio)
+						if nerr != nil {
+							return nerr
+						}
+						created, cerr := createAgentWithContact(c, nm, email)
+						if cerr != nil {
+							return cerr
+						}
+						identityGone = false // recovered: this device has an identity again
+						// Bind egress explicitly to the agent we just named (never a fresh
+						// unnamed allocation).
+						if created.addr != "" {
+							sel = created.addr
+						} else if created.name != "" {
+							sel = created.name
+						}
+						// - and REMEMBER it, or this binding lasts exactly one command.
+						// Without this the next connect starts with no selector again, finds
+						// len(existing) != 0 so it skips this branch, and asks the server for
+						// its default. That is the shape behind a live report of one machine
+						// showing up as two nodes: enrol, then reconnect, and the second call
+						// no longer names the agent the first one created. Best-effort on
+						// purpose - a read-only or full HOME must not fail a working connect,
+						// and the server-side reuse now covers the case where it does.
+						if serr := client.SaveAgent(agentFile, sel); serr != nil {
+							debugf("could not persist the agent selector (%v); the next connect will rely on the server default", serr)
+						}
+					}
+				}
+				if sel != "" {
+					args["agent"] = sel
+				}
+
+				// The tier decision (the robustness default): NO --tier (or --tier auto)
+				// negotiates the best tier - Tier-1 (WireGuard) first under a short bound,
+				// auto-downgrading to Tier-1.5 (SOCKS5) on ANY failure; the success line then
+				// names the tier it landed on. An EXPLICIT --tier forces exactly that tier -
+				// no downgrade, a clear error if it cannot. Both modes run the SAME
+				// connectTierAttempt body: per-tier key prep (WG keypair + identity
+				// key, public halves only on the wire), op:connect, local bring-up, verify -
+				// and never surface a secret (the sanitized renderConnect runs after).
+				//
+				// cx is the SHORT control ctx - it bounds op:connect + the one-shot verify and
+				// is cancelled on return. It is NOT the proxy's lifetime: the proxy is
+				// Background-rooted and ends ONLY on Stop() (see egress.StartLocalProxy), so the
+				// 30s timeout firing here can never tear down a held-open connect.
+				//
+				// --port pins the local loopback port (0 ⇒ a free one); the attempt routes it
+				// through connectAndVerifyOnPort directly (a pinned port binds a REAL socket
+				// the connectAndVerify test stubs must not shadow).
+				cx, cancel := ctx()
+				defer cancel()
+				var sess *egressSession
+				var cerr error
+				if isAutoTier(tier) {
+					sess, cerr = negotiateConnect(cx, c, args, sel, port)
+				} else {
+					sess, cerr = connectTierAttempt(cx, c, args, tier, sel, port)
+				}
+				if cerr != nil {
+					return proveIdentityAfterCheck(c, cerr)
+				}
+				// Held: whatever stopped the last attempt is no longer true.
+				clearConnectRefusal()
+				// A persistent `whisper connect` keeps the proxy alive for the WHOLE session:
+				// print the success line, then hold until the user interrupts. The proxy stays
+				// LIVE through the hold (its lifetime is Stop(), not cx) - holdUntilSignal calls
+				// sess.Stop() on SIGINT/SIGTERM. `--quiet` prints ONLY socks5h://127.0.0.1:<port>
+				// and holds silently. For one-shot scripted use prefer `whisper run`/`whisper ip`.
+				renderConnect(sess, verbose)
+				holdUntilSignal(sess)
+				return nil
+			}()
 			if err != nil {
-				return err
+				r := classifyConnectRefusal(err, identityGone, port, firstNonBlank(tier, "auto"))
+				writeConnectRefusal(r)
+				return &connectRefusedError{refusal: r, err: err}
 			}
-
-			// op:connect only understands an agent by /128 or id - a bare human display
-			// name (what `whisper list` shows, and what a caller naturally reaches for,
-			// e.g. --agent scout) needs resolving client-side first (Postel: liberal in
-			// what we accept). A /128 selector, an id, or "" (no selector) pass straight
-			// through with zero extra round-trips. Shared with ip/run/guided/daemon (D7);
-			// a stale persisted-FILE name falls back to the server default (D9).
-			if sel != "" {
-				cxSel, cancelSel := ctx()
-				resolved, rerr := resolveAgentArg(c, cxSel, sel, selFromFile, agentFile)
-				cancelSel()
-				if rerr != nil {
-					return rerr
-				}
-				sel = resolved
-			}
-
-			// When connect has NO selector it would otherwise let the server auto-allocate
-			// a /128 - and on a fresh account that /128 would be UNNAMED, bypassing the
-			// mandatory-name rule. Guard it: if the caller has no agent yet, mint a
-			// NAMED one through the SAME requireName/createAgent path as create, then bind
-			// egress to it. Existing agents are untouched (zero-config reuse stays).
-			if sel == "" {
-				cx0, cancel0 := ctx()
-				existing, lerr := listAgents(c, cx0)
-				cancel0()
-				if lerr != nil {
-					return lerr
-				}
-				if len(existing) == 0 {
-					gio := stdGuidedIO()
-					nm, nerr := requireName(guidedOptions{name: chosenName, tty: isInteractive() && stdoutIsTTY()}, gio)
-					if nerr != nil {
-						return nerr
-					}
-					created, cerr := createAgentWithContact(c, nm, email)
-					if cerr != nil {
-						return cerr
-					}
-					// Bind egress explicitly to the agent we just named (never a fresh
-					// unnamed allocation).
-					if created.addr != "" {
-						sel = created.addr
-					} else if created.name != "" {
-						sel = created.name
-					}
-					// - and REMEMBER it, or this binding lasts exactly one command.
-					// Without this the next connect starts with no selector again, finds
-					// len(existing) != 0 so it skips this branch, and asks the server for
-					// its default. That is the shape behind a live report of one machine
-					// showing up as two nodes: enrol, then reconnect, and the second call
-					// no longer names the agent the first one created. Best-effort on
-					// purpose - a read-only or full HOME must not fail a working connect,
-					// and the server-side reuse now covers the case where it does.
-					if serr := client.SaveAgent(agentFile, sel); serr != nil {
-						debugf("could not persist the agent selector (%v); the next connect will rely on the server default", serr)
-					}
-				}
-			}
-			if sel != "" {
-				args["agent"] = sel
-			}
-
-			// The tier decision (the robustness default): NO --tier (or --tier auto)
-			// negotiates the best tier - Tier-1 (WireGuard) first under a short bound,
-			// auto-downgrading to Tier-1.5 (SOCKS5) on ANY failure; the success line then
-			// names the tier it landed on. An EXPLICIT --tier forces exactly that tier -
-			// no downgrade, a clear error if it cannot. Both modes run the SAME
-			// connectTierAttempt body: per-tier key prep (WG keypair + identity
-			// key, public halves only on the wire), op:connect, local bring-up, verify -
-			// and never surface a secret (the sanitized renderConnect runs after).
-			//
-			// cx is the SHORT control ctx - it bounds op:connect + the one-shot verify and
-			// is cancelled on return. It is NOT the proxy's lifetime: the proxy is
-			// Background-rooted and ends ONLY on Stop() (see egress.StartLocalProxy), so the
-			// 30s timeout firing here can never tear down a held-open connect.
-			//
-			// --port pins the local loopback port (0 ⇒ a free one); the attempt routes it
-			// through connectAndVerifyOnPort directly (a pinned port binds a REAL socket
-			// the connectAndVerify test stubs must not shadow).
-			cx, cancel := ctx()
-			defer cancel()
-			var sess *egressSession
-			var cerr error
-			if isAutoTier(tier) {
-				sess, cerr = negotiateConnect(cx, c, args, sel, port)
-			} else {
-				sess, cerr = connectTierAttempt(cx, c, args, tier, sel, port)
-			}
-			if cerr != nil {
-				return cerr
-			}
-			// A persistent `whisper connect` keeps the proxy alive for the WHOLE session:
-			// print the success line, then hold until the user interrupts. The proxy stays
-			// LIVE through the hold (its lifetime is Stop(), not cx) - holdUntilSignal calls
-			// sess.Stop() on SIGINT/SIGTERM. `--quiet` prints ONLY socks5h://127.0.0.1:<port>
-			// and holds silently. For one-shot scripted use prefer `whisper run`/`whisper ip`.
-			renderConnect(sess, verbose)
-			holdUntilSignal(sess)
 			return nil
 		},
 	}
@@ -245,7 +272,7 @@ func runEnsure(configFile string, portOverride int) error {
 // else "" (no selector ⇒ the server's reuse-most-recent default). Trimmed; an empty flag
 // AND an absent/blank file yield "" so the arg is omitted entirely - zero-config by default.
 // Thin wrapper over resolveAgentSelectorSource (agent_resolve.go), which additionally
-// reports the flag-vs-file provenance the D9 stale-file fallback needs.
+// reports the flag-vs-file provenance the stale-file refusal needs.
 func resolveAgentSelector(flagAgent, agentFile string) string {
 	sel, _ := resolveAgentSelectorSource(flagAgent, agentFile)
 	return sel

@@ -134,10 +134,10 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string) erro
 			}
 		}
 	}
-	// D7: the shared resolver - `--agent <name>` (and a name-spelled project agent)
-	// resolves to the /128 op:connect understands, exactly like connect. D9: a stale
-	// persisted-FILE selector falls back to the server default with one calm note
-	// instead of poisoning every zero-config run.
+	// The shared resolver: --agent <name> (and a name-spelled project agent)
+	// resolves to the /128 op:connect understands, exactly like connect. A stale
+	// persisted-FILE selector is refused with one clear error naming the account's
+	// agents, never swapped for another device's identity.
 	cxa, cancela := ctx()
 	sel, rerr := resolveAgentArg(c, cxa, sel, selFromFile, agentFile)
 	cancela()

@@ -584,17 +584,72 @@ func reuseRegisteredAgent(c *client.Client, name string) (*client.Envelope, bool
 	if name == "" {
 		return nil, false
 	}
+	live, err := liveAgents(c)
+	if err != nil {
+		return nil, false
+	}
+	var best *liveAgent
+	for i := range live {
+		m := &live[i]
+		if !strings.EqualFold(m.label, name) && !strings.EqualFold(m.agent, name) &&
+			!strings.EqualFold(firstLabel(m.fqdn), name) {
+			continue
+		}
+		if best == nil || m.created > best.created {
+			best = m
+		}
+	}
+	if best == nil {
+		return nil, false
+	}
+	return reuseEnvelope(*best, firstNonBlank(best.label, name))
+}
+
+// reuseMarkedAgent looks for the identity a bind marker recorded, by its /128 (unique) or its
+// agent handle, among the account's live agents. found=false with a nil error is a
+// listing that answered without it: the identity is provably gone. A non-nil error is a listing
+// that did not answer, which proves nothing either way.
+func reuseMarkedAgent(c *client.Client, prev client.BoundIdentity) (*client.Envelope, bool, error) {
+	live, err := liveAgents(c)
+	if err != nil {
+		return nil, false, err
+	}
+	for _, m := range live {
+		if (prev.Addr.IsValid() && sameIP(m.addr, prev.Addr.String())) ||
+			(prev.Agent != "" && m.agent != "" && strings.EqualFold(m.agent, prev.Agent)) {
+			// The handle the marker recorded when the listing carries none, so the marker and the
+			// saved agent keep naming the agent, not its (non-unique) label.
+			m.agent = firstNonBlank(m.agent, prev.Agent)
+			env, ok := reuseEnvelope(m, firstNonBlank(m.label, prev.Agent))
+			return env, ok, nil
+		}
+	}
+	return nil, false, nil
+}
+
+// liveAgent is one active agent with an address, as op:list reported it.
+type liveAgent struct {
+	agent, addr, fqdn, label string
+	created                  int64
+}
+
+// liveAgents lists the account's agents that may be reused: active (or with no state) and
+// carrying an address. A revoked or released identity is never resurrected. An error is a
+// listing that did not answer, including an envelope that is not ok.
+func liveAgents(c *client.Client) ([]liveAgent, error) {
 	cx, cancel := ctx()
 	defer cancel()
 	env, err := c.Agents(cx, "list", map[string]any{"kind": "agents"})
-	if err != nil || env == nil || !env.Ok || env.Result == nil {
-		return nil, false
+	if err != nil {
+		return nil, err
 	}
-	type match struct {
-		agent, addr, fqdn, label string
-		created                  int64
+	if env == nil || !env.Ok || env.Result == nil {
+		if perr := envelopeError(env); perr != nil {
+			return nil, perr
+		}
+		return nil, fmt.Errorf("op:list returned no result")
 	}
-	var best *match
+	var out []liveAgent
 	for _, rec := range env.Result.Records() {
 		item := rec
 		if m, ok := rec["item"].(map[string]any); ok {
@@ -605,30 +660,22 @@ func reuseRegisteredAgent(c *client.Client, name string) (*client.Envelope, bool
 		default:
 			continue // never resurrect a revoked/released identity
 		}
-		label := field(item, "label")
-		handle := field(item, "agent", "id")
-		fqdn := field(item, "fqdn")
-		if !strings.EqualFold(label, name) && !strings.EqualFold(handle, name) &&
-			!strings.EqualFold(firstLabel(fqdn), name) {
-			continue
-		}
 		addr := field(item, "address", "addr128")
 		if addr == "" {
 			continue
 		}
-		m := match{agent: handle, addr: addr, fqdn: fqdn,
-			label:   firstNonBlank(label, name),
-			created: parseEpoch(field(item, "created", "allocated_at"))}
-		if best == nil || m.created > best.created {
-			best = &m
-		}
+		out = append(out, liveAgent{agent: field(item, "agent", "id"), addr: addr,
+			fqdn: field(item, "fqdn"), label: field(item, "label"),
+			created: parseEpoch(field(item, "created", "allocated_at"))})
 	}
-	if best == nil {
-		return nil, false
-	}
+	return out, nil
+}
+
+// reuseEnvelope mirrors the op:register result shape for a reused agent, with no api_key.
+func reuseEnvelope(m liveAgent, label string) (*client.Envelope, bool) {
 	res := &client.Result{
 		Columns: []string{"agent", "address", "fqdn", "label", "reused"},
-		Rows:    [][]any{{best.agent, best.addr, best.fqdn, best.label, true}},
+		Rows:    [][]any{{m.agent, m.addr, m.fqdn, label, true}},
 	}
 	raw, merr := json.Marshal(map[string]any{"ok": true, "status": 200, "reused": true, "result": res})
 	if merr != nil {

@@ -65,8 +65,8 @@ const dirtySuffix = "-dirty"
 //
 // They exist because the toolchain's own stamp is not reliable where we
 // build. `go build` finds the repository by walking up for a .git
-// DIRECTORY, and every agent on this project works in a `git worktree`
-// checkout whose .git is a FILE. Measured both shapes:
+// DIRECTORY, and our builds run in a git worktree checkout whose .git is a FILE.
+// Measured both shapes:
 //
 //   - a worktree NESTED inside the main clone: the walk steps over the .git
 //     file and finds the main clone's, so the binary is stamped with the
@@ -89,17 +89,18 @@ var (
 	// `github.com/whisper-sec/whisper-cli@vX.Y.Z`. It answers a different
 	// question from Stamped and must never be confused with it.
 	//
-	// Stamped is which commit BUILT this binary, and that commit is in the
-	// private tree, so a holder of the binary cannot resolve it. That is not a
+	// Stamped is which commit BUILT this binary. The binary also carries the
+	// endpoint half, whose source is not in this repository, so a holder cannot
+	// resolve that commit here. That is not a
 	// defect to paper over: it is drift-proof, the toolchain records it without
 	// anyone remembering to, and it is what a user quotes in a bug report so we
-	// know exactly which bytes they have. Overwriting it with a mirror commit
-	// would trade a value that cannot drift for one passed by hand, which is the
+	// know exactly which bytes they have. Overwriting it with a commit of this
+	// repository would trade a value that cannot drift for one passed by hand, which is the
 	// precise failure this package was written after.
 	//
 	// SourceRef is the companion: where the corresponding PUBLIC source lives.
-	// It is set only on the release path, because only there is the mirror tag
-	// known to exist. A development build leaves it empty and every consumer
+	// It is set only on the release path, because only there is the public
+	// release tag known to exist. A development build leaves it empty and every consumer
 	// omits the field, per this package's standing rule that an unknown must read
 	// as unknown rather than as an invented value.
 	SourceRef string

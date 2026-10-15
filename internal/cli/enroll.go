@@ -33,6 +33,15 @@ type enrollResult struct {
 	agent   string
 	reused  bool
 	already bool // an existing marker already bound this host; nothing was called
+	// replacedAgent is the saved agent selector a forced re-bind replaced, because it was the
+	// previous binding or the account no longer had it. Empty when the file was left alone.
+	replacedAgent string
+	// replacedGone: the saved agent was replaced because the account no longer has it, not
+	// because it was the previous binding.
+	replacedGone bool
+	// fromMarker: a forced re-bind kept the identity the marker recorded, because the account
+	// still has it, rather than looking one up by name.
+	fromMarker bool
 }
 
 func newEnrollCmd() *cobra.Command {
@@ -51,7 +60,17 @@ func newEnrollCmd() *cobra.Command {
 			"identity and move the telemetry with it).\n\n" +
 			"The ladder, in order: reuse the agent already registered under this host's name;\n" +
 			"else mint a new agent + key under it; else fall back to this key's own /128 via\n" +
-			"op:identity. A key that cannot register (no scope) still ends up bound.\n\n" +
+			"op:identity. A key that cannot register (no scope) still ends up bound. The host's\n" +
+			"name drops a trailing .local, .localdomain or .lan; an agent registered under the\n" +
+			"full name is still reused.\n\n" +
+			"--force re-binds even when a marker exists. With no --name it keeps this device's\n" +
+			"own identity (the one the marker records) whenever the account still has it, under\n" +
+			"whatever label, and looks further only when the account no longer has it, which is\n" +
+			"how a device whose identity was removed gets a new one. If the account cannot be\n" +
+			"read it changes nothing rather than mint a second identity. It also replaces the\n" +
+			"saved agent (~/.config/whisper/agent) when that names the old identity or one the\n" +
+			"account no longer has, so `whisper connect` binds this identity; an agent you\n" +
+			"picked that is still in the account is left alone.\n\n" +
 			"Writes ~/.config/whisper/bound (mode/address/name/agent/bound_at - no secrets).",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
@@ -70,12 +89,28 @@ func newEnrollCmd() *cobra.Command {
 			case res.already:
 				fmt.Fprintf(os.Stderr, "whisper: already bound - %s (%s); re-bind with --force\n",
 					res.addr, firstNonBlank(res.name, res.agent, "no reverse name yet"))
+			case res.fromMarker:
+				fmt.Fprintf(os.Stderr, "whisper: bound %s - %s (kept this device's own identity, which the account still has)\n",
+					res.addr, firstNonBlank(res.name, res.agent))
 			case res.reused:
 				fmt.Fprintf(os.Stderr, "whisper: bound %s - %s (reused the agent already registered under this name)\n",
 					res.addr, firstNonBlank(res.name, res.agent))
 			default:
 				fmt.Fprintf(os.Stderr, "whisper: bound %s - %s\n",
 					res.addr, firstNonBlank(res.name, res.agent, "no reverse name yet"))
+			}
+			if r, ok := readConnectRefusal(); ok && r.Kind == refusalIdentityGone {
+				// The refusal was about the identity this verb just replaced; it is no
+				// longer true, and the next connect writes a new record if anything else is.
+				clearConnectRefusal()
+			}
+			if res.replacedAgent != "" {
+				why := "was this device's old identity"
+				if res.replacedGone {
+					why = "is no longer in the account"
+				}
+				fmt.Fprintf(os.Stderr, "whisper: whisper connect now binds %s (the saved agent %s %s)\n",
+					res.agent, res.replacedAgent, why)
 			}
 			return nil
 		},
@@ -89,38 +124,75 @@ func newEnrollCmd() *cobra.Command {
 func runEnroll(name string, force bool) (enrollResult, error) {
 	markerPath := client.DefaultBoundFile()
 
+	// The identity being replaced, read before anything changes, so a forced re-bind can tell
+	// the saved agent it pinned last time from one a person picked.
+	prev, hadPrev := client.ReadBoundFile(markerPath)
+
 	// Already bound? Say so and stop. This is the common case on every re-run, and it must
 	// not call the control plane at all: an installer re-run on a flaky network still has to
 	// succeed, and a host that is bound IS bound whether or not we can reach the server.
-	if !force {
-		if id, ok := client.ReadBoundFile(markerPath); ok {
-			return enrollResult{
-				mode: "existing", addr: id.Addr.String(), name: id.Name,
-				agent: id.Agent, already: true,
-			}, nil
-		}
+	if !force && hadPrev {
+		return enrollResult{
+			mode: "existing", addr: prev.Addr.String(), name: prev.Name,
+			agent: prev.Agent, already: true,
+		}, nil
 	}
 
-	if name == "" {
-		name = enrollHostName()
+	// The names the ladder looks for, the first of which a mint registers under. An explicit
+	// --name is a person's choice and is the only one; the default is this host's name, trimmed,
+	// and the untrimmed form too for reuse, so a host enrolled before a suffix was trimmed
+	// rebinds its agent instead of minting a second.
+	names := []string{name}
+	explicit := name != ""
+	if !explicit {
+		names = enrollHostNames()
 	}
-	if name == "" {
+	if len(names) == 0 || names[0] == "" {
 		return enrollResult{}, usageErr("could not determine this host's name; pass --name")
 	}
+	name = names[0]
 
 	c, err := resolveClient(true, false)
 	if err != nil {
 		return enrollResult{}, err
 	}
 
-	res, err := enrollViaRegister(c, name)
-	if err != nil {
-		// The register rung is best-effort BY DESIGN (a key without the register scope is a
-		// perfectly normal key). Fall through to op:identity, which every key can do, rather
-		// than failing a bind the caller can still complete.
-		res, err = enrollViaIdentity(c, name)
+	// The device's OWN identity first. A forced re-bind with no --name is what every
+	// identity-gone refusal tells a person to run, and the identity that is gone is often only
+	// the saved agent file, while the marker's agent is still in the account under a label that
+	// is not this host's name (say first-run labelled it studio-mac while os.Hostname() says
+	// Mac.localdomain). Looking it up by host name then mints a second identity and orphans the
+	// first. So the marker's agent is rebound when a listing that answered still has it, and the
+	// host-name rung runs only when it is provably gone. A listing that did not answer proves
+	// nothing, and minting on nothing is that same second identity, so it refuses.
+	var res enrollResult
+	rebound := false
+	if !explicit && force && hadPrev {
+		env, found, lerr := reuseMarkedAgent(c, prev)
+		switch {
+		case lerr != nil:
+			return enrollResult{}, fmt.Errorf("could not read this account's agents to check whether "+
+				"this device's identity %s (%s) is still there: %v. Nothing was changed. Run "+
+				"'whisper enroll --force' again once the control plane answers, or bind under a name "+
+				"you choose with: whisper enroll --force --name {name}",
+				firstNonBlank(prev.Agent, prev.Name, "recorded in "+markerPath), prev.Addr, lerr)
+		case found:
+			res = enrollFromEnvelope(env, "register", firstNonBlank(prev.Name, name))
+			res.agent = firstNonBlank(res.agent, prev.Agent)
+			res.reused, res.fromMarker, rebound = true, true, true
+		}
+	}
+
+	if !rebound {
+		res, err = enrollViaRegister(c, names)
 		if err != nil {
-			return enrollResult{}, err
+			// The register rung is best-effort BY DESIGN (a key without the register scope is a
+			// perfectly normal key). Fall through to op:identity, which every key can do, rather
+			// than failing a bind the caller can still complete.
+			res, err = enrollViaIdentity(c, name)
+			if err != nil {
+				return enrollResult{}, err
+			}
 		}
 	}
 
@@ -135,24 +207,67 @@ func runEnroll(name string, force bool) (enrollResult, error) {
 	}
 	// Pin the binary's chosen agent to THIS identity so a later `whisper connect` needs no
 	// argument - but never clobber an agent a human already picked.
+	//
+	// A forced re-bind is how a device whose identity was removed gets a new one, and there
+	// the saved agent is the dead identity itself: leaving it in place means connect goes on
+	// refusing to start, naming an agent that no longer exists, after the person ran the very
+	// command it told them to. So under --force the saved agent is replaced when it is the one
+	// this verb pinned last time, or when the account provably no longer has it. One a person
+	// picked that is still in the account is theirs, and it stays.
 	if res.agent != "" {
-		if pinned := client.ReadAgentFile(""); pinned == "" {
-			_ = client.SaveAgent("", res.agent)
+		pinned := client.ReadAgentFile("")
+		replace := pinned == ""
+		gone := false
+		if !replace && force {
+			replace = savedAgentIsPrevBinding(pinned, prev, hadPrev)
+			if !replace {
+				gone = savedAgentGone(c, pinned)
+				replace = gone
+			}
+		}
+		if replace && !strings.EqualFold(pinned, res.agent) {
+			if serr := client.SaveAgent("", res.agent); serr == nil {
+				res.replacedAgent, res.replacedGone = pinned, gone
+			}
 		}
 	}
 	return res, nil
 }
 
-// enrollViaRegister walks the register rung: reuse the agent already registered under this
-// name, else mint a new one.
-func enrollViaRegister(c *client.Client, name string) (enrollResult, error) {
-	if renv, found := reuseRegisteredAgent(c, name); found {
-		r := enrollFromEnvelope(renv, "register", name)
-		r.reused = true
-		if r.addr == "" {
-			return enrollResult{}, fmt.Errorf("the reused agent %q carries no address", name)
+// savedAgentIsPrevBinding reports whether the saved selector names the identity the marker
+// recorded before this re-bind, by its agent handle or its /128.
+func savedAgentIsPrevBinding(pinned string, prev client.BoundIdentity, hadPrev bool) bool {
+	if !hadPrev || strings.TrimSpace(pinned) == "" {
+		return false
+	}
+	if prev.Agent != "" && strings.EqualFold(strings.TrimSpace(pinned), prev.Agent) {
+		return true
+	}
+	return prev.Addr.IsValid() && sameIP(pinned, prev.Addr.String())
+}
+
+// savedAgentGone reports whether the account PROVABLY no longer has the saved selector: a
+// listing that answered without it. A listing that failed proves nothing and keeps the file.
+func savedAgentGone(c *client.Client, pinned string) bool {
+	cx, cancel := ctx()
+	defer cancel()
+	_, known := accountAgents(c, cx, pinned)
+	return !known
+}
+
+// enrollViaRegister walks the register rung: reuse the agent already registered under any of
+// these names, in order, else mint a new one under the first.
+func enrollViaRegister(c *client.Client, names []string) (enrollResult, error) {
+	name := names[0]
+	for _, n := range names {
+		if renv, found := reuseRegisteredAgent(c, n); found {
+			r := enrollFromEnvelope(renv, "register", n)
+			r.reused = true
+			if r.addr == "" {
+				return enrollResult{}, fmt.Errorf("the reused agent %q carries no address", n)
+			}
+			return r, nil
 		}
-		return r, nil
 	}
 	cx, cancel := ctx()
 	defer cancel()
@@ -203,14 +318,46 @@ func enrollFromEnvelope(env *client.Envelope, mode, fallbackName string) enrollR
 }
 
 // enrollHostName is the default agent name: this host's hostname, trimmed of any trailing
-// dot and of a ".local" suffix (macOS hands out "macbook.local", and the agent name
-// reads better without it).
+// dot and of the suffix a local network appends: ".local" (macOS mDNS, "macbook.local"),
+// ".localdomain" (macOS and many distributions, "Mac.localdomain") and ".lan" (home routers),
+// case-insensitively. The agent name reads better without them, and they change with the
+// network the host happens to be on.
 func enrollHostName() string {
-	h, err := os.Hostname()
+	h, err := osHostname()
 	if err != nil {
 		return ""
 	}
+	return trimHostName(h)
+}
+
+// osHostname is os.Hostname, a seam so tests can be a host of any name.
+var osHostname = os.Hostname
+
+// localSuffixes are trimmed from the default name, longest first.
+var localSuffixes = []string{".localdomain", ".local", ".lan"}
+
+func trimHostName(h string) string {
 	h = strings.TrimSuffix(strings.TrimSpace(h), ".")
-	h = strings.TrimSuffix(h, ".local")
+	for _, suf := range localSuffixes {
+		if len(h) > len(suf) && strings.EqualFold(h[len(h)-len(suf):], suf) {
+			return h[:len(h)-len(suf)]
+		}
+	}
 	return h
+}
+
+// enrollHostNames is the default name, then the untrimmed hostname when it differs: the reuse
+// rung looks for both, so an agent registered under "box.lan" before ".lan" was trimmed is
+// rebound rather than orphaned. A mint only ever uses the first.
+func enrollHostNames() []string {
+	h, err := osHostname()
+	if err != nil {
+		return nil
+	}
+	raw := strings.TrimSuffix(strings.TrimSpace(h), ".")
+	names := []string{trimHostName(h)}
+	if raw != "" && !strings.EqualFold(raw, names[0]) {
+		names = append(names, raw)
+	}
+	return names
 }

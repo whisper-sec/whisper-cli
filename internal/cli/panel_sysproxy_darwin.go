@@ -33,7 +33,7 @@ import (
 // 3. Ending a privilege refusal with the command that gets through it, never a raw exit status.
 //
 // The command surface stays in panel.go: this file declares no newXxxCmd, so the top-level
-// command set is identical on every platform (the premise command_surface_test.go pins).
+// command set is identical on every platform.
 
 // systemProxySupported is the single declaration of whether this build can read and write the
 // system proxy here. readSystemProxy reports it rather than hardcoding `true` a second time, and

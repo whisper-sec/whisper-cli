@@ -25,7 +25,7 @@ import (
 //
 // - KEYLESS (always): verify an agent identity (DANE/DNSSEC/JWS) and fetch RDAP for a /128 -
 // "is this address a real Whisper agent, and whose?" in-chat, with NO API key and NO
-// dependency on the private control backend (the work is done by the public endpoints).
+// dependency on the key-gated control plane (the work is done by the public endpoints).
 // - KEY-GATED (when the standard key ladder resolves a credential - WHISPER_API_KEY /
 // WHISPER_KEY env, or the `whisper login` key file): the FULL control plane -
 // register / list / policy / logs / revoke / egress-config - every one a thin shell over
