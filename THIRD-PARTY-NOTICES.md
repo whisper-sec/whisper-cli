@@ -18,14 +18,18 @@ release actually ships rather than what anyone remembered to add.
 ### Sigma detection rules (79 files)
 
 - The embedded Sigma rule set, compiled into the binary.
-- 34 are bundled from SigmaHQ (https://github.com/SigmaHQ/sigma); 45 are
-  first-party Whisper Security rules released under the same licence.
-- Licence: Detection Rule License (DRL) 1.1 -
-  https://github.com/SigmaHQ/Detection-Rule-License
-- DRL 1.1 permits commercial use, redistribution in a commercial product and sale. Its
-  obligation is attribution, and every rule carries its own `author:`, `references:` and,
-  where adapted, a header stating what was changed and why (DRL 1.1 section 3(a)). Those
-  headers travel inside the binary.
+- 34 are bundled from SigmaHQ (https://github.com/SigmaHQ/sigma).
+  - Licence: Detection Rule License (DRL) 1.1 -
+    https://github.com/SigmaHQ/Detection-Rule-License
+  - DRL 1.1 permits commercial use, redistribution in a commercial product and sale. Its
+    obligation is attribution, and every rule carries its own `author:`, `references:` and,
+    where adapted, a header stating what was changed and why (DRL 1.1 section 3(a)). Those
+    headers travel inside the binary.
+- 45 are first-party Whisper Security rules (`author: Whisper Security (viaGraph B.V.)`).
+  - Licence: MIT License, Copyright (c) 2026 viaGraph B.V. Each rule carries
+    `SPDX-License-Identifier: MIT` and the full MIT notice in its own header, inside the binary.
+  - Releases up to and including v0.229.3 shipped these rules with a DRL 1.1 header. That
+    grant stands for those copies; the rules themselves are MIT from here on.
 
 ### YARA rules
 
