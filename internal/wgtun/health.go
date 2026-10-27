@@ -4,6 +4,7 @@
 package wgtun
 
 import (
+	"context"
 	"strconv"
 	"strings"
 	"time"
@@ -39,7 +40,7 @@ func (t *Tunnel) monitor() {
 	// once recovering, because every attempt was IpcSet(update_only) against the same dead bind.
 	// After rebindAfter fruitless attempts we escalate to BindUpdate, which closes and re-opens
 	// the sockets and clears each peer's cached source address, then let the backoff continue.
-	const rebindAfter = 3
+	const rebindAfter = rebindAfterAttempts
 	sinceRebind := 0
 
 	for {
@@ -64,6 +65,7 @@ func (t *Tunnel) monitor() {
 				nextReconnect = time.Time{}
 				sinceRebind = 0
 				stall.recovered()
+				t.noteRecovered()
 				continue
 			}
 			// Dead (or never handshaked past the grace window): force a reconnect, throttled by
@@ -90,6 +92,9 @@ func (t *Tunnel) monitor() {
 			if say, ok := stall.attemptFailed(); ok {
 				t.note("%s", say)
 			}
+			// The last rung, after re-pointing and re-opening have both had their turn: ask the
+			// holder for a fresh session. See noteFruitless.
+			t.noteFruitless(stall.consecutive, now)
 			nextReconnect = now.Add(backoff)
 			if backoff < maxBackoff {
 				backoff *= 2
@@ -168,6 +173,52 @@ func (t *Tunnel) readHandshake() (time.Time, bool) {
 	return all[t.cfg.ServerPublicKeyHex], true
 }
 
+// waitFirstHandshake blocks until the box peer has completed a handshake or ctx ends, and reports
+// which. Bring-up uses it to ask a silent resolver again once the tunnel can carry the question.
+// It polls the same UAPI read the monitor uses, so the two cannot disagree about what a
+// handshake is.
+func (t *Tunnel) waitFirstHandshake(ctx context.Context) bool {
+	return waitForHandshake(ctx, t.readHandshake, 50*time.Millisecond)
+}
+
+// waitForHandshake polls read every interval until it reports a non-zero handshake or ctx ends.
+func waitForHandshake(ctx context.Context, read func() (time.Time, bool), every time.Duration) bool {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
+	for {
+		if last, ok := read(); ok && !last.IsZero() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-tick.C:
+		}
+	}
+}
+
+// settleSilentNames is the background half of bring-up when the first probe heard nothing: wait
+// for the first handshake, ask again, publish the answer, and say the final verdict once. It is
+// bounded by firstHandshakeWait plus one probe, and gives up at once when the tunnel stops.
+func (t *Tunnel) settleSilentNames(first *nameService) {
+	ctx, cancel := context.WithTimeout(context.Background(),
+		firstHandshakeWait+secondRetryAfter+2*nameServiceProbeTimeout)
+	defer cancel()
+	go func() {
+		select {
+		case <-t.stop:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	final := retrySilentNameService(ctx, first, t.tnet, t.cfg.DNS, t.cfg.NAT64Prefix, t.waitFirstHandshake)
+	t.nameState.settle(final)
+	if final.verdict != "" {
+		// Marked as a late status line: by now the child may be writing to the same terminal.
+		t.note("whisper (name check settled): %s", final.verdict)
+	}
+}
+
 // note emits a safe one-line operational message via the configured logger (nil ⇒ silent).
 // It is used ONLY for reconnect chatter and never carries a key, endpoint, or target.
 func (t *Tunnel) note(format string, args ...any) {
@@ -237,12 +288,102 @@ func (t *Tunnel) escalateIfStuck(sinceRebind, threshold int) int {
 	if sinceRebind <= threshold {
 		return sinceRebind
 	}
+	t.mu.Lock()
+	t.rebinds++
+	t.stallRebinds++
+	t.mu.Unlock()
 	if err := t.rebind(); err != nil {
 		t.note("whisper: could not re-open the tunnel's UDP socket, still retrying…")
 	} else {
 		t.note("whisper: re-opening the tunnel's UDP socket (the network moved, or this host slept)…")
 	}
 	return 0
+}
+
+// rebindAfterAttempts is how many fruitless forced re-handshakes go by before the monitor
+// re-opens the device's UDP sockets.
+const rebindAfterAttempts = 3
+
+// renewAfterSilence is how long the tunnel has to have gone without a handshake before it asks
+// its holder for a fresh session. The box reaps a peer whose last handshake is 180 s old and
+// sweeps every 60 s, so by 240 s the peer is gone whatever this side does; 270 s leaves a margin
+// for the two clocks. Keying on the age of the last handshake rather than on a count of our own
+// attempts is what makes a host that wakes from a long sleep ask at once: its count restarts at
+// one, but its last handshake is as old as the sleep.
+//
+// Why a holder has to act at all: when the box has dropped this tunnel's peer (a re-key, a
+// restart, a reaper), every handshake initiation reaches a box that does not know the key and
+// answers nothing. Re-pointing and re-opening are the right answers to a broken path and no
+// answer to a missing peer, so they were repeated for hours while the session still looked up.
+// Only a fresh connect puts the peer back, and the tunnel holds no client to run one.
+const renewAfterSilence = 270 * time.Second
+
+// renewMinAttempts is the floor on fruitless re-handshakes in a stall before the request, so one
+// unlucky observation never costs a control-plane call.
+const renewMinAttempts = 2
+
+// noteFruitless records one more fruitless re-handshake and raises the fresh-session request
+// once the box must have reaped the peer, at least renewMinAttempts have failed, and a socket
+// re-open was tried in an EARLIER attempt (one made in this same attempt has not had its chance).
+// The request is a latch: only a handshake lowers it.
+func (t *Tunnel) noteFruitless(consecutive int, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rebound := t.reboundBefore
+	t.reboundBefore = t.stallRebinds > 0
+	if consecutive >= renewMinAttempts && rebound && t.handshakeAgeLocked(now) >= renewAfterSilence {
+		t.needFresh = true
+	}
+}
+
+// noteRecovered lowers the request and forgets the stall: a tunnel that handshakes again needs
+// nothing from its holder, and its next stall has to earn the request again.
+func (t *Tunnel) noteRecovered() {
+	t.mu.Lock()
+	t.needFresh, t.stallRebinds, t.reboundBefore = false, 0, false
+	t.mu.Unlock()
+}
+
+// NeedsFreshSession reports whether the tunnel has stalled for long enough that only a fresh
+// connect can be expected to bring it back. The holder of the session reads it and acts; the
+// tunnel keeps re-handshaking meanwhile, so a box that comes back on its own still wins.
+func (t *Tunnel) NeedsFreshSession() bool {
+	if t == nil {
+		return false
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.needFresh
+}
+
+// HandshakeAge is how long ago the tunnel last handshaked with the box, or how long it has been
+// up when it never has. Zero for a nil tunnel.
+func (t *Tunnel) HandshakeAge() time.Duration {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.handshakeAgeLocked(time.Now())
+}
+
+func (t *Tunnel) handshakeAgeLocked(now time.Time) time.Duration {
+	from := t.lastH
+	if from.IsZero() {
+		from = t.started
+	}
+	return now.Sub(from)
+}
+
+// Rebinds is how many times the monitor has re-opened the tunnel's UDP socket. It only grows; a
+// change is what a moved network looks like from above.
+func (t *Tunnel) Rebinds() int {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.rebinds
 }
 
 // rebind re-opens the device's UDP sockets, through the seam so a test can observe it. A tunnel

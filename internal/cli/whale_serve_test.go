@@ -9,10 +9,12 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
@@ -232,7 +234,7 @@ func TestTheCommandInstallsAWorkingFrontEnd(t *testing.T) {
 	}
 
 	if _, _, err := runWhale(t, "whale", "funnel", origin.URL, "--yes", "--compat-headers",
-		"--state-dir", dir); err != nil {
+		"--agent", "db-01", "--state-dir", dir); err != nil {
 		t.Fatalf("`whale funnel` failed: %v", err)
 	}
 	<-held
@@ -295,7 +297,7 @@ func TestAFleetServeRefusesAStranger(t *testing.T) {
 	whaleServeConnect = func(cx context.Context, c *client.Client, sel string) (*egressSession, *wgtun.Tunnel, error) {
 		return &egressSession{addr: "2a04:2a01:9::abcd", tier: "wireguard"}, &wgtun.Tunnel{}, nil
 	}
-	if _, _, err := runWhale(t, "whale", "serve", origin.URL, "--state-dir", dir); err != nil {
+	if _, _, err := runWhale(t, "whale", "serve", origin.URL, "--agent", "db-01", "--state-dir", dir); err != nil {
 		t.Fatalf("`whale serve` failed: %v", err)
 	}
 	<-held
@@ -405,5 +407,90 @@ func TestAFunnelIsVisibleInWhaleStatus(t *testing.T) {
 	}
 	if strings.Contains(after, "THE INTERNET (public)") {
 		t.Errorf("`whale status` still claims a public funnel after `funnel off`:\n%s", after)
+	}
+}
+
+// TestAFleetServeStopsItsRefresherWhenItReturns: the fleet refresher used to
+// be a bare goroutine with no way to stop, so it outlived the serve that started it and
+// went on reading package globals (the timeout, the whaleFleet seam) after the serve had
+// returned. In a test run that is a data race against the next test's globals; in a
+// process that runs more than one serve it is a leak per serve. The serve must stop its
+// refresher, and wait for it, before it returns.
+func TestAFleetServeStopsItsRefresherWhenItReturns(t *testing.T) {
+	control := guidedTestServer(t, []agentChoice{{name: "db-01", addr: "2a04:2a01:9::abcd"}}, nil)
+	defer control.Close()
+	migrateGlobals(t, control.URL)
+
+	restore := stubServeSeams(t, nil, nil)
+	defer restore()
+
+	savedEvery, savedFleet := whaleServeFleetRefresh, whaleFleet
+	t.Cleanup(func() { whaleServeFleetRefresh, whaleFleet = savedEvery, savedFleet })
+	whaleServeFleetRefresh = time.Millisecond
+	var reads atomic.Int64
+	realFleet := whaleFleet
+	whaleFleet = func(cx context.Context, c *client.Client) ([]whalePeer, error) {
+		reads.Add(1)
+		return realFleet(cx, c)
+	}
+
+	// Hold the serve open until the refresher has demonstrably run, so the test proves
+	// the loop was live and then proves it stopped, rather than passing on a loop that
+	// never started.
+	upFront := int64(-1)
+	holdWhaleServe = func() {
+		if upFront < 0 {
+			upFront = reads.Load()
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for reads.Load() < upFront+3 && time.Now().Before(deadline) {
+			time.Sleep(time.Millisecond)
+		}
+	}
+	whaleServeConnect = func(cx context.Context, c *client.Client, sel string) (*egressSession, *wgtun.Tunnel, error) {
+		return &egressSession{addr: "2a04:2a01:9::abcd", tier: "wireguard"}, &wgtun.Tunnel{}, nil
+	}
+	if _, _, err := runWhale(t, "whale", "serve", "3000", "--agent", "db-01", "--state-dir", t.TempDir()); err != nil {
+		t.Fatalf("`whale serve` failed: %v", err)
+	}
+	atReturn := reads.Load()
+	if atReturn < upFront+3 {
+		t.Fatalf("the refresher never ran while the serve was up (%d reads up front, %d at return)", upFront, atReturn)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if after := reads.Load(); after != atReturn {
+		t.Fatalf("the fleet refresher outlived its serve: %d fleet reads after it returned", after-atReturn)
+	}
+}
+
+// TestStoppingTheFleetRefresherWaitsForARefreshInFlight is the deterministic half: stop()
+// must abort a refresh that is in flight and return only after the loop has let go of it,
+// or the refresh goes on touching the globals after the serve is gone.
+func TestStoppingTheFleetRefresherWaitsForARefreshInFlight(t *testing.T) {
+	savedFleet := whaleFleet
+	t.Cleanup(func() { whaleFleet = savedFleet })
+
+	entered := make(chan struct{})
+	var released atomic.Bool
+	whaleFleet = func(cx context.Context, c *client.Client) ([]whalePeer, error) {
+		select {
+		case entered <- struct{}{}:
+		default:
+		}
+		<-cx.Done() // a refresh that only ends when it is cancelled
+		time.Sleep(20 * time.Millisecond)
+		released.Store(true)
+		return nil, cx.Err()
+	}
+	gate := &fleetGate{members: map[netip.Addr]bool{}}
+	stop := gate.startRefresh(nil, whale.ScopeFleet, time.Hour, time.Millisecond)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the refresher never started a refresh")
+	}
+	stop()
+	if !released.Load() {
+		t.Fatal("stop() returned while a refresh was still in flight")
 	}
 }

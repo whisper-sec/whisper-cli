@@ -104,8 +104,17 @@ func runAutoConnect(t *testing.T, srv *httptest.Server, extra ...string) (stdout
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 	defer idkey.SetIdentityDirForTest(t.TempDir())()
+	// A host that saved an agent holds its identity key, as the previous connect left it.
+	if _, err := idkey.LoadOrGenerate("2a04:2a01:9::abcd"); err != nil {
+		t.Fatal(err)
+	}
 
 	af := filepath.Join(t.TempDir(), "agent")
+	// This host's saved agent. With none, connect no longer lets the control plane pick one of the
+	// account's agents; these tests are about the tiers, not the selection (agent_pick_test.go).
+	if err := client.SaveAgent(af, "2a04:2a01:9::abcd"); err != nil {
+		t.Fatal(err)
+	}
 	args := append([]string{"--agent-file", af}, extra...)
 	cmd := newConnectCmd()
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
@@ -155,8 +164,11 @@ func TestConnectAuto_WireGuardSucceeds_LandsTier1(t *testing.T) {
 	if !strings.Contains(connects[0], "tier:'wireguard'") {
 		t.Fatalf("the first (and only) attempt must ask for tier:'wireguard'; body=%q", connects[0])
 	}
-	if !strings.Contains(connects[0], "public_key:") || !strings.Contains(connects[0], "identity_public_key:") {
-		t.Fatalf("the Tier-1 attempt must carry the WG + identity public keys; body=%q", connects[0])
+	// The saved /128's identity key is held on this host (runAutoConnect), so the attempt proves it
+	// with a signature rather than sending the key again. It used to send identity_public_key from
+	// a connect with no selector, which is gone.
+	if !strings.Contains(connects[0], "public_key:") || !strings.Contains(connects[0], "identity_signature:") {
+		t.Fatalf("the Tier-1 attempt must carry the WG public key + the identity proof; body=%q", connects[0])
 	}
 	// ONE line, naming the landed tier + the local proxy string.
 	if n := strings.Count(strings.TrimRight(stderr, "\n"), "\n"); n != 0 {

@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 	"time"
 
@@ -187,12 +188,17 @@ func mcpGraphClientKeyless() (*client.Client, mcpToolResult, bool) {
 // verbatim {columns,rows,statistics} JSON (already the LLM-friendly shape).
 func mcpToolGraphQuery(args json.RawMessage) mcpToolResult {
 	var a struct {
-		Query  string         `json:"query"`
-		Params map[string]any `json:"params"`
+		Query      string         `json:"query"`
+		Params     map[string]any `json:"params"`
+		Parameters map[string]any `json:"parameters"`
 	}
 	_ = json.Unmarshal(args, &a)
 	if strings.TrimSpace(a.Query) == "" {
 		return mcpErr("query is required - a Cypher statement, e.g. CALL whisper.identify(['api.openai.com'])")
+	}
+	params, perr := queryParams(a.Params, a.Parameters)
+	if perr != "" {
+		return mcpErr(perr)
 	}
 	c, errRes, ok := mcpGraphClient()
 	if !ok {
@@ -200,11 +206,30 @@ func mcpToolGraphQuery(args json.RawMessage) mcpToolResult {
 	}
 	cx, cancel := ctx()
 	defer cancel()
-	res, err := c.GraphQuery(cx, a.Query, a.Params)
+	res, err := c.GraphQuery(cx, a.Query, params)
 	if err != nil {
 		return mcpErr(friendly(err))
 	}
 	return mcpText(string(res.Raw))
+}
+
+// queryParams takes the bound values under either name a caller reaches for: "params", which these tools have always
+// documented, or "parameters", the graph's own request field and so what a model that has read the graph's docs
+// writes first. Before this the second was silently dropped and the query ran with nothing bound, the exact failure
+// the graph engine is closing on its side by refusing a request key it does not know. Two
+// different maps are refused rather than guessed between.
+func queryParams(params, parameters map[string]any) (map[string]any, string) {
+	switch {
+	case params != nil && parameters != nil:
+		if reflect.DeepEqual(params, parameters) {
+			return params, ""
+		}
+		return nil, "pass the bound values once, as params or as parameters, not both with different values"
+	case params != nil:
+		return params, ""
+	default:
+		return parameters, ""
+	}
 }
 
 // mcpToolGraphRecipe executes one catalog recipe: args are matched to the catalog

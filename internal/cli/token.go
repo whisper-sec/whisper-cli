@@ -6,6 +6,8 @@ package cli
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/spf13/cobra"
 
@@ -21,8 +23,10 @@ func newTokenCmd() *cobra.Command {
 		Use:   "token <agent|address>",
 		Short: "Mint (or --revoke) an et_ read-only monitor token for an agent (op:token)",
 		Long: "Return-or-mint an et_ monitor bearer token bound to the agent's /128 (op:token),\n" +
-			"for read-only live monitoring WITHOUT opening a tunnel. --revoke drops all tokens\n" +
-			"for the agent (this is also how you stop SOCKS5/HTTPS egress).",
+			"for read-only live monitoring WITHOUT opening a tunnel.\n\n" +
+			"--revoke with your account key drops every token bound to the agent (this is also\n" +
+			"how you stop SOCKS5/HTTPS egress). With an agent key it drops only the tokens it minted,\n" +
+			"never its owner's, and says how many others remain.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			a := map[string]any{"agent": args[0]}
@@ -50,7 +54,7 @@ func newTokenCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&revoke, "revoke", false, "revoke all monitor tokens for the agent")
+	cmd.Flags().BoolVar(&revoke, "revoke", false, "revoke the agent's monitor tokens (an agent key revokes only the tokens it minted)")
 	cmd.Flags().Int64Var(&expires, "expires", 0, "expiry as epoch ms (optional)")
 	return cmd
 }
@@ -63,7 +67,7 @@ func renderToken(res *client.Result, revoke bool) {
 	}
 	rec := recs[0]
 	if revoke {
-		fmt.Fprintf(os.Stderr, "whisper: %s - %s\n", field(rec, "agent"), orVal(field(rec, "status"), "revoked"))
+		fmt.Fprintln(os.Stderr, revokeLine(rec))
 		return
 	}
 	fmt.Fprintln(os.Stderr, "whisper: monitor token")
@@ -76,6 +80,57 @@ func renderToken(res *client.Result, revoke bool) {
 	if tok := field(rec, "token"); tok != "" {
 		fmt.Fprintln(os.Stdout, tok)
 	}
+}
+
+// revokeLine is the one-line answer to a revoke. An account key's reply (agent, status)
+// renders exactly as it always has. An agent key's reply also carries tokens_remaining,
+// because that key drops only the tokens it minted. So the line says what it
+// dropped, how many others stay bound, and who can drop those.
+func revokeLine(rec map[string]any) string {
+	agent := field(rec, "agent")
+	status := orVal(field(rec, "status"), "revoked")
+	raw, scoped := rec["tokens_remaining"]
+	if !scoped {
+		return fmt.Sprintf("whisper: %s - %s", agent, status)
+	}
+	remaining, counted := tokenCount(raw)
+	switch status {
+	case "none_of_yours":
+		line := fmt.Sprintf("whisper: none of the tokens on %s were minted by this key, so none were revoked", agent)
+		if counted && remaining > 0 {
+			line += fmt.Sprintf("; %s, and its owner can revoke them", remainClause(remaining))
+		} else if !counted {
+			line += "; the ones it holds can be revoked by its owner"
+		}
+		return line
+	case "revoked":
+		line := fmt.Sprintf("whisper: %s - revoked the tokens this key minted", agent)
+		if counted && remaining > 0 {
+			line += fmt.Sprintf("; %s, minted by another key, and the agent's owner can revoke them",
+				remainClause(remaining))
+		}
+		return line
+	default:
+		return fmt.Sprintf("whisper: %s - %s", agent, status)
+	}
+}
+
+// tokenCount reads tokens_remaining liberally (a JSON number in either decoding, or its
+// string form). A value that is not a whole, non-negative count is not shown at all,
+// rather than shown wrong.
+func tokenCount(v any) (int64, bool) {
+	n, err := strconv.ParseInt(strings.TrimSpace(asString(v)), 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func remainClause(n int64) string {
+	if n == 1 {
+		return "1 remains"
+	}
+	return fmt.Sprintf("%d remain", n)
 }
 
 // --- rdap ------------------------------------------------------------------------

@@ -194,8 +194,7 @@ func saveAndVerify(key string) error {
 	})
 	cx, cancel := ctx()
 	defer cancel()
-	env, err := c.Agents(cx, "list", map[string]any{"kind": "agents"})
-	if err != nil || env == nil || !env.Ok {
+	if _, err := accountListing(c, cx); err != nil {
 		fmt.Fprintln(os.Stderr, "whisper: saved - but the control plane didn't accept it yet (check the key / connectivity)")
 		return nil
 	}

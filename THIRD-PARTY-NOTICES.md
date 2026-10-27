@@ -42,7 +42,7 @@ release actually ships rather than what anyone remembered to add.
   matches the standard EICAR anti-malware test string (https://www.eicar.org), which is not
   ours; the rule that matches it is.
 
-## Linked Go modules (45)
+## Linked Go modules (46)
 
 | Module | Version | Licence |
 | --- | --- | --- |
@@ -87,6 +87,7 @@ release actually ships rather than what anyone remembered to add.
 | `golang.org/x/crypto` | v0.57.0 | BSD-3-Clause |
 | `golang.org/x/net` | v0.60.0 | BSD-3-Clause |
 | `golang.org/x/sys` | v0.48.0 | BSD-3-Clause |
+| `golang.org/x/text` | v0.42.0 | BSD-3-Clause |
 | `golang.org/x/time` | v0.7.0 | BSD-3-Clause |
 | `golang.zx2c4.com/wireguard` | v0.0.0-20260522210424-ecfc5a8d5446 | MIT |
 | `gopkg.in/yaml.v3` | v3.0.1 | Apache-2.0 AND MIT |

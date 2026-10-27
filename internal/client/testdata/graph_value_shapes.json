@@ -1,0 +1,9 @@
+{
+  "_comment": "Every relationship and path value shape the graph engine sends today, and the one it is about to send. The old shapes were captured live on 2026-10-23 from the production and pre-production engines; the new one is the engine's announced contract, to be replaced by a live capture once an engine serves it. Shared by the Go and Java characterisation tests.",
+  "aggregate_relationship": {"columns":["r","n"],"rows":[{"r":{"sourceId":898367378,"targetId":3142871275,"edgeType":2},"n":1}]},
+  "plain_relationship": {"columns":["r","type(r)"],"rows":[{"r":{"type":"RESOLVES_TO","source":"dns","inferred":false},"type(r)":"RESOLVES_TO"}]},
+  "old_path": {"columns":["p","relationships(...)"],"rows":[{"p":{"nodes":["906258972","3145412492"],"relationships":["RESOLVES_TO"],"length":1},"relationships(...)":[{"sourceId":906258972,"targetId":3145412492,"edgeType":2}]}]},
+  "new_relationship": {"columns":["r"],"rows":[{"r":{"type":"RESOLVES_TO","startNodeId":"906258972","endNodeId":"3145412492","source":"dns","inferred":false}}]},
+  "new_path": {"columns":["p"],"rows":[{"p":{"nodes":[{"nodeId":"906258972","label":"HOSTNAME","name":"google.com"},{"nodeId":"3145412492","label":"IPV4","name":"142.250.1.1"}],"relationships":[{"type":"RESOLVES_TO","startNodeId":"906258972","endNodeId":"3145412492"}],"length":1}}]},
+  "big_integer": {"columns":["id"],"rows":[{"id":18446744073709551617}]}
+}

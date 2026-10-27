@@ -1,0 +1,10 @@
+everwatch.io  pending
+
+Publish these records at your registrar (in the parent zone):
+  everwatch.io. 3600 IN NS ns1.whisper.online.
+  everwatch.io. 3600 IN NS ns2.whisper.online.
+  everwatch.io. 3600 IN DS 61903 13 2 DC1DFA1AE92A8B25F7F74970551C85092A12C2DBC23763C00EFB8CBAAB6F6917
+  everwatch.io. 3600 IN CDS 61903 13 2 DC1DFA1AE92A8B25F7F74970551C85092A12C2DBC23763C00EFB8CBAAB6F6917
+
+Publish the NS and DS records above at your registrar / parent zone. We poll your parent on a schedule; we bring your zone up as soon as we observe your parent delegating it to us, and the domain is authorized on your account automatically once the DS is live too (no further action).
+--- stderr ---

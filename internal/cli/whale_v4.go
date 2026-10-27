@@ -97,19 +97,27 @@ func whaleV4Status(sessions []statusSession, measured *v4Probe) whaleV4View {
 			"IPv6 /128 %s. IPv4 DESTINATIONS are carried by NAT64 (%s): the local listener at %s is itself "+
 			"IPv4, so a v4-only client library needs no changes, and an IPv4 target is wrapped into that "+
 			"prefix before it goes down the tunnel.%s Point it at the listener: "+
-			"curl -4 --proxy socks5h://%s http://{a-v4-only-host}/. %s",
+			"curl -4 --proxy socks5h://%s http://{a-v4-only-host}/. %s %s",
 			orDash(s.Address), v.NAT64Prefix, v.Endpoint, prefixSourceClause(v.NAT64PrefixSource),
-			v.Endpoint, measuredClause(v.Measured))
+			v.Endpoint, measuredClause(v.Measured), v4AttributionClause)
 		return v
 	}
 	v.Reachability = "box"
 	v.Note = fmt.Sprintf("This node has no IPv4 address, and it does not need one. Its identity is the "+
 		"IPv6 /128 %s. IPv4 DESTINATIONS are the box's job on this tier: the local listener at %s is itself "+
 		"IPv4, and the box resolves and dials the target. Point a v4-only client at the listener: "+
-		"curl -4 --proxy socks5h://%s http://{a-v4-only-host}/. %s",
-		orDash(s.Address), v.Endpoint, v.Endpoint, measuredClause(v.Measured))
+		"curl -4 --proxy socks5h://%s http://{a-v4-only-host}/. %s %s",
+		orDash(s.Address), v.Endpoint, v.Endpoint, measuredClause(v.Measured), v4AttributionClause)
 	return v
 }
+
+// v4AttributionClause says what an IPv4 destination can and cannot know. It sees the shared NAT64
+// translator's IPv4 address, which is not in the published agent ranges and identifies no single
+// agent, so no verifier that works by IP range or reverse DNS can tie that connection to this /128.
+// The IPv6 path is the one that can be verified. Said on every connected answer, because a user
+// enrolling an agent with a bot verifier needs to know it before the verifier tells them.
+const v4AttributionClause = "An IPv4-only destination sees a shared IPv4 address, not this /128, so it " +
+	"cannot attribute the connection to this agent; only IPv6 destinations can verify it by its address."
 
 // prefixSourceClause names WHERE the prefix came from, in one clause, so an operator reading the
 // line can tell a value the box declared from a value this client guessed. Empty when we do not

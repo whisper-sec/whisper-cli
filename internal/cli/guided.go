@@ -84,20 +84,6 @@ func runGuided(opts guidedOptions, gio guidedIO) error {
 		return err
 	}
 
-	// Headless force-create (or an explicit --agent) short-circuits the listing branch
-	// entirely: the caller already told us what to do.
-	if opts.create {
-		name, nerr := requireName(opts, gio)
-		if nerr != nil {
-			return nerr
-		}
-		choice, cerr := createAgent(c, name)
-		if cerr != nil {
-			return cerr
-		}
-		return connectAndReport(opts, gio, choice)
-	}
-
 	cx, cancel := ctx()
 	defer cancel()
 	choices, err := listAgents(c, cx)
@@ -105,14 +91,61 @@ func runGuided(opts guidedOptions, gio guidedIO) error {
 		return err
 	}
 
+	// --create and --name mean exactly what they mean on `whisper run` (decideFlagSelection):
+	// --create makes a new agent (a name already in the account is a clear refusal),
+	// --name uses the agent of that name or makes it. A create on an account that already has
+	// agents mints a genuinely new one (mintAgent): it used to go through op:identity, which on
+	// such an account hands back an existing agent under the new name.
+	if opts.create {
+		if strings.TrimSpace(opts.agent) != "" {
+			return usageErr("--create makes a new agent and --agent names an existing one: pass one of them, not both")
+		}
+		d, derr := decideFlagSelection(true, opts.name, choices)
+		if derr != nil {
+			return derr
+		}
+		name, nerr := requireName(guidedOptions{name: d.name, tty: opts.tty}, gio)
+		if nerr != nil {
+			return nerr
+		}
+		if _, terr := decideFlagSelection(true, name, choices); terr != nil {
+			return terr
+		}
+		choice, cerr := mintAgent(c, name, "", len(choices) != 0)
+		if cerr != nil {
+			return cerr
+		}
+		return connectAndReport(opts, gio, choice)
+	}
+
 	// Explicit selector: use it (validated against the fleet so a typo is a clean error,
 	// not an opaque control-plane failure later).
 	if sel := strings.TrimSpace(opts.agent); sel != "" {
+		if strings.TrimSpace(opts.name) != "" {
+			return usageErr("--agent and --name both choose the agent: pass one of them, not both")
+		}
 		choice, serr := pickBySelector(choices, sel)
 		if serr != nil {
 			return serr
 		}
 		return connectAndReport(opts, gio, choice)
+	}
+
+	// --name: the agent of that name, else (with no one at a keyboard to ask, or nobody to ask
+	// about) make it. On a terminal an unmatched name falls through to the menu, which offers to
+	// create an agent under it.
+	if strings.TrimSpace(opts.name) != "" {
+		d, _ := decideFlagSelection(false, opts.name, choices)
+		if d.kind == selExisting {
+			return connectAndReport(opts, gio, d.choice)
+		}
+		if len(choices) != 0 && !opts.tty {
+			choice, cerr := mintAgent(c, d.name, "", true)
+			if cerr != nil {
+				return cerr
+			}
+			return connectAndReport(opts, gio, choice)
+		}
 	}
 
 	switch len(choices) {
@@ -174,17 +207,16 @@ var guidedLogin = func() error {
 }
 
 // listAgents runs op:list and distils it into the selectable choices (newest-first is
-// not load-bearing for selection, so we keep the server order). A control-plane failure
-// is surfaced as its friendly problem, never a raw error.
+// not load-bearing for selection, so we keep the server order). A listing that did not
+// answer is an accountReadError, never an empty account: every caller decides something
+// from what it finds (create a first agent, "no agent by that name", the saved agent is
+// gone), and none of that is known from a reply that listed nothing.
 func listAgents(c *client.Client, cx context.Context) ([]agentChoice, error) {
-	env, err := c.Agents(cx, "list", map[string]any{"kind": "agents"})
+	res, err := readAccount(c, cx)
 	if err != nil {
 		return nil, err
 	}
-	if perr := envelopeError(env); perr != nil {
-		return nil, perr
-	}
-	return choicesFromResult(env.Result), nil
+	return choicesFromResult(res), nil
 }
 
 // choicesFromResult extracts (name, addr) for every agent row in an op:list result,
@@ -243,11 +275,14 @@ func guidedOne(opts guidedOptions, gio guidedIO, only agentChoice) error {
 			if err != nil {
 				return err
 			}
+			if _, terr := decideFlagSelection(true, name, []agentChoice{only}); terr != nil {
+				return terr
+			}
 			c, cerr := resolveClient(true, false)
 			if cerr != nil {
 				return cerr
 			}
-			choice, cerr := createAgent(c, name)
+			choice, cerr := mintAgent(c, name, "", true) // the account has an agent: mint, never op:identity's reuse
 			if cerr != nil {
 				return cerr
 			}
@@ -310,7 +345,10 @@ func guidedMany(c *client.Client, opts guidedOptions, gio guidedIO, choices []ag
 		if err != nil {
 			return err
 		}
-		choice, err := createAgent(c, name)
+		if _, terr := decideFlagSelection(true, name, choices); terr != nil {
+			return terr
+		}
+		choice, err := mintAgent(c, name, "", true) // the account has agents: mint, never op:identity's reuse
 		if err != nil {
 			return err
 		}
@@ -367,10 +405,14 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 	if rerr != nil {
 		return rerr
 	}
+	// Reuse only a session proved to egress as this agent, exactly as `whisper run` does.
 	cxr, cancelr := ctx()
-	reused, reuse := findLiveSession(cxr, c, sel)
+	reused, perr := findProvenSession(cxr, c, sel, false)
 	cancelr()
-	if reuse {
+	if perr != nil {
+		return perr
+	}
+	if reused != nil {
 		if reused.name == "" {
 			reused.name = choice.name
 		}
@@ -396,7 +438,7 @@ var connectVia = func(opts guidedOptions, gio guidedIO, choice agentChoice) erro
 	// (the proxy is Background-rooted and ends only on Stop() - see egress.StartLocalProxy).
 	// So we can cancel cx right after verify and the proxy stays LIVE for the hold below.
 	cx, cancel := ctx()
-	env, err := c.Agents(cx, "connect", args)
+	env, err := opConnect(cx, c, args)
 	if err != nil {
 		cancel()
 		return err

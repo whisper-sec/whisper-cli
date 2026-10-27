@@ -383,3 +383,8 @@ func sortPathPeers(peers []PathPeerRecord) {
 		}
 	}
 }
+
+// ProcessAlive reports whether pid names a live process, by the same rule the path record uses:
+// a pid this user may not signal counts as alive, because calling a live holder dead deletes a
+// true record. Exported for the session registry, which has the same question about its holders.
+func ProcessAlive(pid int) bool { return processIsAlive(pid) }

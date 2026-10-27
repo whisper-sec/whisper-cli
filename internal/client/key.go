@@ -4,6 +4,7 @@
 package client
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -71,7 +72,7 @@ func SaveAgent(path, agent string) error {
 	if err := secfile.MkdirAll(dir); err != nil {
 		return err
 	}
-	return secfile.WriteFile(path, []byte(agent))
+	return secfile.WriteFileAtomic(path, []byte(agent))
 }
 
 // KeySource describes where a resolved credential came from - surfaced in `config`/
@@ -185,4 +186,31 @@ func SaveKey(path, key string) error {
 		return err
 	}
 	return secfile.WriteFile(path, []byte(strings.TrimSpace(key)))
+}
+
+// SaveServiceKey and SaveServiceAgent are SaveKey and SaveAgent for the copies a
+// machine-wide service reads from its own account's profile, written there by an
+// administrator. On Windows the ACL names LocalSystem and Administrators only;
+// on unix they are SaveKey and SaveAgent. The path is required: there is no default
+// "service" location this package could know.
+func SaveServiceKey(path, key string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("refusing to save a service key with no path")
+	}
+	if err := secfile.MkdirAllMachine(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return secfile.WriteMachineFile(path, []byte(strings.TrimSpace(key)))
+}
+
+// SaveServiceAgent pins the service's chosen agent; see SaveServiceKey.
+func SaveServiceAgent(path, agent string) error {
+	agent = strings.TrimSpace(agent)
+	if strings.TrimSpace(path) == "" || agent == "" {
+		return errors.New("refusing to save a service agent with no path or no agent")
+	}
+	if err := secfile.MkdirAllMachine(filepath.Dir(path)); err != nil {
+		return err
+	}
+	return secfile.WriteMachineFile(path, []byte(agent))
 }

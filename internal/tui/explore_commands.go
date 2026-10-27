@@ -5,6 +5,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"sort"
 	"strings"
@@ -553,7 +554,9 @@ func firstStr(m map[string]any, keys ...string) string {
 	return ""
 }
 
-// int64OfAny reads a decoded JSON number as int64 (counts).
+// int64OfAny reads a decoded JSON number as int64 (counts). Graph rows carry their
+// numbers as json.Number; a whole literal reads exactly, any other number is
+// truncated as a float64 would be.
 func int64OfAny(v any) int64 {
 	switch t := v.(type) {
 	case float64:
@@ -562,12 +565,21 @@ func int64OfAny(v any) int64 {
 		return t
 	case int:
 		return int64(t)
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return n
+		}
+		if f, err := t.Float64(); err == nil {
+			return int64(f)
+		}
+		return 0
 	default:
 		return 0
 	}
 }
 
-// f64OfAny reads a decoded JSON number as float64 (confidence, scores).
+// f64OfAny reads a decoded JSON number as float64 (confidence, scores), including
+// the json.Number a graph row carries.
 func f64OfAny(v any) float64 {
 	switch t := v.(type) {
 	case float64:
@@ -576,6 +588,11 @@ func f64OfAny(v any) float64 {
 		return float64(t)
 	case int:
 		return float64(t)
+	case json.Number:
+		if f, err := t.Float64(); err == nil {
+			return f
+		}
+		return 0
 	default:
 		return 0
 	}

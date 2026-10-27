@@ -250,15 +250,15 @@ func (f *fakeStack) LookupContextHost(_ context.Context, host string) ([]string,
 }
 
 // newTestDialer builds the dialer with a name service already settled on the well-known
-// prefix and an unusable in-tunnel resolver, which is the shape these tests were written
-// against: the fakeStack speaks no DNS, so the v4-only retry takes the fail-open leg and
-// hostAnswers stands in for this host's resolver.
+// prefix and names resolved on this host (the WHISPER_RESOLVE_ON_HOST shape): the fakeStack
+// speaks no DNS, so hostAnswers stands in for this host's resolver.
 func newTestDialer(f *fakeStack) *netDialer {
 	return &netDialer{
 		stack:   f,
 		timeout: time.Second,
 		names: &nameService{
 			prefix:     netip.MustParsePrefix(WellKnownNAT64Prefix),
+			onHost:     true,
 			hostLookup: hostAnswers(f.answers),
 		},
 	}

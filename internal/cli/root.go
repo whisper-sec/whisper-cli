@@ -101,7 +101,7 @@ func NewRootCommand() *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
 			p, _ := resolveSysPolicy(readSysPolicyStore())
 			applySysPolicy(p)
-			return nil
+			return refuseUnreadGlobalFlags(cmd)
 		},
 		// Bare `whisper` is THE guided front door: resolve a key (login if none on
 		// a TTY), list the agents, branch 0/1/N, then connect+verify. The dashboard moved
@@ -127,8 +127,8 @@ func NewRootCommand() *cobra.Command {
 	pf.StringVar(&g.bearer, "bearer", "", "an et_ monitor token (sent as Authorization: Bearer)")
 	pf.BoolVar(&g.jsonOut, "json", false, "emit the raw control-plane envelope as JSON (scriptable)")
 	pf.BoolVar(&g.quiet, "quiet", false, "print ONLY the load-bearing value (address / connection string); no chrome")
-	pf.StringVar(&g.name, "name", "", "name for a created agent (mandatory when creating)")
-	pf.BoolVar(&g.create, "create", false, "force-create a new agent (with --name) instead of using/menuing")
+	pf.StringVar(&g.name, "name", "", "the agent of that name, or the name a created agent gets (whisper, run, claude, connect)")
+	pf.BoolVar(&g.create, "create", false, "make a new agent called --name instead of using an existing one (whisper, run, claude, connect)")
 	pf.StringVar(&g.agent, "agent", "", "select an existing agent by id or /128 (global selector)")
 	pf.StringVar(&g.controlURL, "control-url", "", "override the control endpoint (default "+client.DefaultControlURL+")")
 	pf.StringVar(&g.monitorURL, "monitor-url", "", "override the monitor SSE endpoint")
@@ -305,10 +305,17 @@ func migrateLegacyConfigDir() {
 // (e.g. rdap, which is public). promptOK enables the interactive prompt as the last
 // rung (only for an interactive run; the scriptable path passes false).
 func resolveClient(needKey, promptOK bool) (*client.Client, error) {
+	return resolveClientFrom(needKey, promptOK, g.keyFile)
+}
+
+// resolveClientFrom is resolveClient with the key file named, for the one caller that
+// binds with a key file other than this account's own: a sudo enroll whose root context
+// has no key yet, using the invoking user's.
+func resolveClientFrom(needKey, promptOK bool, keyFile string) (*client.Client, error) {
 	opts := client.KeyLadderOptions{
 		FlagKey:    g.key,
 		FlagBearer: g.bearer,
-		KeyFile:    g.keyFile,
+		KeyFile:    keyFile,
 		AllowEnv:   true,
 		AllowFile:  true,
 	}
@@ -348,13 +355,11 @@ func keyLadderPromptAllowed(promptOK, interactive bool) bool {
 	return promptOK && interactive && interactiveLoginAllowed()
 }
 
-// ctx returns a context bounded by the global timeout (for non-streaming calls).
+// ctx returns a context bounded by the global timeout (for non-streaming calls). It reads
+// the package globals, so a goroutine that outlives its command must not call it: read
+// callTimeout once when the goroutine starts instead.
 func ctx() (context.Context, context.CancelFunc) {
-	t := g.timeout
-	if t <= 0 {
-		t = 30 * time.Second
-	}
-	return context.WithTimeout(context.Background(), t)
+	return context.WithTimeout(context.Background(), callTimeout())
 }
 
 // runDashboard resolves the credential (prompting as the last rung, since this only
@@ -414,4 +419,56 @@ func bestEffortTenant(c *client.Client) string {
 		return "" // cosmetic: the header shows "-", never a handle we could not confirm
 	}
 	return own
+}
+
+// globalFlagReaders names, by command path, the commands that read the global --create, --name
+// and --agent; a subcommand inherits its parent's entry. Every other command refuses them
+// (refuseUnreadGlobalFlags): a flag cobra accepts and the command never reads is a silent
+// surprise, and `whisper run --create --name X` connecting an existing agent instead of making X
+// was exactly that. A command whose OWN --agent or --name shadows the global one reads its own and
+// needs no entry here. TestGlobalFlagReadersAreRealCommands keeps the paths honest.
+var globalFlagReaders = map[string][]string{
+	"whisper":         {"create", "name", "agent"}, // the guided front door
+	"whisper run":     {"create", "name"},
+	"whisper claude":  {"create", "name"},
+	"whisper connect": {"create"},
+	"whisper policy":  {"agent"}, // the per-device policy plane
+	// The endpoint half adds its own readers where it registers its commands, so this map never
+	// names a command the public client does not have.
+}
+
+// readsGlobalFlag reports whether cmd, or the nearest parent with an entry, reads the global flag.
+// The root's entry belongs to bare `whisper` alone: every command descends from it.
+func readsGlobalFlag(cmd *cobra.Command, flag string) bool {
+	for c := cmd; c != nil; c = c.Parent() {
+		if c.HasParent() || c == cmd {
+			if names, ok := globalFlagReaders[c.CommandPath()]; ok {
+				for _, n := range names {
+					if n == flag {
+						return true
+					}
+				}
+				return false
+			}
+		}
+	}
+	return false
+}
+
+// refuseUnreadGlobalFlags refuses --create, --name or --agent on a command that would ignore it.
+// Only the root's own persistent flag is checked: a command that defines its own flag of the same
+// name reads that one.
+func refuseUnreadGlobalFlags(cmd *cobra.Command) error {
+	root := cmd.Root()
+	for _, flag := range []string{"create", "name", "agent"} {
+		global := root.PersistentFlags().Lookup(flag)
+		f := cmd.Flags().Lookup(flag)
+		if global == nil || f != global || !f.Changed || readsGlobalFlag(cmd, flag) {
+			continue
+		}
+		return usageErr("`%s` does not use --%s, so it was refused rather than ignored. "+
+			"--create and --name choose or make the agent for `whisper`, `whisper run`, `whisper claude` and `whisper connect`; "+
+			"--agent selects one wherever a command lists it in --help", cmd.CommandPath(), flag)
+	}
+	return nil
 }

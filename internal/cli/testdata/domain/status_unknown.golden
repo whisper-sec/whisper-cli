@@ -1,0 +1,3 @@
+--- stderr ---
+--- error ---
+nothere.example is not a domain on this account - submit it first:  whisper domain submit nothere.example

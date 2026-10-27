@@ -73,7 +73,7 @@ func TestTheFallbackWalkerTakesTheFirstResolverThatRecurses(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	n := &nameService{}
-	got, ok := n.probeFallbacks(ctx, s, netip.Addr{})
+	got, ok, _ := n.probeFallbacks(ctx, s, netip.Addr{})
 	if !ok || got != first {
 		t.Fatalf("(%v,%v), want the first agent-plane resolver %v", got, ok, first)
 	}
@@ -94,7 +94,7 @@ func TestASilentFirstResolverIsSkippedForTheSecondOnTheSamePlane(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	n := &nameService{}
-	got, ok := n.probeFallbacks(ctx, s, netip.Addr{})
+	got, ok, _ := n.probeFallbacks(ctx, s, netip.Addr{})
 	if !ok {
 		t.Fatal("no fallback chosen although the second agent-plane resolver answers")
 	}
@@ -113,7 +113,7 @@ func TestWhenNoCandidateAnswersTheWalkerSaysSoRatherThanNamingOne(t *testing.T) 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	n := &nameService{}
-	if got, ok := n.probeFallbacks(ctx, s, netip.Addr{}); ok {
+	if got, ok, _ := n.probeFallbacks(ctx, s, netip.Addr{}); ok {
 		t.Fatalf("(%v,%v), want no resolver chosen when none answers", got, ok)
 	}
 }
@@ -135,7 +135,7 @@ func TestTheWalkerSkipsTheResolverThatAlreadyFailedAsRungOne(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	n := &nameService{}
-	got, ok := n.probeFallbacks(ctx, s, first)
+	got, ok, _ := n.probeFallbacks(ctx, s, first)
 	if !ok {
 		t.Fatal("no fallback chosen although other candidates answer")
 	}

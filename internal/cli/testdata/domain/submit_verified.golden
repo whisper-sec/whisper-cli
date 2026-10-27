@@ -1,0 +1,10 @@
+everwatch.io  verified
+
+Your parent zone already publishes these; keep them in place:
+  everwatch.io. 3600 IN NS ns1.whisper.online.
+  everwatch.io. 3600 IN NS ns2.whisper.online.
+  everwatch.io. 3600 IN DS 61903 13 2 DC1DFA1AE92A8B25F7F74970551C85092A12C2DBC23763C00EFB8CBAAB6F6917
+  everwatch.io. 3600 IN CDS 61903 13 2 DC1DFA1AE92A8B25F7F74970551C85092A12C2DBC23763C00EFB8CBAAB6F6917
+
+This domain is already verified on your account, so nothing was changed. The NS and DS records above are the ones your parent zone must keep publishing; leave them in place. Run domain{op:'status'} to see what we last observed.
+--- stderr ---

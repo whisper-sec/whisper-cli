@@ -9,11 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/user"
+	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/idkey"
 )
 
 // emitJSON writes the verbatim control-plane envelope to stdout (scriptable). It
@@ -285,6 +289,12 @@ func friendly(err error) string {
 	if errors.As(err, &refused) && refused.refusal.Fix != "" {
 		return refused.Error()
 	}
+	// A listing of the account that did not answer says so in its own words, which carry the
+	// cause; checked before the problem it may wrap.
+	var unread *accountReadError
+	if errors.As(err, &unread) {
+		return unread.Error()
+	}
 	if pe, ok := client.AsProblem(err); ok {
 		if msg := mapProblem(pe); msg != "" {
 			return msg
@@ -318,6 +328,12 @@ func mapProblem(pe *client.ProblemError) string {
 		if isScopeRefusal(pe) {
 			return ""
 		}
+		// A connect signed by an identity key that is not the one pinned for the /128 is not a
+		// rejected API key either, and logging in again changes nothing. Seen as plain root on a lab
+		// guest, where root's identity directory held a different key from the user's.
+		if isIdentityKeyRefusal(pe) {
+			return identityKeyRefusalLine(pe)
+		}
 		return "your key was not accepted - run: whisper login"
 	case 404:
 		// Not every 404 is an agent lookup: a local "no .whisper/config here" or
@@ -350,6 +366,55 @@ func mapProblem(pe *client.ProblemError) string {
 		return "egress isn't enabled for this agent yet - try again shortly or contact support"
 	}
 	return ""
+}
+
+// isIdentityKeyRefusal reports the server's IDENTITY_SIGNATURE_INVALID: the connect was signed by an
+// identity key other than the one pinned for the address.
+func isIdentityKeyRefusal(pe *client.ProblemError) bool {
+	s := strings.ToLower(pe.Title + " " + pe.Type + " " + pe.Error())
+	return strings.Contains(s, "identity_signature_invalid") ||
+		strings.Contains(s, "identity_signature does not verify")
+}
+
+// pinnedForAddr pulls the /128 out of the server's detail ("... pinned for <addr>. ..."), or "".
+var pinnedForAddr = regexp.MustCompile(`pinned for ([0-9A-Fa-f:]+[0-9A-Fa-f])`)
+
+// sudoContext reports the invoking user when this process runs as root under sudo with a HOME that is
+// not that user's (so the identity directory read is root's, not theirs). A package var for tests.
+var sudoContext = defaultSudoContext
+
+func defaultSudoContext() (string, bool) {
+	if os.Geteuid() != 0 {
+		return "", false
+	}
+	name := strings.TrimSpace(os.Getenv("SUDO_USER"))
+	if name == "" || name == "root" {
+		return "", false
+	}
+	u, err := user.Lookup(name)
+	home, _ := os.UserHomeDir()
+	if err == nil && u.HomeDir != "" && filepath.Clean(u.HomeDir) == filepath.Clean(home) {
+		return "", false // sudo kept the user's HOME: the directory read IS theirs
+	}
+	return name, true
+}
+
+// identityKeyRefusalLine names the real cause of IDENTITY_SIGNATURE_INVALID: the identity key this
+// process signed with, read from the directory it resolved, is not the key pinned for the agent. It
+// never prints a pin digest or key material.
+func identityKeyRefusalLine(pe *client.ProblemError) string {
+	addr := "this agent"
+	if m := pinnedForAddr.FindStringSubmatch(pe.Detail); m != nil {
+		addr = m[1]
+	}
+	line := fmt.Sprintf("this machine's identity key for %s is not the one Whisper pinned for that agent "+
+		"(the key was read from %s); run as the user that connected it, or connect a different agent", addr,
+		idkey.Dir())
+	if who, ok := sudoContext(); ok {
+		line += fmt.Sprintf(". You are running as root under sudo, so root's identity directory was read, "+
+			"not %s's: run it without sudo, or keep your HOME with sudo --preserve-env=HOME", who)
+	}
+	return line
 }
 
 // isScopeRefusal reports whether a 401/403 is about a missing SCOPE rather than about the
@@ -428,4 +493,31 @@ func cobraNoArgs(cmd *cobra.Command, args []string) error {
 		return usageErr("%s takes no arguments, got %q", cmd.Name(), strings.Join(args, " "))
 	}
 	return nil
+}
+
+// runCoverageNote is the line `whisper run` (and `whisper claude`) prints under its success line
+// when it runs without --enforce. That run reaches the child only through the *_PROXY
+// variables, and the local proxy carries TCP alone: it refuses UDP ASSOCIATE, and on the
+// wireguard tier the tunnel sits behind that same proxy. So a program's UDP (its own DNS lookups,
+// NTP, QUIC) and any program that ignores the variables leave from this host's own address, on
+// every tier, and no flow is recorded for them. A hostname a proxied tool asks for is resolved
+// upstream, so that lookup is not the leak. "✓ verified" proves the proxy's egress, which is
+// true and is not the whole story, so the run says the rest next to it and names the way to full
+// coverage, as the command the person just ran. On a platform where --enforce is refused,
+// offering it as a command would send the person into an error, so the note says where it runs.
+func runCoverageNote(goos, enforceForm string) string {
+	const covered = "Covers TCP via *_PROXY only; UDP (own DNS, NTP, QUIC) and direct dials leave from this host's own address."
+	if goos == "linux" {
+		return covered + " Everything from the /128: " + enforceForm
+	}
+	return covered + " --enforce, which sends everything from the /128, needs Linux."
+}
+
+// runEnforceForm is the --enforce spelling of the command the person ran, for the coverage note:
+// `whisper claude` gets `whisper claude --enforce`, anything else `whisper run --enforce -- <name>`.
+func runEnforceForm(name string, viaClaude bool) string {
+	if viaClaude {
+		return "sudo whisper claude --enforce"
+	}
+	return "sudo whisper run --enforce -- " + name + " ..."
 }

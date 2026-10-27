@@ -1,0 +1,11 @@
+everwatch.io  pending
+  observed NS    ns1.whisper.online
+                 ns2.whisper.online
+  anchor         no_ds
+  served here    yes
+  last observed  2026-10-20 13:11 UTC
+pending: we looked at your parent and it publishes no DS for this domain (publish the DS record(s) at your registrar to anchor DNSSEC)
+  also: DNSSEC delegation chain not validating in the wild yet (DS must match our key and validate from multiple public resolvers)
+--- stderr ---
+--- error ---
+everwatch.io is pending: we looked at your parent and it publishes no DS for this domain (publish the DS record(s) at your registrar to anchor DNSSEC)

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -58,16 +59,32 @@ var ErrExposed = errors.New("a principal other than the owner can read or alter 
 // and leave the file exactly as readable as before while looking fixed.
 // Inheritance flags on a file's ACEs mean nothing, because a file is not a
 // container, so this one uses NO_INHERITANCE.
-func Harden(path string) error { return apply(path, false, windows.NO_INHERITANCE) }
+func Harden(path string) error { return apply(path, false, windows.NO_INHERITANCE, true) }
 
 // HardenDir sets the same DACL on a DIRECTORY, with the ACEs marked
 // inheritable, so a file created inside starts owner-only instead of
 // starting exposed and waiting for someone to remember to harden it.
 func HardenDir(path string) error {
-	return apply(path, true, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	return apply(path, true, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT, true)
 }
 
-func apply(path string, wantDir bool, inheritance uint32) error {
+// HardenMachine sets a protected DACL naming LocalSystem and the local
+// Administrators group and nobody else, not even the account that wrote it.
+//
+// It is for a file a LocalSystem service reads, written into that service's
+// own profile by an administrator. There the writer is just one member
+// of Administrators, and an ACE naming that account by itself would outlive
+// its membership: an operator removed from the group would keep reading the
+// service's key. The SYSTEM profile already grants exactly these two
+// principals, so the file ends up as private as the directory it sits in.
+func HardenMachine(path string) error { return apply(path, false, windows.NO_INHERITANCE, false) }
+
+// HardenMachineDir is HardenMachine for a directory, with inheritable ACEs.
+func HardenMachineDir(path string) error {
+	return apply(path, true, windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT, false)
+}
+
+func apply(path string, wantDir bool, inheritance uint32, withUser bool) error {
 	if path == "" {
 		return errors.New("secfile: no path to restrict")
 	}
@@ -94,7 +111,7 @@ func apply(path string, wantDir bool, inheritance uint32) error {
 		return fmt.Errorf("Administrators SID: %w", err)
 	}
 	entries := []windows.EXPLICIT_ACCESS{grant(sys, inheritance), grant(adm, inheritance)}
-	if u := CurrentUserSID(); u != nil {
+	if u := CurrentUserSID(); withUser && u != nil {
 		entries = append(entries, grant(u, inheritance))
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)
@@ -263,4 +280,29 @@ func maskLabel(mask uint32) string {
 		out = fmt.Sprintf("mask 0x%08x", mask)
 	}
 	return out
+}
+
+// replaceFile moves from over to, written through to disk before it returns. Windows cannot
+// flush a directory handle, and MOVEFILE_WRITE_THROUGH is the documented way to make a
+// replacing move durable. A reader holding the target open without share-delete makes the
+// move fail (a sharing violation or access denied), so it is retried briefly.
+func replaceFile(from, to string) error {
+	f, err := windows.UTF16PtrFromString(from)
+	if err != nil {
+		return err
+	}
+	t, err := windows.UTF16PtrFromString(to)
+	if err != nil {
+		return err
+	}
+	for attempt := 0; ; attempt++ {
+		err = windows.MoveFileEx(f, t, windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH)
+		// A reader holding the target without share-delete makes the replace fail with a
+		// sharing violation or, more often, access denied; both clear when it closes.
+		busy := errors.Is(err, windows.ERROR_SHARING_VIOLATION) || errors.Is(err, windows.ERROR_ACCESS_DENIED)
+		if err == nil || attempt >= 4 || !busy {
+			return err
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

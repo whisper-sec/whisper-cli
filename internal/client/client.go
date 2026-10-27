@@ -10,10 +10,13 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strings"
 	"sync/atomic"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/enforce"
 )
 
 // Canonical endpoints. graph.whisper.online is the ONE control endpoint - the own-infra front
@@ -145,8 +148,54 @@ func (c *Client) Credential() Credential { return c.cred }
 // It POSTs the JSON body the control plane documents; a transport error is wrapped
 // with a helpful message (never an opaque failure).
 func (c *Client) Agents(ctx context.Context, op string, args map[string]any) (*Envelope, error) {
+	if op == "connect" {
+		if err := RefuseIfEnforced(args); err != nil {
+			return nil, err
+		}
+	}
 	query := BuildAgentsQuery(op, args)
 	return c.Query(ctx, query)
+}
+
+// EnforcedHolder and EnforcedHolders are the enforce package's local, non-blocking lookups, as vars so a
+// test can stand in for a run held by root.
+var (
+	EnforcedHolder  = enforce.EnforcedHolder
+	EnforcedHolders = enforce.EnforcedHolders
+)
+
+// RefuseIfEnforced is the check every op:connect makes before it leaves this host. op:connect
+// replaces whatever peer the box holds for the /128, so a session for an agent that an enforced run on
+// this host holds would cut that run's tunnel at the box. It used to be each command's own decision and
+// only three made it; here it covers every command, the TUI, the MCP tools and anything added later.
+// The selector is read as the box reads it (agent, else its address alias), with any zone dropped. A
+// connect that names no agent is refused only while some enforced run is live here, because the box
+// would pick the agent itself. Returns a *enforce.HeldError, never anything that reached the network.
+func RefuseIfEnforced(args map[string]any) error {
+	// Exactly the box's reading (optStringAlias): agent when it is a string, even a blank one, else address
+	// when that is a string; a blank or absent selector means the box picks the agent itself.
+	sel := ""
+	if v, ok := args["agent"].(string); ok {
+		sel = v
+	} else if v, ok := args["address"].(string); ok {
+		sel = v
+	}
+	sel = strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(sel), "["), "]")
+	if sel == "" {
+		if held := EnforcedHolders(); len(held) > 0 {
+			return &enforce.HeldError{Addr: held[0], PID: EnforcedHolder(held[0]), Exclusive: true, Unnamed: true}
+		}
+		return nil
+	}
+	a, err := netip.ParseAddr(sel)
+	if err != nil {
+		return nil // an id or a name: the callers resolve those to the /128 first, and lock it after
+	}
+	a = a.WithZone("").Unmap()
+	if pid := EnforcedHolder(a); pid > 0 {
+		return &enforce.HeldError{Addr: a, PID: pid, Exclusive: true}
+	}
+	return nil
 }
 
 // Query runs an arbitrary control-plane Cypher query (whisper.agents OR a cognition

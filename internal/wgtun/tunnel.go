@@ -156,10 +156,20 @@ type Tunnel struct {
 	// (nameservice.go), decided once at bring-up and read-only thereafter. Held here as well
 	// as on the dialer so status/verify can report the same verdict the user was told.
 	names *nameService
+	// nameState is the same answer while a silent first probe is asked again in the background;
+	// NAT64 reads it so status reports what dials actually use.
+	nameState *settledNames
 
 	mu         sync.Mutex
 	lastH      time.Time // last observed handshake WITH THE BOX, for Healthy()/monitor
 	reconnects int       // re-handshakes the monitor has driven (status/tests); only grows
+	needFresh  bool      // the stall has outlasted every rung the tunnel has (NeedsFreshSession)
+	started    time.Time // when the tunnel came up; the age of a tunnel that never handshaked
+	rebinds    int       // UDP socket re-opens the monitor has driven (Rebinds); only grows
+	// stallRebinds / reboundBefore are the current stall's socket re-opens, and whether one came
+	// before the latest attempt. A handshake resets both.
+	stallRebinds  int
+	reboundBefore bool
 
 	// directDead / directRearm are the direct-path windows, resolved once from Options at
 	// bring-up; punchEvery is the traversal cadence (see punch.go).
@@ -305,10 +315,19 @@ func docsHandler(docs []ServedDoc) http.Handler {
 // value every dial through this tunnel actually uses (netDialer.nat64 reads the same field), which
 // is the property that makes it worth reporting at all.
 func (t *Tunnel) NAT64() (netip.Prefix, string) {
-	if t == nil || t.names == nil || !t.names.prefix.IsValid() {
+	if t == nil {
 		return NAT64Prefix()
 	}
-	return t.names.prefix, t.names.prefixSource
+	// nameState is the only answer that changes after Start, and it is read atomically; t.names is
+	// the fixed first answer, used only by a Tunnel built without one (a test).
+	ns := t.names
+	if t.nameState != nil {
+		ns = t.nameState.now()
+	}
+	if ns == nil || !ns.prefix.IsValid() {
+		return NAT64Prefix()
+	}
+	return ns.prefix, ns.prefixSource
 }
 
 // Healthy reports whether the tunnel has completed a handshake recently (within DeadAfter).

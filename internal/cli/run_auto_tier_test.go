@@ -8,6 +8,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/whisper-sec/whisper-cli/internal/client"
 )
 
 // `whisper run` from a COLD (disconnected) state must negotiate tiers the
@@ -33,6 +37,11 @@ func runRunCmd(t *testing.T, url string, extra ...string) (err error) {
 	defer func() { g = savedG }()
 
 	af := filepath.Join(t.TempDir(), "agent")
+	// This host's saved agent. With none, connect no longer lets the control plane pick one of the
+	// account's agents; these tests are about the tiers, not the selection (agent_pick_test.go).
+	if err := client.SaveAgent(af, "2a04:2a01:9::abcd"); err != nil {
+		t.Fatal(err)
+	}
 	args := append([]string{"--agent-file", af}, extra...)
 	args = append(args, "--", "true") // /bin/true: exits 0, writes nothing
 	cmd := newRunCmd()
@@ -92,5 +101,56 @@ func TestRunExplicitTier_IsNotSilentlyDowngraded(t *testing.T) {
 		if c.op == "connect" && !strings.Contains(c.body, "tier:'wireguard'") {
 			t.Error("a forced --tier wireguard must never issue a socks5 op:connect")
 		}
+	}
+}
+
+// `--tier auto` is the spelling of the default, so it must negotiate exactly as no flag does. It
+// used to reach the box as a literal tier:'auto', a tier no box serves.
+func TestRunExplicitAuto_NegotiatesLikeTheDefault(t *testing.T) {
+	rejectedWg := `{"ok":false,"status":503,"error":"the wireguard tier is unavailable on this box"}`
+
+	var seen []recordedCall
+	srv := autoTierServer(t, &seen, rejectedWg, s5ConnectReplyJSON())
+	defer srv.Close()
+	defer stubTierAwareTail(t, nil, false)()
+
+	if err := runRunCmd(t, srv.URL, "--tier", "auto"); err != nil {
+		t.Fatalf("--tier auto must downgrade like the default and succeed, got: %v", err)
+	}
+	for _, c := range seen {
+		if c.op == "connect" && strings.Contains(c.body, "tier:'auto'") {
+			t.Fatal("--tier auto was sent to the box as a literal tier instead of negotiated")
+		}
+	}
+}
+
+// With no flag, run negotiates Tier-1 first, so its help must not call socks5 the default. A
+// user who read "socks5 (default)" and got a WireGuard tunnel was misled.
+func TestRunTierHelpMatchesTheDefaultBehaviour(t *testing.T) {
+	for _, cmd := range []*cobra.Command{newRunCmd(), newClaudeCmd()} {
+		usage := cmd.Flags().Lookup("tier").Usage
+		if strings.Contains(usage, "socks5 (default)") {
+			t.Errorf("%s --tier help still calls socks5 the default: %q", cmd.Name(), usage)
+		}
+		if !strings.Contains(usage, "auto (default: wireguard, falling back to socks5)") {
+			t.Errorf("%s --tier help = %q, want it to name the auto default", cmd.Name(), usage)
+		}
+	}
+}
+
+// Reusing a live session for `--tier auto` must not claim a requested tier was left untouched:
+// auto states no preference, so any live tier honours it.
+func TestNoteTierIfDifferentIsSilentForAuto(t *testing.T) {
+	saved := g
+	g = globalFlags{}
+	defer func() { g = saved }()
+	sess := &egressSession{tier: "wireguard", addr: "2a04:2a01::1"}
+	_, stderr := captureStd(t, func() { noteTierIfDifferent(sess, "auto") })
+	if strings.Contains(stderr, "left untouched") {
+		t.Fatalf("--tier auto produced a reuse note: %q", stderr)
+	}
+	_, stderr = captureStd(t, func() { noteTierIfDifferent(sess, "socks5") })
+	if !strings.Contains(stderr, "left untouched") {
+		t.Fatalf("CONTROL: a real tier mismatch must still be noted, got %q", stderr)
 	}
 }

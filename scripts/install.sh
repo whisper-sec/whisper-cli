@@ -582,7 +582,14 @@ fix_path() {
   edit_rc "$HOME/.bash_profile"
   edit_rc "$_zdir/.zshrc"
   edit_rc "$_zdir/.zprofile"
-  edit_rc "$HOME/.config/fish/config.fish"
+  # fish reads $XDG_CONFIG_HOME/fish when that is set, so an edit under ~/.config would be
+  # one fish never sources. A relative value is invalid, and the XDG Base Directory spec
+  # says to ignore it.
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) _fishcfg="$XDG_CONFIG_HOME/fish" ;;
+    *)  _fishcfg="$HOME/.config/fish" ;;
+  esac
+  edit_rc "$_fishcfg/config.fish"
   return 0
 }
 

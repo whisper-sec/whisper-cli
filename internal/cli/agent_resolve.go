@@ -212,6 +212,9 @@ func accountAgents(c *client.Client, cx context.Context, sel string) ([]agentCho
 // fallback may act on; every other error (auth, network, control plane) stays
 // a surfaced error.
 func isNotFoundProblem(err error) bool {
+	if isAccountReadError(err) {
+		return false // a listing that answered 404 is a listing that did not answer
+	}
 	pe, ok := client.AsProblem(err)
 	return ok && pe.Status == 404
 }

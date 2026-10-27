@@ -3,7 +3,7 @@
 # Pinned by DIGEST, not by a floating tag. This image is published to a public registry
 # under our name, and `golang:1.26-alpine` is whatever the upstream tag pointed at on the
 # day the runner pulled it. Bumping it is a deliberate edit of both halves of this line.
-FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine@sha256:a2012b4a1d1f9f7e9f44e0d39b805a901e856b1dd80b4e6ee4338db547050308 AS build
 ARG TARGETOS
 ARG TARGETARCH
 ARG VERSION=dev

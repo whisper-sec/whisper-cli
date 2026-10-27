@@ -1,0 +1,10 @@
+everwatch.io  verified
+  observed NS    ns1.whisper.online
+                 ns2.whisper.online
+  observed DS    61903 13 2 DC1DFA1AE92A8B25F7F74970551C85092A12C2DBC23763C00EFB8CBAAB6F6917
+  anchor         ds_ours
+  parent DS TTL  3600s
+  served here    yes
+  first seen     2026-10-20 13:30 UTC
+  last observed  2026-10-20 13:38 UTC
+--- stderr ---

@@ -173,7 +173,7 @@ func TestEnrollForceRefusesWhenTheListingDoesNotAnswer(t *testing.T) {
 		}
 	}
 	for _, want := range []string{"agent-0000000000000a1a1", markedAddr, "Nothing was changed",
-		"whisper enroll --force --name {name}"} {
+		"whisper enroll --force --name " + pastePlaceholder("name")} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the refusal must name %q, got: %v", want, err)
 		}

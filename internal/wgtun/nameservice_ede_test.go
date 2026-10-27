@@ -29,8 +29,8 @@ func edeQuery(t *testing.T, s *dnsStack, server netip.Addr) (string, bool) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	n := &nameService{}
-	_, ok, reason := n.probeRecursion(ctx, s, server)
-	return reason, ok
+	res := n.probeRecursion(ctx, s, server)
+	return res.reason, res.ok
 }
 
 func TestParseExtendedErrorReadsTheCodeAndTextOffTheWire(t *testing.T) {

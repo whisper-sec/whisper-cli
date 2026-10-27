@@ -232,3 +232,14 @@ func TestUapiConfig_ClaimsOnlyTheFamilyTheInterfaceCanSource(t *testing.T) {
 		t.Fatalf("a v4-addressed interface must claim the v4 default route and only that:\n%s", doc)
 	}
 }
+
+func TestDNSServersKeepsEveryResolverInOrder(t *testing.T) {
+	blob := "[Interface]\nAddress = 2a04:2a01::5/128\nDNS = 2a04:2a01:0:53::1, 2a04:2a00::53\n"
+	got := DNSServers("2a04:2a01:0:53::1", blob)
+	if len(got) != 2 || got[0].String() != "2a04:2a01:0:53::1" || got[1].String() != "2a04:2a00::53" {
+		t.Fatalf("DNSServers = %v", got)
+	}
+	if got := DNSServers("", "junk"); len(got) != 0 {
+		t.Fatalf("no resolvers expected, got %v", got)
+	}
+}

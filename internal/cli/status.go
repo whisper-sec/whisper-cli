@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -92,10 +93,7 @@ func newStatusCmd() *cobra.Command {
 			// no longer answers is a crashed holder. Probe each record so status reports
 			// what is genuinely serving right now - never a hardcoded guess.
 			live := liveStatusSessions()
-			conn := "not connected"
-			if len(live) > 0 {
-				conn = "connected"
-			}
+			conn := connectionWord(live)
 
 			var sensorRow string
 			st := statusView{
@@ -129,8 +127,7 @@ func newStatusCmd() *cobra.Command {
 				rows = append(rows, []string{"connection", "not connected - run: whisper connect"})
 			}
 			for _, s := range live {
-				rows = append(rows, []string{"connection",
-					fmt.Sprintf("connected - %s via %s (%s)", s.Address, s.Endpoint, orVal(s.Tier, "socks5"))})
+				rows = append(rows, []string{"connection", connectionCell(s)})
 			}
 			if hostSensorStatus != nil {
 				rows = append(rows, []string{"sensor", sensorRow})
@@ -176,6 +173,103 @@ type statusSession struct {
 	// not carry one. `whale ip -4` prefers them over anything it could compute for itself.
 	NAT64Prefix string `json:"nat64_prefix,omitempty"`
 	NAT64Source string `json:"nat64_source,omitempty"`
+	// Tunnel / TunnelSince are the holder's own reading of a Tier 1 tunnel (up, handshaking,
+	// down, refused), empty for an egress tier and for a record that carries none.
+	Tunnel      string    `json:"tunnel,omitempty"`
+	TunnelSince time.Time `json:"tunnel_since,omitempty"`
+	// TunnelReason is why a fresh session was refused; ReconnectingAt is when a holder that
+	// serves nothing right now tries again.
+	TunnelReason   string    `json:"tunnel_reason,omitempty"`
+	ReconnectingAt time.Time `json:"reconnecting_at,omitempty"`
+	// Serving is false for a holder between sessions: alive, but nothing answers its port.
+	Serving bool `json:"-"`
+}
+
+// sessionUp reports whether a live session is carrying traffic as far as anyone can tell. A
+// session with no tunnel state (an egress tier, or a holder too old to publish one) keeps the
+// answer status always gave it: its proxy answers, so it is connected.
+func sessionUp(s statusSession) bool { return s.Tunnel == "" || s.Tunnel == tunnelUp }
+
+// connectionWord is the one-word connection state: connected when any session is up, else the
+// most hopeful state among the sessions there are (a tunnel still retrying by itself, then one a
+// fresh session has not revived, then one the Whisper side refused), else not connected.
+func connectionWord(live []statusSession) string {
+	if len(live) == 0 {
+		return "not connected"
+	}
+	rank := map[string]int{tunnelHandshaking: 3, tunnelDown: 2, tunnelRefused: 1}
+	word, best := tunnelDown, 0
+	for _, s := range live {
+		if sessionUp(s) {
+			return "connected"
+		}
+		if r := rank[s.Tunnel]; r > best {
+			word, best = s.Tunnel, r
+		}
+	}
+	return word
+}
+
+// connectionCell is the human row for one live session.
+func connectionCell(s statusSession) string {
+	where := fmt.Sprintf("%s via %s (%s)", s.Address, s.Endpoint, orVal(s.Tier, "socks5"))
+	if sessionUp(s) {
+		return "connected - " + where
+	}
+	return s.Tunnel + " - " + where + ": " + tunnelExplain(s)
+}
+
+// tunnelExplain says what a tunnel that is not up is doing, for how long, and what comes next.
+func tunnelExplain(s statusSession) string {
+	how := ""
+	if !s.TunnelSince.IsZero() {
+		how = " for " + roughDuration(time.Since(s.TunnelSince))
+	}
+	switch s.Tunnel {
+	case tunnelRefused:
+		why := orVal(s.TunnelReason, "no reason given")
+		next := "asks again later"
+		if d := time.Until(s.ReconnectingAt); !s.ReconnectingAt.IsZero() && d > 0 {
+			next = "asks again in " + roughDuration(d)
+		}
+		return "the Whisper side refused a fresh session (" + why + "); this session " + next +
+			". Fix that, or restart it: stop it and run `whisper connect`, or restart the service"
+	case tunnelDown:
+		next := "still retrying"
+		if !s.ReconnectingAt.IsZero() {
+			if d := time.Until(s.ReconnectingAt); d > 0 {
+				next = "next try in " + roughDuration(d)
+			} else {
+				next = "trying again now"
+			}
+		}
+		if !s.Serving {
+			return "no tunnel" + how + ", and nothing is serving the port meanwhile; " + next
+		}
+		return "no handshake" + how + ", and a fresh session did not bring it back; " + next
+	}
+	return "no handshake" + how + "; the tunnel is retrying, and starts a fresh session if that does not help"
+}
+
+// tunnelStatusLine is the extra line `whisper service status` prints under a running service
+// whose tunnel is not up, or "" when there is nothing to add.
+func tunnelStatusLine(s statusSession) string {
+	if sessionUp(s) {
+		return ""
+	}
+	return "  tunnel:  " + s.Tunnel + " - " + tunnelExplain(s)
+}
+
+// roughDuration renders an age the way a person reads one: 40s, 7m, 2h5m.
+func roughDuration(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	default:
+		return fmt.Sprintf("%dh%dm", int(d/time.Hour), int(d%time.Hour/time.Minute))
+	}
 }
 
 // liveStatusSessions reads the session registry and keeps only the records whose
@@ -186,17 +280,24 @@ type statusSession struct {
 func liveStatusSessions() []statusSession {
 	var out []statusSession
 	for _, rec := range readSessionRecords() {
-		if !probeWhisperProxy(rec.Port) {
+		// A holder between sessions is alive and retrying, or was refused: it serves nothing,
+		// and it is still the truth about this address, so it is reported rather than swept.
+		if !probeWhisperProxy(rec.Port) && !heldWithoutProxy(rec) {
 			removeSessionRecordAt(rec.path)
 			continue
 		}
 		out = append(out, statusSession{
-			Endpoint:    rec.Endpoint,
-			Address:     rec.Addr,
-			Tier:        rec.Tier,
-			Port:        rec.Port,
-			NAT64Prefix: rec.NAT64Prefix,
-			NAT64Source: rec.NAT64Source,
+			Endpoint:       rec.Endpoint,
+			Address:        rec.Addr,
+			Tier:           rec.Tier,
+			Port:           rec.Port,
+			NAT64Prefix:    rec.NAT64Prefix,
+			NAT64Source:    rec.NAT64Source,
+			Tunnel:         rec.TunnelState,
+			TunnelSince:    rec.TunnelSince,
+			TunnelReason:   rec.TunnelReason,
+			ReconnectingAt: rec.ReconnectingAt,
+			Serving:        !rec.NoProxy,
 		})
 	}
 	return out

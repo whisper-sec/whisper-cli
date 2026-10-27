@@ -105,6 +105,7 @@ func Start(cfg Config, opts Options) (*Tunnel, error) {
 		pathDir:     opts.PathStateDir,
 		logf:        opts.Logf,
 		stop:        make(chan struct{}),
+		started:     time.Now(),
 	}
 	t.rebindUDP = dev.BindUpdate
 
@@ -114,19 +115,36 @@ func Start(cfg Config, opts Options) (*Tunnel, error) {
 	// probe tells us whether the resolver the box handed us will serve this /128 at all.
 	// Bounded and fail-open - a probe that times out costs the refinement and nothing else,
 	// and whatever is degraded is said once, here, in a sentence rather than a symptom.
-	nameCtx, cancelNames := context.WithTimeout(context.Background(), nameServiceProbeTimeout)
-	names := newNameService(nameCtx, tnet, cfg.DNS, cfg.NAT64Prefix)
-	cancelNames()
+	// A probe that got no reply at all is asked again once the first handshake lands: on a
+	// fresh tunnel it can run before the tunnel, or the box's path back to the resolver, carries it.
+	// Bring-up first waits briefly for the handshake, then probes once. A retry runs in the
+	// background, so Start costs one probe as before; a dial waits for the settled answer within its
+	// own deadline, and the verdict is said once, when it is final.
+	preCtx, cancelPre := context.WithTimeout(context.Background(), preProbeHandshakeWait)
+	_ = t.waitFirstHandshake(preCtx)
+	cancelPre()
+	// Seed the reading the monitor keeps, so a tunnel that has already handshaked is not
+	// reported dead for the first tick after it comes up.
+	if last, ok := t.readHandshake(); ok {
+		t.lastH = last
+	}
+	names := firstNameService(context.Background(), tnet, cfg.DNS, cfg.NAT64Prefix)
 	t.names = names
-	if names.verdict != "" {
-		t.note("whisper: %s", names.verdict)
+	t.nameState = newSettledNames(names)
+	if !names.silent {
+		t.nameState.settle(nil)
+		if names.verdict != "" {
+			t.note("whisper: %s", names.verdict)
+		}
+	} else {
+		go t.settleSilentNames(names)
 	}
 
 	// 5. The shared egress front-end over a netstack dialer. onStop closes the device AFTER
 	// the accept loop + all splices drain (Stop ordering), so nothing dials a dead netstack.
 	// opts.Port (0 ⇒ a free port) pins the loopback port so `whisper init --tier wireguard`
 	// reuses the project's deterministic 127.0.0.1:<port> across re-ensures.
-	dialer := &netDialer{stack: tnet, timeout: t.dialTO, names: names, handshake: t.readHandshake}
+	dialer := &netDialer{stack: tnet, timeout: t.dialTO, names: names, pending: t.nameState, handshake: t.readHandshake}
 	proxy, err := egress.StartWithDialerPort(dialer, func() {
 		dev.Close()
 	}, opts.Port)
@@ -330,6 +348,9 @@ type netDialer struct {
 	// (nameservice.go). Settled once at Start, so a dial never probes and never reads the
 	// environment, and every dial of one tunnel agrees with every other.
 	names *nameService
+	// pending, when set, is the tunnel's name service while a silent first probe is asked again;
+	// Dial reads the settled answer from it (waiting within its own deadline) instead of names.
+	pending *settledNames
 	// handshake reports the box peer's last handshake, so a failed dial can say whether the
 	// tunnel was carrying at the time. A seam, not a dependency on *Tunnel: a test drives the
 	// three-way diagnosis without a live device. nil ⇒ the routing leg is simply not claimed.
@@ -337,14 +358,17 @@ type netDialer struct {
 }
 
 // nameServiceProbeTimeout bounds the WHOLE bring-up probe (nameservice.go): every rung of the
-// resolver ladder and the RFC 7050 discovery share this one budget, so a connect can never pay
-// it more than once no matter how many resolvers decline to answer.
+// resolver ladder and the RFC 7050 discovery share this one budget, so a connect pays it once no
+// matter how many resolvers decline to answer. The one exception is a probe that heard nothing
+// at all: it is asked again after the first handshake, under a fresh budget.
 //
 // The value is chosen against measurements, not taste. A resolver inside the tunnel is one RTT
 // away and answers in about 0.1s on the live fleet, and a resolver that refuses or NXDOMAINs
 // answers just as fast, so the only case that spends the whole budget is one that black-holes.
-// 2.5s covers a handshake still in flight when we ask plus a retransmit, and caps what a silent
-// far end costs the user at 2.5 seconds of a one-time bring-up. An earlier 6s was picked for
+// Each resolver gets its own perResolverProbe slice of it and the fallbacks are asked in
+// parallel, so one silent resolver cannot starve the rest. 2.5s does NOT cover a lost first
+// handshake initiation (wireguard-go retransmits after 5s plus jitter); that case is what the
+// background retry after the first handshake is for (firstHandshakeWait). An earlier 6s was picked for
 // headroom and showed up immediately as 6 seconds of silence per tunnel in the suite, which is
 // exactly the friction the motto says to remove.
 //
@@ -375,6 +399,14 @@ func (d *netDialer) Dial(ctx context.Context, target string) (net.Conn, error) {
 		var cancel context.CancelFunc
 		dctx, cancel = context.WithTimeout(ctx, d.timeout)
 		defer cancel()
+	}
+	if d.pending != nil && !isV6LiteralTarget(target) {
+		// One answer for the whole dial: the settled name service, or the first one if this
+		// dial's deadline ends before the background retry does. An IPv6 literal needs neither a
+		// resolver nor a NAT64 prefix, so it never waits.
+		settled := *d
+		settled.names, settled.pending = d.pending.get(dctx), nil
+		d = &settled
 	}
 	// An IPv4 LITERAL has no source address and no route inside this tunnel, so it
 	// would fail here silently. Wrap it in the NAT64 prefix (RFC 6052) and dial that - the
@@ -447,8 +479,8 @@ func (d *netDialer) nat64() netip.Prefix {
 //
 // - ROUTING - the tunnel has no recent handshake, so nothing is getting through and no
 // amount of DNS or destination health would help.
-// - DNS - the tunnel is carrying, but the resolver the box handed us is not usable, which
-// newNameService already established at bring-up and said once.
+// - DNS - the tunnel is carrying, but no in-tunnel resolver was confirmed at bring-up, which
+// settleNameService already said once.
 // - THE DESTINATION - the tunnel is carrying and names resolve, so the failure is at the
 // far end. That is the honest answer, and it stops a user from re-configuring a client
 // that was never the problem.
@@ -463,13 +495,23 @@ func (d *netDialer) diagnosis() string {
 				" UDP to the Whisper endpoint is not blocked on your network"
 		}
 	}
-	if d.names != nil && !d.names.resolverOK {
-		return ". The tunnel is carrying traffic, but the in-tunnel resolver is not usable" +
-			" (see the note printed when the tunnel came up), so this is name resolution" +
-			" rather than routing"
+	if d.names != nil && !d.names.confirmed && !d.names.onHost {
+		return ". The tunnel is carrying traffic, but the in-tunnel resolver could not be" +
+			" confirmed when the tunnel came up (see the note printed then), so this may be" +
+			" name resolution rather than routing"
 	}
 	return ". The tunnel is carrying traffic and names resolve, so this is the destination" +
 		" rather than the Whisper connection"
+}
+
+// isV6LiteralTarget reports whether "host:port" carries an IPv6 address.
+func isV6LiteralTarget(target string) bool {
+	host, _, err := net.SplitHostPort(target)
+	if err != nil {
+		return false
+	}
+	a, perr := netip.ParseAddr(strings.Trim(host, "[]"))
+	return perr == nil && a.Is6() && !a.Is4In6()
 }
 
 // isIPLiteralTarget reports whether "host:port" carries an address rather than a name, so the
@@ -529,10 +571,9 @@ func (d *netDialer) dialResolved(ctx context.Context, target string) (net.Conn, 
 // tests, and it could not execute.
 //
 // It now asks the question it always meant to: an A query, to the resolver the tunnel settled
-// on, over the tunnel (nameservice.go). When that resolver is not usable at all the same call
-// resolves on this host instead, which gives up the socks5h property that the lookup leaves
-// from the /128 - said out loud at bring-up, never absorbed silently - and keeps the
-// connection working. Fail open, and say which.
+// on, over the tunnel (nameservice.go). It resolves on this host only when the user asked for
+// that with WHISPER_RESOLVE_ON_HOST, because doing so gives up the socks5h property that the
+// lookup leaves from the /128.
 //
 // Returns an error unless the name really is v4-only and translatable.
 func (d *netDialer) dialV4OnlyName(ctx context.Context, target string) (net.Conn, error) {

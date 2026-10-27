@@ -63,6 +63,7 @@
 package secfile
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -133,6 +134,46 @@ func OpenFile(path string, flag int) (*os.File, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// WriteMachineFile is WriteFile for a file a machine-wide service reads: on
+// Windows its DACL names LocalSystem and Administrators only, not the account
+// that wrote it (see HardenMachine), and on unix it is WriteFile exactly.
+//
+// An administrator binding a host from an elevated PowerShell writes the
+// LocalSystem sensor's key and marker into the SYSTEM profile, where the sensor
+// reads them. The hardening still lands before the bytes do, as in
+// WriteFile.
+func WriteMachineFile(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, FileMode)
+	if err != nil {
+		return err
+	}
+	if err := HardenMachine(path); err != nil {
+		f.Close()
+		return err
+	}
+	_, werr := f.Write(data)
+	cerr := f.Close()
+	if werr != nil {
+		return werr
+	}
+	ReownForSudo(path)
+	return cerr
+}
+
+// MkdirAllMachine is MkdirAll for the directory of a file a machine-wide
+// service reads, with the same "only when this call created it" rule.
+func MkdirAllMachine(path string) error {
+	_, statErr := os.Stat(path)
+	if err := os.MkdirAll(path, DirMode); err != nil {
+		return err
+	}
+	if statErr == nil {
+		return nil
+	}
+	ReownForSudo(path)
+	return HardenMachineDir(path)
 }
 
 // MkdirAll creates path and any missing parents, and makes the leaf private
@@ -211,4 +252,41 @@ func SecureDir(path string) error {
 		return nil
 	}
 	return VerifyDir(path)
+}
+
+// WriteFileAtomic is WriteFile for a record a reader must never see half-written: the bytes go
+// to a private temp file beside path, are flushed to disk, and then replace path in one rename.
+// A crash leaves either the old file or the new one, never a truncated mix, and a reader that
+// parses a prefix of an address can never read a sibling address out of it.
+//
+// The temp file is hardened before a byte is written, exactly as OpenFile does, so the DACL or
+// mode travels with the rename. replaceFile is per platform: on unix the rename is followed by
+// a sync of the directory so the new name survives power loss; on Windows the move is written
+// through.
+func WriteFileAtomic(path string, data []byte) error {
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "."+filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	_ = tmp.Close()
+	f, err := OpenFile(name, os.O_WRONLY|os.O_TRUNC)
+	if err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	_, werr := f.Write(data)
+	serr := f.Sync()
+	cerr := f.Close()
+	if werr != nil || serr != nil || cerr != nil {
+		_ = os.Remove(name)
+		return errors.Join(werr, serr, cerr)
+	}
+	if err := replaceFile(name, path); err != nil {
+		_ = os.Remove(name)
+		return err
+	}
+	ReownForSudo(path)
+	return nil
 }

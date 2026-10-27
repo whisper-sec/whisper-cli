@@ -41,7 +41,8 @@ func TestDecodeGraphResultPositionalRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if len(res.Rows) != 2 || res.Rows[0]["n"] != float64(1) || res.Rows[1]["name"] != "two" {
+	// A row's number is its literal, a json.Number, never a rounded float64.
+	if len(res.Rows) != 2 || res.Rows[0]["n"] != json.Number("1") || res.Rows[1]["name"] != "two" {
 		t.Fatalf("rows = %v", res.Rows)
 	}
 }
@@ -121,7 +122,7 @@ func TestGraphQuerySendsQueryAndParameters(t *testing.T) {
 	if params["v"] != float64(1) {
 		t.Fatalf("parameters sent = %v", gotBody["parameters"])
 	}
-	if len(res.Rows) != 1 || res.Rows[0]["n"] != float64(1) {
+	if len(res.Rows) != 1 || res.Rows[0]["n"] != json.Number("1") {
 		t.Fatalf("rows = %v", res.Rows)
 	}
 }

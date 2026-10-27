@@ -5,12 +5,11 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
-	"os/signal"
 	"strings"
-	"syscall"
 
 	"github.com/spf13/cobra"
 
@@ -22,7 +21,7 @@ import (
 func newConnectCmd() *cobra.Command {
 	var tier, label, email, name, agent, agentFile, configFile string
 	var vin, ecuSerial string
-	var verbose, ensure bool
+	var verbose, ensure, adoptKey bool
 	var port int
 	cmd := &cobra.Command{
 		Use:   "connect",
@@ -41,20 +40,27 @@ func newConnectCmd() *cobra.Command {
 			"  socks5             Tier-1.5: a userspace SOCKS5/HTTPS egress, source-bound to your\n" +
 			"                     /128 - no root, works everywhere.\n" +
 			"An explicit --tier is forced exactly as asked - no auto-downgrade.\n\n" +
-			"Which identity it binds: --agent <id|/128> pins a specific one; else the\n" +
-			"agent persisted in ~/.config/whisper/agent (written when you pick/create one);\n" +
-			"else, if you already have an agent, the server's reuse-most-recent default.\n" +
-			"A saved agent your account no longer has is refused, naming your agents, rather\n" +
-			"than swapped for the most recent one, which may be another device's.\n\n" +
-			"If you have NO agent yet, connect creates one first - and every agent has a human\n" +
-			"name, so it asks for --name (a terminal prompts; headless --name is\n" +
-			"required). connect never mints an unnamed agent.",
+			"Which identity it binds: --agent <name|id|/128> pins a specific one; --create\n" +
+			"--name <name> makes a new one; --name <name> alone uses the agent of that name.\n" +
+			"Else the agent saved for this host in ~/.config/whisper/agent (written when you\n" +
+			"pick or create one). With none of those it creates a NEW agent for this host and\n" +
+			"saves it: it never picks one of your account's existing agents for you, because\n" +
+			"on the WireGuard tier that would replace the peer another host holds for it.\n" +
+			"A saved agent your account no longer has is refused, naming your agents.\n\n" +
+			"Every agent has a human name, so a create asks for --name (a terminal prompts;\n" +
+			"headless --name is required). connect never mints an unnamed agent.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --ensure: the IDEMPOTENT daemon path (used by `whisper init claude` + the
 			// SessionStart hook). Reuse a live proxy on the project's pinned port, else spawn
 			// the tunnel DETACHED and wait (bounded) until it's live. It does NOT hold this
 			// process open - the daemon does. Reads .whisper/config (via --config or discovery).
+			if adoptKey && !isAutoTier(tier) && !isWireGuardTier(tier) {
+				return usageErr("--adopt-key publishes the routed tier's identity key; use it without --tier, or with --tier wireguard")
+			}
+			if adoptKey && ensure {
+				return usageErr("--adopt-key is a one-off request; run it as a plain `whisper connect --adopt-key`, then use --ensure as usual")
+			}
 			if ensure {
 				return runEnsure(configFile, port)
 			}
@@ -64,6 +70,10 @@ func newConnectCmd() *cobra.Command {
 			// panel, and the line printed here names the reason and the fix (connect_refusal.go).
 			// identityGone is the one fact the body learns without a typed error.
 			identityGone := false
+			// Where the agent this attempt tried to bind came from, and what it was, so the
+			// panel offers a one-click fix only for the device's own binding, never for an
+			// agent a person named.
+			refusalSource, refusalSelector := "none", ""
 			err := func() error {
 				// The tier itself is decided below (auto vs forced); args carries everything
 				// tier-independent - each attempt adds its own tier + keys on a copy.
@@ -91,89 +101,51 @@ func newConnectCmd() *cobra.Command {
 				} else if strings.TrimSpace(ecuSerial) != "" {
 					return usageErr("--ecu-serial needs --vin (the ECU is identified within its vehicle)")
 				}
-				// Agent selection, in precedence order (highest first):
-				// 1. --agent <id|/128> explicit flag (overrides everything)
-				// 2. ~/.config/whisper/agent the agent persisted by a prior pick/create
-				// 3. (absent) ⇒ no selector ⇒ server reuse-most-recent default
-				// A FILE selector the account no longer knows is refused, never
-				// silently replaced by rung 3.
-				// Empty at every rung ⇒ omit the arg entirely (the zero-config common case).
-				// Provenance (flag vs file) gates the stale-file refusal below.
-				sel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
+				// Agent selection: the one rule every connect-shaped command shares
+				// (agent_pick.go). --agent; --create/--name; this host's saved agent (a saved
+				// agent the account no longer knows is refused); otherwise a NEW agent, named
+				// with --name or at the prompt, and saved so the next connect binds it again.
+				// It used to end in "no selector", which let the control plane hand this host an
+				// existing agent of the account and, on the routed tier, replace its peer.
+				// Provenance (flag vs file) feeds the refusal record the panel reads.
+				rawSel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
+				refusalSelector = rawSel
+				switch {
+				case selFromFile:
+					refusalSource = "file"
+				case rawSel != "":
+					refusalSource = "flag"
+				}
 
 				c, err := resolveClient(true, false)
 				if err != nil {
 					return err
 				}
-
-				// op:connect only understands an agent by /128 or id - a bare human display
-				// name (what `whisper list` shows, and what a caller naturally reaches for,
-				// e.g. --agent scout) needs resolving client-side first (Postel: liberal in
-				// what we accept). A /128 selector, an id, or "" (no selector) pass straight
-				// through with zero extra round-trips. Shared with ip/run/guided/daemon; a
-				// stale persisted-FILE selector is refused rather than replaced.
-				if sel != "" {
-					cxSel, cancelSel := ctx()
-					resolved, rerr := resolveAgentArg(c, cxSel, sel, selFromFile, agentFile)
-					cancelSel()
-					if rerr != nil {
-						return rerr
-					}
-					// A saved selector that resolved to nothing was proven gone on an account
-					// with no agents left. The create path below may still recover; if it cannot
-					// (a headless run has no name to give one), the refusal is about the identity.
-					identityGone = selFromFile && resolved == ""
-					sel = resolved
+				// With --agent, --name is the label op:connect carries (as it always was), not a
+				// second selector, so the pick sees it only when no agent was named.
+				pickName := chosenName
+				if strings.TrimSpace(agent) != "" {
+					pickName = ""
 				}
-
-				// When connect has NO selector it would otherwise let the server auto-allocate
-				// a /128 - and on a fresh account that /128 would be UNNAMED, bypassing the
-				// mandatory-name rule. Guard it: if the caller has no agent yet, mint a
-				// NAMED one through the SAME requireName/createAgent path as create, then bind
-				// egress to it. Existing agents are untouched (zero-config reuse stays).
-				if sel == "" {
-					cx0, cancel0 := ctx()
-					existing, lerr := listAgents(c, cx0)
-					cancel0()
-					if lerr != nil {
-						return lerr
-					}
-					if len(existing) != 0 {
-						identityGone = false // the account has agents again; nothing is proven
-					}
-					if len(existing) == 0 {
-						gio := stdGuidedIO()
-						nm, nerr := requireName(guidedOptions{name: chosenName, tty: isInteractive() && stdoutIsTTY()}, gio)
-						if nerr != nil {
-							return nerr
-						}
-						created, cerr := createAgentWithContact(c, nm, email)
-						if cerr != nil {
-							return cerr
-						}
-						identityGone = false // recovered: this device has an identity again
-						// Bind egress explicitly to the agent we just named (never a fresh
-						// unnamed allocation).
-						if created.addr != "" {
-							sel = created.addr
-						} else if created.name != "" {
-							sel = created.name
-						}
-						// - and REMEMBER it, or this binding lasts exactly one command.
-						// Without this the next connect starts with no selector again, finds
-						// len(existing) != 0 so it skips this branch, and asks the server for
-						// its default. That is the shape behind a live report of one machine
-						// showing up as two nodes: enrol, then reconnect, and the second call
-						// no longer names the agent the first one created. Best-effort on
-						// purpose - a read-only or full HOME must not fail a working connect,
-						// and the server-side reuse now covers the case where it does.
-						if serr := client.SaveAgent(agentFile, sel); serr != nil {
-							debugf("could not persist the agent selector (%v); the next connect will rely on the server default", serr)
-						}
-					}
+				pick, perr := pickAgent(c, agentPickOpts{
+					agent: agent, agentFile: agentFile, create: g.create, name: pickName, email: email,
+					command: "whisper connect",
+				})
+				identityGone = pick.identityGone
+				if perr != nil {
+					return perr
+				}
+				sel := pick.sel
+				if note := peerReplacementNote(pick, tier); note != "" && !g.quiet {
+					fmt.Fprintln(os.Stderr, note)
 				}
 				if sel != "" {
 					args["agent"] = sel
+				}
+				if adoptKey {
+					// The user's own request, by name, to publish this host's key. It rides
+					// only this command's first connect: renewals and the Tier 1.5 leg strip it.
+					args["adopt_identity_key"] = true
 				}
 
 				// The tier decision (the robustness default): NO --tier (or --tier auto)
@@ -193,6 +165,13 @@ func newConnectCmd() *cobra.Command {
 				// --port pins the local loopback port (0 ⇒ a free one); the attempt routes it
 				// through connectAndVerifyOnPort directly (a pinned port binds a REAL socket
 				// the connectAndVerify test stubs must not shadow).
+				// Refuse up front, rather than cut its tunnel at the box, when an enforced run
+				// holds this agent; held for the whole session, released when the command returns.
+				agentLock, lerr := lockAgentForConnect(sel)
+				if lerr != nil {
+					return lerr
+				}
+				defer func() { agentLock.Release() }()
 				cx, cancel := ctx()
 				defer cancel()
 				var sess *egressSession
@@ -205,19 +184,37 @@ func newConnectCmd() *cobra.Command {
 				if cerr != nil {
 					return proveIdentityAfterCheck(c, cerr)
 				}
-				// Held: whatever stopped the last attempt is no longer true.
+				// Held: whatever stopped the last attempt is no longer true, and a fix that was
+				// waiting for this session to come up has finished.
+				if agentLock == nil {
+					if agentLock, lerr = lockAgentForConnect(sess.addr); lerr != nil {
+						sess.Stop()
+						return lerr
+					}
+				}
 				clearConnectRefusal()
+				clearEnrollResult()
 				// A persistent `whisper connect` keeps the proxy alive for the WHOLE session:
 				// print the success line, then hold until the user interrupts. The proxy stays
 				// LIVE through the hold (its lifetime is Stop(), not cx) - holdUntilSignal calls
 				// sess.Stop() on SIGINT/SIGTERM. `--quiet` prints ONLY socks5h://127.0.0.1:<port>
 				// and holds silently. For one-shot scripted use prefer `whisper run`/`whisper ip`.
 				renderConnect(sess, verbose)
+				// A Tier 1 tunnel whose box drops its peer is re-connected by the hold (see
+				// session_renew.go), for the same agent and with the same identity key.
+				if isWireGuardTier(sess.tier) {
+					sess.renew = renewerFor(c, args, sess, sess.negotiated, sel)
+				}
 				holdUntilSignal(sess)
 				return nil
 			}()
 			if err != nil {
 				r := classifyConnectRefusal(err, identityGone, port, firstNonBlank(tier, "auto"))
+				r.Source, r.Selector = refusalSource, refusalSelector
+				var gone *identityGoneError
+				if errors.As(err, &gone) && gone.selector != "" {
+					r.Selector = gone.selector
+				}
 				writeConnectRefusal(r)
 				return &connectRefusedError{refusal: r, err: err}
 			}
@@ -229,6 +226,7 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in)")
 	cmd.Flags().StringVar(&name, "name", "", "the agent's human name (required to create one; maps to the server label)")
 	cmd.Flags().StringVar(&agent, "agent", "", "bind egress to this agent (id or /128); overrides the persisted agent")
+	cmd.Flags().BoolVar(&adoptKey, "adopt-key", false, "publish this host's identity key for the agent, replacing its published TLSA/SSHFP/OPENPGPKEY (Tier 1 only; use once, when this host should hold the key)")
 	cmd.Flags().StringVar(&vin, "vin", "", "bind this routed /128 to a vehicle VIN (automotive; op:connect)")
 	cmd.Flags().StringVar(&ecuSerial, "ecu-serial", "", "an ECU serial to combine with --vin (automotive)")
 	_ = cmd.Flags().MarkHidden("label") // --name is the documented spelling
@@ -252,6 +250,10 @@ func runEnsure(configFile string, portOverride int) error {
 	}
 	if portOverride > 0 {
 		cfg.Port = portOverride
+	}
+	if strings.TrimSpace(cfg.Agent) == "" {
+		// Said here, before a daemon is spawned to say it where nobody reads it.
+		return errNoProjectAgent
 	}
 	_, alreadyLive, derr := ensureDaemon(p, cfg)
 	if derr != nil {
@@ -423,16 +425,24 @@ func displayName(res *client.Result) string {
 // a one-shot (`whisper ip`/`run`/`claude`) detects it and REUSES the running proxy instead of
 // opening a competing op:connect that would clobber (and on exit, kill) this session's
 // server-side peer. Owner-guarded: a REUSED session (local==nil) is neither written nor cleared.
-var holdUntilSignal = func(sess *egressSession) {
+var holdUntilSignal = holdUntilSignalLive
+
+// holdUntilSignalLive is the real hold, which a test can drive with its own tick and signal.
+func holdUntilSignalLive(sess *egressSession) {
 	writeSessionRecord(sess)
-	defer func() {
-		clearSessionRecord(sess)
-		sess.Stop()
-	}()
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-	<-sigs
+	// Watch the session until the signal, renewing a Tier 1 tunnel whose box has dropped it,
+	// then stop whatever session is current and clear its record.
+	superviseUntilSignal(sess, foregroundLogf())
 	if !g.quiet {
 		fmt.Fprintln(os.Stderr, "whisper: disconnected.")
 	}
+}
+
+// foregroundLogf is a persistent connect's line out: stderr, silent under --quiet so a scripted
+// endpoint capture stays clean, the same rule the tunnel's own notes follow.
+func foregroundLogf() func(string, ...any) {
+	if g.quiet {
+		return nil
+	}
+	return func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) }
 }

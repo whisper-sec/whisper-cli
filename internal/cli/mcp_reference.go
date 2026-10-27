@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -201,9 +202,10 @@ func mcpReferenceCall(name string, args json.RawMessage) (mcpToolResult, bool) {
 // accepts the cypher under `cypher` (whisper-ai canonical) or `query`.
 func mcpToolQuery(args json.RawMessage) mcpToolResult {
 	var a struct {
-		Cypher string         `json:"cypher"`
-		Query  string         `json:"query"`
-		Params map[string]any `json:"params"`
+		Cypher     string         `json:"cypher"`
+		Query      string         `json:"query"`
+		Params     map[string]any `json:"params"`
+		Parameters map[string]any `json:"parameters"`
 	}
 	_ = json.Unmarshal(args, &a)
 	cypher := strings.TrimSpace(a.Cypher)
@@ -213,13 +215,17 @@ func mcpToolQuery(args json.RawMessage) mcpToolResult {
 	if cypher == "" {
 		return mcpErr("cypher is required - a Cypher statement, e.g. MATCH (h:HOSTNAME {name:$h})-[:RESOLVES_TO]->(ip:IPV4) RETURN ip.name")
 	}
+	params, perr := queryParams(a.Params, a.Parameters)
+	if perr != "" {
+		return mcpErr(perr)
+	}
 	c, errRes, ok := mcpGraphClient()
 	if !ok {
 		return errRes
 	}
 	cx, cancel := ctx()
 	defer cancel()
-	res, err := c.GraphQuery(cx, cypher, a.Params)
+	res, err := c.GraphQuery(cx, cypher, params)
 	if err != nil {
 		return mcpErr(friendly(err))
 	}
@@ -513,8 +519,12 @@ func runOneWorkflow(c *client.Client, r mcpRunSpec) map[string]any {
 		if err != nil {
 			return map[string]any{"slug": e.ID, "kind": "recipe", "success": false, "error": friendly(err)}
 		}
+		// UseNumber: this result is re-encoded for the model, and a float64 round trip would
+		// hand it a 64-bit id above 2^53 rounded to the nearest double.
 		var rows any
-		_ = json.Unmarshal(res.Raw, &rows)
+		dec := json.NewDecoder(bytes.NewReader(res.Raw))
+		dec.UseNumber()
+		_ = dec.Decode(&rows)
 		return map[string]any{"slug": e.ID, "kind": "recipe", "success": true, "result": rows, "docs": e.DocsURL()}
 	}
 

@@ -171,7 +171,7 @@ func waitForVerifiedProxy(port int) bool {
 // passes, so a record is the verified marker the ensure gate needs.
 func verifiedSessionOnPort(port int) bool {
 	for _, rec := range readSessionRecords() {
-		if rec.Port == port {
+		if rec.Port == port && !rec.NoProxy && rec.TunnelState != tunnelRefused {
 			return true
 		}
 	}
@@ -184,7 +184,7 @@ func verifiedSessionOnPort(port int) bool {
 // never stand in as the verified marker for a daemon that hasn't verified yet.
 func sweepStaleSessionRecordsForPort(port int) {
 	for _, rec := range readSessionRecords() {
-		if rec.Port == port && !probeWhisperProxy(rec.Port) {
+		if rec.Port == port && !probeWhisperProxy(rec.Port) && !heldWithoutProxy(rec) {
 			removeSessionRecordAt(rec.path)
 		}
 	}

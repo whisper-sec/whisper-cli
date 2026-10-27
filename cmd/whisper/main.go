@@ -14,8 +14,14 @@ import (
 	"os"
 
 	"github.com/whisper-sec/whisper-cli/internal/cli"
+	"github.com/whisper-sec/whisper-cli/internal/enforce"
 )
 
 func main() {
+	// `whisper run --enforce` re-executes this binary as the agent's init, inside the agent's
+	// namespaces. It is not a command anyone types, so it is dispatched before the command tree.
+	if len(os.Args) > 1 && os.Args[1] == enforce.InitArg {
+		enforce.RunInit()
+	}
 	os.Exit(cli.Execute())
 }

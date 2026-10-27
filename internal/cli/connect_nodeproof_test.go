@@ -21,12 +21,15 @@ import (
 // resent on every reconnect it lands every Tier-1 tunnel in the fleet on one box. The proof
 // replaces it rather than joining it.
 
+// A first connect is one with no address yet (connect-first, or an agent with no /128): the key
+// rides it, because that connect is the birth. An address this host holds no key for offers none
+// (see TestAnAddressWithNoLocalKeyIsOfferedNoKeyAndNothingIsMinted).
 func TestFirstConnectPinsTheKeyAndSignsNothing(t *testing.T) {
 	restore := idkey.SetIdentityDirForTest(t.TempDir())
 	defer restore()
 
 	args := map[string]any{"public_key": "wg-pub"}
-	kp, err := prepareIdentityKey("wireguard", args, "2a04:2a01:0:1::a1")
+	kp, err := prepareIdentityKey("wireguard", args, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -46,9 +49,12 @@ func TestReconnectProvesPossessionAndStopsResendingTheKey(t *testing.T) {
 	defer restore()
 	const addr = "2a04:2a01:0:1::a1"
 
-	first := map[string]any{"public_key": "wg-pub"}
-	kp, err := prepareIdentityKey("wireguard", first, addr) // mints + persists
+	// The key this host holds for the address, as a published first connect leaves it.
+	kp, err := idkey.GenerateKeypair()
 	if err != nil {
+		t.Fatal(err)
+	}
+	if err := idkey.Link(addr, kp); err != nil {
 		t.Fatal(err)
 	}
 

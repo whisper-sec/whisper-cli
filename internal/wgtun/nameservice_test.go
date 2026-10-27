@@ -10,6 +10,7 @@ import (
 	"net"
 	"net/netip"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -37,6 +38,14 @@ type dnsStack struct {
 	// edes maps the same key to an RFC 8914 Extended DNS Error the reply should carry, so a
 	// test can reproduce a resolver that refuses a name AND says why.
 	edes map[string]ede
+	// blackhole is the set of resolver addresses whose DNS dial never completes: it blocks until
+	// the dial's context ends, which is what a silent far end does on the real stack. An instant
+	// refusal (refuseConnect) is a different, much kinder fault.
+	blackhole map[string]bool
+	// garble makes every DNS reply arrive with a valid length and a body that is not a reply to
+	// the query (a different ID), so a test can tell "replied" from "silent".
+	garble bool
+	mu     sync.Mutex
 }
 
 // ede is an Extended DNS Error a fixture reply attaches.
@@ -54,10 +63,17 @@ func typeName(v uint16) string {
 	return "AAAA"
 }
 
-func (s *dnsStack) DialContext(_ context.Context, _, address string) (net.Conn, error) {
+func (s *dnsStack) DialContext(ctx context.Context, _, address string) (net.Conn, error) {
+	s.mu.Lock()
 	s.dialed = append(s.dialed, address)
+	refuse := s.refuseConnect
+	s.mu.Unlock()
 	if strings.HasSuffix(address, ":53") {
-		if s.refuseConnect {
+		if host, _, err := net.SplitHostPort(address); err == nil && s.blackhole[strings.Trim(host, "[]")] {
+			<-ctx.Done()
+			return nil, ctx.Err()
+		}
+		if refuse {
 			return nil, errors.New("connection refused")
 		}
 		answerer := s
@@ -96,6 +112,9 @@ func (s *dnsStack) serve(conn net.Conn) {
 		return
 	}
 	reply := s.reply(q)
+	if s.garble {
+		reply[0] ^= 0xFF // a different ID: a reply, but not to this query
+	}
 	out := make([]byte, 2+len(reply))
 	binary.BigEndian.PutUint16(out, uint16(len(reply)))
 	copy(out[2:], reply)
@@ -263,14 +282,20 @@ func TestAResolverThatRecursesWithoutDns64IsStillUsable(t *testing.T) {
 // Measured on the live fleet from inside a tunnel: the in-tunnel resolver answers for
 // Whisper's own names and does not resolve anything else, so every socks5h name fails and all
 // three possible faults look identical from the user's seat. The tunnel must still come up,
-// must fail open, and must say which of the three it was.
+// must say which of the three it was, and must keep names inside the tunnel.
 func TestARefusingResolverIsNamedAndTheTunnelStillComesUp(t *testing.T) {
 	s := &dnsStack{rcodes: map[string]uint8{key(recursionProbeName, dnsTypeA): 5}}
 	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
-	if ns.resolverOK {
-		t.Fatalf("a resolver that refused the control must not be marked usable")
+	if ns.confirmed {
+		t.Fatalf("a resolver that refused the control must not be marked confirmed")
 	}
-	for _, want := range []string{"2a04:2a01:0:53::1", "not on yours", "resolved on this host"} {
+	// It refused, so it is known not to serve names: they stay in the tunnel on the other
+	// agent-plane resolver, never on this host.
+	if ns.onHost || !ns.resolverOK || ns.resolver != agentPlaneResolvers[1] {
+		t.Fatalf("onHost=%v resolver=%v ok=%v, want names kept in the tunnel on %v",
+			ns.onHost, ns.resolver, ns.resolverOK, agentPlaneResolvers[1])
+	}
+	for _, want := range []string{"2a04:2a01:0:53::1", "treated as a resolver that does not serve names", "stay inside the tunnel"} {
 		if !strings.Contains(ns.verdict, want) {
 			t.Fatalf("verdict = %q, want it to contain %q", ns.verdict, want)
 		}
@@ -323,20 +348,82 @@ func TestAWorkingNamedResolverIsUsedSilently(t *testing.T) {
 	}
 }
 
-func TestAnUnreachableResolverSaysDnsNotRouting(t *testing.T) {
+// A resolver that never REPLIED is not a broken resolver. The probe may simply have run before
+// the tunnel carried its first packet, so the sentence must say "could not confirm" and must not
+// state a Whisper-side fault as fact.
+func TestASilentResolverIsCouldNotConfirmNotAFault(t *testing.T) {
 	ns := newNameService(context.Background(), &dnsStack{refuseConnect: true}, resolverAddr(), netip.Prefix{})
-	if ns.resolverOK {
-		t.Fatalf("an unreachable resolver must not be marked usable")
+	if ns.confirmed {
+		t.Fatalf("an unreachable resolver must not be marked confirmed")
 	}
-	if !strings.Contains(ns.verdict, "carrying traffic normally") {
-		t.Fatalf("verdict = %q, want it to separate DNS from routing", ns.verdict)
+	if !strings.Contains(ns.verdict, "could not confirm") {
+		t.Fatalf("verdict = %q, want it to say the resolver could not be confirmed", ns.verdict)
+	}
+	if strings.Contains(ns.verdict, "fault on the Whisper side") {
+		t.Fatalf("verdict = %q, states a fault from a probe that got no reply", ns.verdict)
 	}
 }
 
 func TestNoResolverAtAllIsAnOrdinaryOutcome(t *testing.T) {
 	ns := newNameService(context.Background(), &dnsStack{}, netip.Addr{}, netip.Prefix{})
-	if ns.resolverOK || ns.verdict == "" {
-		t.Fatalf("ok=%v verdict=%q, want not-usable with a sentence", ns.resolverOK, ns.verdict)
+	if ns.confirmed || ns.verdict == "" {
+		t.Fatalf("confirmed=%v verdict=%q, want unconfirmed with a sentence", ns.confirmed, ns.verdict)
+	}
+}
+
+// The retry. The first probe runs before the tunnel carries traffic and hears nothing;
+// once the first handshake lands the same resolver answers. The tunnel must settle on it, in
+// silence, exactly as if the first probe had been lucky.
+func TestASilentProbeIsAskedAgainAfterTheFirstHandshake(t *testing.T) {
+	s := &dnsStack{refuseConnect: true, answers: map[string][]netip.Addr{
+		key(recursionProbeName, dnsTypeA):       controlA(),
+		key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")},
+	}}
+	waited := 0
+	afterHandshake := func(context.Context) bool {
+		waited++
+		s.mu.Lock()
+		s.refuseConnect = false // the tunnel now carries traffic
+		s.mu.Unlock()
+		return true
+	}
+	ns := settleNameService(context.Background(), s, resolverAddr(), netip.Prefix{}, afterHandshake)
+	if waited != 1 {
+		t.Fatalf("waited for the handshake %d times, want exactly once", waited)
+	}
+	if !ns.confirmed || ns.resolver != resolverAddr() || ns.verdict != "" {
+		t.Fatalf("confirmed=%v resolver=%v verdict=%q, want the named resolver, confirmed, in silence",
+			ns.confirmed, ns.resolver, ns.verdict)
+	}
+	if ns.prefix.String() != nsp {
+		t.Fatalf("prefix = %s, want %s discovered on the retry", ns.prefix, nsp)
+	}
+}
+
+// CONTROL for the retry: a healthy bring-up never waits, and a resolver that REPLIED with a
+// refusal is an answer, so it is not asked again either.
+func TestOnlyASilentProbeWaitsForTheHandshake(t *testing.T) {
+	for name, s := range map[string]*dnsStack{
+		"healthy": {answers: map[string][]netip.Addr{key(recursionProbeName, dnsTypeA): controlA()}},
+		"refused": {rcodes: map[string]uint8{key(recursionProbeName, dnsTypeA): 5}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			settleNameService(context.Background(), s, resolverAddr(), netip.Prefix{},
+				func(context.Context) bool { called = true; return true })
+			if called {
+				t.Fatal("waited for a handshake although the first probe got a reply")
+			}
+		})
+	}
+}
+
+// A silent probe whose tunnel never handshakes says so: that points at the tunnel, not DNS.
+func TestASilentProbeWithNoHandshakePointsAtTheTunnel(t *testing.T) {
+	ns := settleNameService(context.Background(), &dnsStack{refuseConnect: true}, resolverAddr(),
+		netip.Prefix{}, func(context.Context) bool { return false })
+	if !strings.Contains(ns.verdict, "first handshake") || !strings.Contains(ns.verdict, "could not confirm") {
+		t.Fatalf("verdict = %q, want it to say the tunnel had not handshaked and the resolver is unconfirmed", ns.verdict)
 	}
 }
 
@@ -457,15 +544,19 @@ func TestANameWithNativeV6IsNotReroutedThroughNat64(t *testing.T) {
 	}
 }
 
-// The fail-open leg: the in-tunnel resolver refuses us, so the name is resolved on this host
-// and the connection still completes. It costs the socks5h property, which newNameService
-// says out loud, and it is the difference between a working tool and a dead one.
-func TestAnUnusableResolverFallsBackToThisHostAndStillConnects(t *testing.T) {
+// The opt-in leg: the in-tunnel resolver refuses us and the user asked for WHISPER_RESOLVE_ON_HOST,
+// so the name is resolved on this host and the connection still completes. It costs the socks5h
+// property, which the verdict says out loud.
+func TestAnUnusableResolverFallsBackToThisHostOnlyWhenAsked(t *testing.T) {
+	t.Setenv(ResolveOnHostEnv, "1")
 	s := &dnsStack{
 		rcodes:   map[string]uint8{key(recursionProbeName, dnsTypeA): 5},
 		failDial: map[string]bool{"v4only.example:80": true},
 	}
 	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
+	if !ns.onHost || !strings.Contains(ns.verdict, ResolveOnHostEnv) {
+		t.Fatalf("onHost=%v verdict=%q, want this host's resolver, said out loud", ns.onHost, ns.verdict)
+	}
 	ns.hostLookup = func(_ context.Context, network, _ string) ([]netip.Addr, error) {
 		if network != "ip4" {
 			return nil, errors.New("no such host") // v4-only: no AAAA, so the retry is allowed
@@ -476,9 +567,34 @@ func TestAnUnusableResolverFallsBackToThisHostAndStillConnects(t *testing.T) {
 	if _, err := d.Dial(context.Background(), "v4only.example:80"); err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	want := "[" + synth(t, WellKnownNAT64Prefix, "203.0.113.7").String() + "]:80"
+	// No resolver confirmed, so no discovery: the agent-plane prefix, not the office one.
+	want := "[" + synth(t, agentPlaneNAT64.String(), "203.0.113.7").String() + "]:80"
 	if last := s.dialed[len(s.dialed)-1]; last != want {
 		t.Fatalf("last dial = %s, want %s", last, want)
+	}
+}
+
+// Without the opt-in, names NEVER move to this host's resolver. A failed lookup inside the tunnel
+// fails visibly; it does not quietly leave the /128.
+func TestNamesNeverSilentlyMoveOffTheTunnel(t *testing.T) {
+	t.Setenv(ResolveOnHostEnv, "")
+	s := &dnsStack{
+		rcodes:   map[string]uint8{key(recursionProbeName, dnsTypeA): 5},
+		failDial: map[string]bool{"v4only.example:80": true},
+	}
+	ns := newNameService(context.Background(), s, resolverAddr(), netip.Prefix{})
+	asked := false
+	ns.hostLookup = func(context.Context, string, string) ([]netip.Addr, error) {
+		asked = true
+		return []netip.Addr{netip.MustParseAddr("203.0.113.7")}, nil
+	}
+	d := &netDialer{stack: s, timeout: time.Second, names: ns}
+	_, _ = d.Dial(context.Background(), "v4only.example:80")
+	if asked {
+		t.Fatal("a name was resolved on this host although nobody asked for that")
+	}
+	if ns.onHost || !ns.resolverOK || !ns.resolver.IsValid() {
+		t.Fatalf("onHost=%v resolver=%v, want names kept on an in-tunnel resolver", ns.onHost, ns.resolver)
 	}
 }
 
@@ -509,7 +625,7 @@ func TestAFailedDialNamesWhichLayerFailed(t *testing.T) {
 	stale := func() (time.Time, bool) { return time.Now().Add(-10 * time.Minute), true }
 	never := func() (time.Time, bool) { return time.Time{}, true }
 
-	okNames := &nameService{prefix: netip.MustParsePrefix(nsp), resolverOK: true}
+	okNames := &nameService{prefix: netip.MustParsePrefix(nsp), resolverOK: true, confirmed: true}
 	badNames := &nameService{prefix: netip.MustParsePrefix(nsp)}
 
 	for _, tc := range []struct {
@@ -542,7 +658,7 @@ func TestAFailedDialNamesWhichLayerFailed(t *testing.T) {
 func TestTheDiagnosisNeverEchoesTheTarget(t *testing.T) {
 	s := &dnsStack{failDial: map[string]bool{"secret-internal.example:443": true}}
 	d := &netDialer{stack: s, timeout: time.Second,
-		names:     &nameService{prefix: netip.MustParsePrefix(nsp), resolverOK: true},
+		names:     &nameService{prefix: netip.MustParsePrefix(nsp), resolverOK: true, confirmed: true},
 		handshake: func() (time.Time, bool) { return time.Now(), true }}
 	_, err := d.Dial(context.Background(), "secret-internal.example:443")
 	if err == nil {
@@ -677,5 +793,247 @@ func TestBuildQueryCarriesAnOPTRecordSoTheResolverCanExplainItself(t *testing.T)
 	// every check above and still be a broken query.
 	if name, qtype, _ := readQuestion(q); name != "example.com." || qtype != dnsTypeA {
 		t.Fatalf("question reads (%q,%d) with the OPT present, want example.com./A", name, qtype)
+	}
+}
+
+// ---------------------------------------------------------------------------------------
+// Edge cases, part 1.
+// ---------------------------------------------------------------------------------------
+
+// A named resolver that BLACK-HOLES must not use up the budget the fallbacks need. On the real
+// stack a silent dial blocks until its deadline; before each resolver had its own slice, the
+// fallbacks were dialled on an expired context and reported as "did not answer" unasked.
+func TestABlackHoledNamedResolverStillLetsTheFallbacksBeAsked(t *testing.T) {
+	t.Setenv(ResolveOnHostEnv, "")
+	named := netip.MustParseAddr("2a04:2a01:9:53:dead::1") // per-tenant, not on the fallback list
+	fallback := agentPlaneResolvers[0]
+	s := &dnsStack{
+		blackhole: map[string]bool{named.String(): true},
+		perResolver: map[string]*dnsStack{fallback.String(): {answers: map[string][]netip.Addr{
+			key(recursionProbeName, dnsTypeA): controlA(),
+		}}},
+	}
+	start := time.Now()
+	ns := newNameService(context.Background(), s, named, netip.Prefix{})
+	if !ns.confirmed || ns.resolver != fallback {
+		t.Fatalf("confirmed=%v resolver=%v verdict=%q, want the agent-plane fallback confirmed",
+			ns.confirmed, ns.resolver, ns.verdict)
+	}
+	if !strings.Contains(ns.verdict, "could not confirm") {
+		t.Fatalf("verdict = %q, want the silent named resolver described as unconfirmed", ns.verdict)
+	}
+	if took := time.Since(start); took > nameServiceProbeTimeout+500*time.Millisecond {
+		t.Fatalf("bring-up took %v, over the %v budget", took, nameServiceProbeTimeout)
+	}
+}
+
+// Black-holed fallbacks are asked in parallel, so two of them cost one deadline, not two.
+func TestBlackHoledFallbacksCostOneDeadlineNotOneEach(t *testing.T) {
+	bh := map[string]bool{}
+	for _, r := range fallbackResolvers() {
+		bh[r.String()] = true
+	}
+	s := &dnsStack{blackhole: bh}
+	n := &nameService{}
+	start := time.Now()
+	if _, ok, replied := n.probeFallbacks(context.Background(), s, netip.Addr{}); ok || replied {
+		t.Fatalf("ok=%v replied=%v, want neither from silent resolvers", ok, replied)
+	}
+	if took := time.Since(start); took > perResolverProbe+500*time.Millisecond {
+		t.Fatalf("took %v, want about one per-resolver deadline (%v)", took, perResolverProbe)
+	}
+}
+
+// A reply that arrived but is not an answer to this query is a REPLY: it must not be called
+// silence, must not confirm the resolver, and must not trigger the handshake retry.
+func TestAGarbledReplyIsAReplyNotSilenceAndNeverConfirms(t *testing.T) {
+	s := &dnsStack{garble: true, answers: map[string][]netip.Addr{key(recursionProbeName, dnsTypeA): controlA()}}
+	res := (&nameService{}).probeRecursion(context.Background(), s, resolverAddr())
+	if res.ok {
+		t.Fatal("a reply carrying a different query ID confirmed the resolver")
+	}
+	if !res.replied {
+		t.Fatal("a reply that arrived was classified as silence")
+	}
+	called := false
+	settleNameService(context.Background(), s, resolverAddr(), netip.Prefix{},
+		func(context.Context) bool { called = true; return true })
+	if called {
+		t.Fatal("a resolver that replied was retried as if it had been silent")
+	}
+}
+
+// A bare REFUSED with no EDE does not say whose fault it is, so the verdict must not say either.
+func TestABareRefusedIsNotStatedAsAWhisperFault(t *testing.T) {
+	s := &dnsStack{rcodes: map[string]uint8{key(recursionProbeName, dnsTypeA): 5}}
+	_, verdict := (&nameService{}).pickResolver(context.Background(), s, resolverAddr())
+	if strings.Contains(verdict, "fault on the Whisper side") {
+		t.Fatalf("verdict = %q, blames Whisper for a refusal that gave no reason", verdict)
+	}
+	if !strings.Contains(verdict, "treated as a resolver that does not serve names") {
+		t.Fatalf("verdict = %q, want the refusal described consistently with moving off it", verdict)
+	}
+}
+
+// A refusal by POLICY (EDE Filtered) must not be routed around through a fallback that does not
+// apply the policy. The fallback here answers everything; only the policy rule keeps it unused.
+func TestAPolicyRefusalIsNotRoutedAroundThroughAFallback(t *testing.T) {
+	t.Setenv(ResolveOnHostEnv, "")
+	named := netip.MustParseAddr("2a04:2a01:9:53:dead::1")
+	working := &dnsStack{answers: map[string][]netip.Addr{key(recursionProbeName, dnsTypeA): controlA()}}
+	per := map[string]*dnsStack{}
+	for _, r := range fallbackResolvers() {
+		per[r.String()] = working
+	}
+	s := &dnsStack{
+		rcodes:      map[string]uint8{key(recursionProbeName, dnsTypeA): 3},
+		edes:        map[string]ede{key(recursionProbeName, dnsTypeA): {code: 17, text: "tenant dns policy"}},
+		perResolver: per,
+	}
+	ns := newNameService(context.Background(), s, named, netip.Prefix{})
+	if ns.resolver != named {
+		t.Fatalf("resolver = %v, want the named resolver kept so its policy keeps applying", ns.resolver)
+	}
+	if !strings.Contains(ns.verdict, "your own DNS policy") {
+		t.Fatalf("verdict = %q, want the resolver's own reason", ns.verdict)
+	}
+}
+
+// CONTROL for the rule above: EDE 18 (Prohibited, "this resolver does not serve you") is about the
+// resolver, not the names, so falling back is right.
+func TestAProhibitedRefusalStillFallsBack(t *testing.T) {
+	named := netip.MustParseAddr("2a04:2a01:9:53:dead::1")
+	fallback := agentPlaneResolvers[0]
+	s := &dnsStack{
+		rcodes: map[string]uint8{key(recursionProbeName, dnsTypeA): 5},
+		edes:   map[string]ede{key(recursionProbeName, dnsTypeA): {code: 18}},
+		perResolver: map[string]*dnsStack{fallback.String(): {answers: map[string][]netip.Addr{
+			key(recursionProbeName, dnsTypeA): controlA(),
+		}}},
+	}
+	ns := newNameService(context.Background(), s, named, netip.Prefix{})
+	if !ns.confirmed || ns.resolver != fallback {
+		t.Fatalf("resolver=%v confirmed=%v, want the fallback for a resolver that does not serve us", ns.resolver, ns.confirmed)
+	}
+}
+
+// A named resolver that answered with a plain refusal is known not to serve names, so an
+// unconfirmed tunnel stays on the first agent-plane fallback instead; one that was only silent
+// is kept, because it may just not have been reachable yet.
+func TestAnUnconfirmedTunnelStaysOnTheBestResolver(t *testing.T) {
+	t.Setenv(ResolveOnHostEnv, "")
+	named := netip.MustParseAddr("2a04:2a01:9:53:dead::1")
+	refused := &dnsStack{rcodes: map[string]uint8{key(recursionProbeName, dnsTypeA): 2}} // SERVFAIL everywhere
+	if ns := newNameService(context.Background(), refused, named, netip.Prefix{}); ns.resolver != agentPlaneResolvers[0] {
+		t.Fatalf("refused: resolver = %v, want %v", ns.resolver, agentPlaneResolvers[0])
+	}
+	silent := &dnsStack{refuseConnect: true}
+	if ns := newNameService(context.Background(), silent, named, netip.Prefix{}); ns.resolver != named {
+		t.Fatalf("silent: resolver = %v, want the named %v kept", ns.resolver, named)
+	}
+}
+
+// With no resolver confirmed, RFC 7050 discovery never ran; without a declaration the prefix must
+// be the agent-plane one, never the office-plane well-known prefix.
+func TestAnUnconfirmedTunnelWrapsIntoTheAgentPlanePrefix(t *testing.T) {
+	t.Setenv(nat64PrefixEnv, "")
+	ns := newNameService(context.Background(), &dnsStack{refuseConnect: true}, resolverAddr(), netip.Prefix{})
+	if ns.prefix != agentPlaneNAT64 {
+		t.Fatalf("prefix = %v, want the agent-plane %v", ns.prefix, agentPlaneNAT64)
+	}
+	declared := netip.MustParsePrefix(nsp)
+	if ns := newNameService(context.Background(), &dnsStack{refuseConnect: true}, resolverAddr(), declared); ns.prefix != declared {
+		t.Fatalf("prefix = %v, want the declared %v kept", ns.prefix, declared)
+	}
+}
+
+// A lookup on the dial path is bounded on its own, so a black-holed resolver leaves the rest of
+// the dial a live context.
+func TestALookupOnABlackHoledResolverIsBounded(t *testing.T) {
+	ns := &nameService{resolver: resolverAddr(), resolverOK: true}
+	s := &dnsStack{blackhole: map[string]bool{resolverAddr().String(): true}}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	if _, err := ns.resolve(ctx, s, "example.com", dnsTypeAAAA); err == nil {
+		t.Fatal("a black-holed lookup must fail")
+	}
+	if took := time.Since(start); took > perQueryTimeout+time.Second {
+		t.Fatalf("lookup took %v, want it bounded near %v", took, perQueryTimeout)
+	}
+	if ctx.Err() != nil {
+		t.Fatal("the dial's own context was used up by one lookup")
+	}
+}
+
+// The background retry: a dial issued while the retry runs gets the settled answer, and a dial
+// whose deadline ends first gets the first answer, never a half-built one.
+func TestADialWaitsForTheSettledNamesWithinItsDeadline(t *testing.T) {
+	first := &nameService{prefix: netip.MustParsePrefix(nsp), resolver: resolverAddr(), resolverOK: true}
+	final := &nameService{prefix: netip.MustParsePrefix(nsp), resolver: agentPlaneResolvers[1], resolverOK: true, confirmed: true}
+	h := newSettledNames(first)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	if got := h.get(ctx); got != first {
+		t.Fatal("a dial whose deadline ended before settling must get the first answer")
+	}
+	cancel()
+	go func() { time.Sleep(20 * time.Millisecond); h.settle(final) }()
+	if got := h.get(context.Background()); got != final {
+		t.Fatal("a dial must get the settled answer once it is published")
+	}
+}
+
+func TestWaitForHandshakeReturnsOnTheFirstHandshakeAndRespectsItsDeadline(t *testing.T) {
+	calls := 0
+	read := func() (time.Time, bool) {
+		calls++
+		if calls < 3 {
+			return time.Time{}, true
+		}
+		return time.Now(), true
+	}
+	if !waitForHandshake(context.Background(), read, time.Millisecond) {
+		t.Fatal("want true once a handshake is reported")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if waitForHandshake(ctx, func() (time.Time, bool) { return time.Time{}, true }, time.Millisecond) {
+		t.Fatal("want false when the deadline ends with no handshake")
+	}
+}
+
+// ---------------------------------------------------------------------------------------
+// Edge cases, part 2.
+// ---------------------------------------------------------------------------------------
+
+// An IPv6 literal needs no resolver and no prefix, so it never waits for the background retry.
+func TestAnIPv6LiteralDialDoesNotWaitForTheNameRetry(t *testing.T) {
+	first := &nameService{prefix: netip.MustParsePrefix(nsp), resolver: resolverAddr(), resolverOK: true}
+	d := &netDialer{stack: &dnsStack{}, timeout: 5 * time.Second, names: first, pending: newSettledNames(first)}
+	start := time.Now()
+	if _, err := d.Dial(context.Background(), "[2001:db8::1]:443"); err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	if took := time.Since(start); took > time.Second {
+		t.Fatalf("a v6 literal waited %v for a name check it does not need", took)
+	}
+}
+
+// After a policy refusal the verdict must not suggest the host resolver (it would bypass the policy
+// it just named), and the prefix is still MEASURED from the resolver, which answers ipv4only.arpa.
+func TestAPolicyRefusalOffersNoBypassAndStillDiscoversThePrefix(t *testing.T) {
+	t.Setenv(nat64PrefixEnv, "")
+	named := netip.MustParseAddr("2a04:2a01:9:53:dead::1")
+	s := &dnsStack{
+		rcodes:  map[string]uint8{key(recursionProbeName, dnsTypeA): 3},
+		edes:    map[string]ede{key(recursionProbeName, dnsTypeA): {code: 17, text: "tenant dns policy"}},
+		answers: map[string][]netip.Addr{key(wellKnownIPv4OnlyName, dnsTypeAAAA): {synth(t, nsp, "192.0.0.170")}},
+	}
+	ns := newNameService(context.Background(), s, named, netip.Prefix{})
+	if strings.Contains(ns.verdict, ResolveOnHostEnv) {
+		t.Fatalf("verdict = %q, offers a bypass of the policy it just named", ns.verdict)
+	}
+	if ns.prefix.String() != nsp {
+		t.Fatalf("prefix = %v (%s), want %s measured from the resolver", ns.prefix, ns.prefixSource, nsp)
 	}
 }

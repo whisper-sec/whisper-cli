@@ -234,6 +234,7 @@ func TestFindLiveSession_MatchingLadder(t *testing.T) {
 func TestIP_ReusesLiveDaemonSession(t *testing.T) {
 	stubSessionsDir(t)
 	stubProbe(t, true, nil)
+	stubObserved(t, "2a04:2a01:9::abcd") // the reused session proves its identity
 	writeSessionRecord(ownedSession("2a04:2a01:9::abcd", "socks5h://127.0.0.1:41080", "wireguard"))
 
 	// The verify seam: `ip` still verifies through the REUSED endpoint (that's its job).
@@ -311,6 +312,7 @@ func TestRun_ReusesLiveDaemonSessionAndInjectsItsEndpoint(t *testing.T) {
 	}
 	stubSessionsDir(t)
 	stubProbe(t, true, nil)
+	stubObserved(t, "2a04:2a01:9::abcd") // the reused session proves its identity
 	writeSessionRecord(ownedSession("2a04:2a01:9::abcd", "socks5h://127.0.0.1:41080", "wireguard"))
 
 	var seen []recordedCall
@@ -322,7 +324,7 @@ func TestRun_ReusesLiveDaemonSessionAndInjectsItsEndpoint(t *testing.T) {
 	defer func() { g = savedG }()
 
 	stdout, _ := captureStd(t, func() {
-		if err := runWithEgress("2a04:2a01:9::abcd", "", "", "sh", []string{"-c", "printf '%s' \"$ALL_PROXY\""}); err != nil {
+		if err := runWithEgress("2a04:2a01:9::abcd", "", "", "sh", []string{"-c", "printf '%s' \"$ALL_PROXY\""}, false); err != nil {
 			t.Errorf("run over a reused session must succeed, got %v", err)
 		}
 	})
@@ -342,6 +344,7 @@ func TestRun_TierMismatchStillReusesWithOneNote(t *testing.T) {
 	}
 	stubSessionsDir(t)
 	stubProbe(t, true, nil)
+	stubObserved(t, "2a04:2a01:9::abcd") // the reused session proves its identity
 	writeSessionRecord(ownedSession("2a04:2a01:9::abcd", "socks5h://127.0.0.1:41080", "wireguard"))
 
 	var seen []recordedCall
@@ -353,7 +356,7 @@ func TestRun_TierMismatchStillReusesWithOneNote(t *testing.T) {
 	defer func() { g = savedG }()
 
 	_, stderr := captureStd(t, func() {
-		if err := runWithEgress("2a04:2a01:9::abcd", "", "socks5", "sh", []string{"-c", "true"}); err != nil {
+		if err := runWithEgress("2a04:2a01:9::abcd", "", "socks5", "sh", []string{"-c", "true"}, false); err != nil {
 			t.Errorf("tier-mismatch reuse must still succeed, got %v", err)
 		}
 	})

@@ -6,6 +6,7 @@ package secfile
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"github.com/whisper-sec/whisper-cli/internal/testenv"
@@ -100,6 +101,11 @@ func TestReownTargetHandsOverInExactlyOneSituation(t *testing.T) {
 	outside := filepath.Join(t.TempDir(), "bound")
 
 	const realUID, realGID = 501, 20
+	// The invoker's entry in the user database names this HOME, as it does under a
+	// sudo that keeps HOME. The reset-HOME case has its own row below.
+	saved := invokerHomeFn
+	invokerHomeFn = func(uid int) (string, bool) { return home, uid == realUID }
+	t.Cleanup(func() { invokerHomeFn = saved })
 	sudoAs := func(t *testing.T, uid, gid string) {
 		t.Helper()
 		t.Setenv("SUDO_UID", uid)
@@ -178,4 +184,22 @@ func TestReownTargetHandsOverInExactlyOneSituation(t *testing.T) {
 			t.Fatalf("chown target %q is not the resolved absolute path of the input", abs)
 		}
 	})
+}
+
+// Ubuntu's sudo resets HOME to /root. The handover keyed on "inside HOME", so under
+// that sudo every file root wrote in its OWN home, its key and its sensor's marker, was
+// handed to the invoking user. Inside HOME is only the invoker's home when HOME is theirs.
+func TestReownTargetHandsNothingOverWhenSudoResetHOMEToRoots(t *testing.T) {
+	uid, gid := os.Getuid(), os.Getgid()
+	if uid == 0 {
+		t.Skip("running as root: there is no invoking user to stand in for")
+	}
+	home := testenv.HermeticHome(t) // stands in for /root: not the invoker's own home
+	// The real user database, on purpose: the reset-HOME case is exactly a HOME that
+	// differs from the invoker's entry there.
+	t.Setenv("SUDO_UID", strconv.Itoa(uid))
+	t.Setenv("SUDO_GID", strconv.Itoa(gid))
+	if _, _, _, ok := reownTarget(filepath.Join(home, ".config", "whisper", "key"), "linux", 0); ok {
+		t.Fatal("a file root wrote in a HOME that is not the invoker's own must stay root's")
+	}
 }

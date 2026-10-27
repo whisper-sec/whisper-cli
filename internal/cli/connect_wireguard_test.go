@@ -92,10 +92,18 @@ func TestConnect_WireGuardTier_SendsPublicKeyNotPrivate(t *testing.T) {
 	defer idkey.SetIdentityDirForTest(idDir)()
 
 	af := filepath.Join(t.TempDir(), "agent")
+	// This host's saved agent. With none, connect no longer lets the control plane pick one of the
+	// account's agents; these tests are about the tiers, not the selection (agent_pick_test.go).
+	if err := client.SaveAgent(af, "2a04:2a01:9::abcd"); err != nil {
+		t.Fatal(err)
+	}
 	stdout, stderr := captureStd(t, func() {
 		cmd := newConnectCmd()
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
-		cmd.SetArgs([]string{"--tier", "wireguard", "--agent-file", af})
+		// --adopt-key: a connect to a saved /128 sends this host's identity key only when asked to
+		// publish it (prepareIdentityKey). The key used to ride a connect with NO selector, which is
+		// gone, so the property under test (public halves only) is pinned on this path.
+		cmd.SetArgs([]string{"--tier", "wireguard", "--adopt-key", "--agent-file", af})
 		if err := cmd.Execute(); err != nil {
 			t.Fatalf("connect --tier wireguard errored: %v", err)
 		}

@@ -141,6 +141,10 @@ type panelConnection struct {
 	// document never sees it, and the same sentence is also the first line of `errors`, so a
 	// panel that renders only the banner still says why.
 	Refusal *connectRefusal `json:"refusal,omitempty"`
+	// IdentityFix is the last confirmed identity fix, present while it still names the identity
+	// this device is bound to and the session has not yet verified, so a reconnect in progress
+	// is shown as one even after the panel was closed and opened again.
+	IdentityFix *enrollFixResult `json:"identity_fix,omitempty"`
 }
 
 // panelTunnel is what the process HOLDING the tunnel published about it, which is the only
@@ -427,6 +431,9 @@ func buildPanelView(cx context.Context, agentFile string, probe bool) panelView 
 	view.Errors = errs.drain()
 	if r, ok := panelConnectRefusal(sess); ok {
 		applyConnectRefusal(&view, r)
+	}
+	if view.Connection.State != panelConnected {
+		view.Connection.IdentityFix = panelIdentityFix()
 	}
 	return view
 }
@@ -1198,4 +1205,16 @@ func trimToUptime(snap observed.Snapshot, updated time.Time) map[string][]uint64
 		out[k] = v[len(v)-covered:]
 	}
 	return out
+}
+
+// panelIdentityFix is the last confirmed identity fix as the panel shows it. The file keeps the
+// raw values; what the panel shows has hidden characters removed and marked, like every other
+// name from the account.
+func panelIdentityFix() *enrollFixResult {
+	fr, ok := readEnrollResult()
+	if !ok {
+		return nil
+	}
+	fr.Name, fr.Fqdn, fr.Agent = displayText(fr.Name), displayText(fr.Fqdn), displayText(fr.Agent)
+	return &fr
 }

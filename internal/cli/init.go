@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -230,7 +231,7 @@ func newInitNotebookCmd() *cobra.Command {
 			return runInitNotebook(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force})
 		},
 	}
-	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
+	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace) - either reaches the tool through the proxy, which carries TCP only")
 	cmd.Flags().StringVar(&agent, "agent", "", "use this existing agent (id or /128)")
 	cmd.Flags().StringVar(&name, "name", "", "create a new agent with this human name")
 	cmd.Flags().StringVar(&dir, "dir", "", "the project directory (default: the current directory)")
@@ -309,12 +310,15 @@ func newInitClaudeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "claude",
 		Short: "Zero-config: make Claude Code in this dir egress from a Whisper /128",
-		Long: "Set up the current project so Claude Code (and every subagent it spawns) routes all\n" +
-			"its traffic through a Whisper agent over SOCKS5 (default) or WireGuard.\n\n" +
-			"After this, just run `claude` in the dir - its API traffic, Bash, and subagents all\n" +
-			"leave from the project's /128. It writes .whisper/config + a managed env/hook block in\n" +
-			".claude/settings.local.json (never clobbering your other settings), gitignores them,\n" +
-			"and starts the connection now.\n\n" +
+		Long: "Set up the current project so Claude Code (and every subagent it spawns) sends its\n" +
+			"proxied (TCP) traffic through a Whisper agent over SOCKS5 (default) or WireGuard.\n\n" +
+			"After this, just run `claude` in the dir - its API traffic, and the Bash commands and\n" +
+			"subagents that honour *_PROXY, leave from the project's /128. UDP and programs that\n" +
+			"dial directly leave from this host's own address; on Linux, sudo whisper claude\n" +
+			"--enforce sends everything from the /128.\n\n" +
+			"It writes .whisper/config + a managed env/hook block in .claude/settings.local.json\n" +
+			"(never clobbering your other settings), gitignores them, and starts the connection\n" +
+			"now.\n\n" +
 			"Pick the identity: --agent <id|/128> uses an existing one; --name <new> creates one;\n" +
 			"else the project's persisted agent, else the server's most-recent default.\n\n" +
 			"Idempotent - re-run any time to update. Use --force to overwrite an existing setup.",
@@ -330,7 +334,7 @@ func newInitClaudeCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
+	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace) - either reaches the tool through the proxy, which carries TCP only")
 	cmd.Flags().StringVar(&agent, "agent", "", "use this existing agent (id or /128)")
 	cmd.Flags().StringVar(&name, "name", "", "create a new agent with this human name")
 	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the project agent file (default <project>/.whisper/agent)")
@@ -472,8 +476,10 @@ func newInitEnvToolCmd(prof envToolProfile) *cobra.Command {
 		Use:     prof.name,
 		Aliases: prof.aliases,
 		Short:   prof.short,
-		Long: "Set up the current project so " + prof.covers + " routes its traffic through a\n" +
-			"Whisper agent over SOCKS5 (default) or WireGuard.\n\n" +
+		Long: "Set up the current project so " + prof.covers + " sends its proxied (TCP) traffic\n" +
+			"through a Whisper agent over SOCKS5 (default) or WireGuard. UDP and programs that dial\n" +
+			"directly leave from this host's own address; on Linux, sudo whisper run --enforce sends\n" +
+			"everything from the /128.\n\n" +
 			"It writes .whisper/config + a wholly-owned proxy env file .whisper/proxy.env (it NEVER\n" +
 			"touches your ./.env), gitignores .whisper/, and starts the connection now.\n\n" +
 			"Activation (the summary tailors this to whether direnv is installed):\n" +
@@ -488,7 +494,7 @@ func newInitEnvToolCmd(prof envToolProfile) *cobra.Command {
 			return runInitEnvTool(initOptions{tier: tier, agent: agent, name: name, dir: dir, force: force}, prof)
 		},
 	}
-	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace)")
+	cmd.Flags().StringVar(&tier, "tier", "socks5", "egress tier: socks5 (default) | wireguard (routed /128, userspace) - either reaches the tool through the proxy, which carries TCP only")
 	cmd.Flags().StringVar(&agent, "agent", "", "use this existing agent (id or /128)")
 	cmd.Flags().StringVar(&name, "name", "", "create a new agent with this human name")
 	cmd.Flags().StringVar(&dir, "dir", "", "the project directory (default: the current directory)")
@@ -683,9 +689,21 @@ func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, pr
 		}
 		return addr, "", nil
 	}
-	// 2. --name: create a NEW named agent (mandatory-name rule; never an unnamed /128).
+	// 2. --name: the agent of that name, else a NEW agent under it (mandatory-name rule; never an
+	// unnamed /128). The same meaning --name has on run and connect (decideFlagSelection). On an
+	// account that already has agents the new one is minted (mintAgent): op:identity there hands
+	// back an existing agent under the new name.
 	if v := strings.TrimSpace(opts.name); v != "" {
-		created, cerr := createAgent(c, v)
+		cxl, cancell := ctx()
+		choices, lerr := listAgents(c, cxl)
+		cancell()
+		if lerr != nil {
+			return "", "", lerr
+		}
+		if d, _ := decideFlagSelection(false, v, choices); d.kind == selExisting && d.choice.addr != "" {
+			return d.choice.addr, d.choice.domain, nil
+		}
+		created, cerr := mintAgent(c, v, "", len(choices) != 0)
 		if cerr != nil {
 			return "", "", cerr
 		}
@@ -702,8 +720,19 @@ func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, pr
 	if existing != nil && strings.TrimSpace(existing.Agent) != "" {
 		return existing.Agent, existing.FQDN, nil
 	}
-	// 5. Nothing pinned: reuse the caller's MOST-RECENT existing agent, or create a first one.
-	// A fresh account with no agents needs a name - refuse rather than mint an unnamed /128.
+	// 5. Nothing pinned for the project: this host's saved agent, the one `whisper run` would use
+	// here anyway. Otherwise refuse, naming the fix: the project used to take the account's first
+	// listed agent, which is whichever agent the server listed first, and every `whisper run` in
+	// the project then egressed as it.
+	if saved := client.ReadAgentFile(""); saved != "" {
+		sel, _, serr := resolveSavedAgent(c, saved, "")
+		if serr != nil {
+			return "", "", serr
+		}
+		if sel != "" {
+			return sel, "", nil
+		}
+	}
 	cx, cancel := ctx()
 	defer cancel()
 	choices, lerr := listAgents(c, cx)
@@ -713,15 +742,7 @@ func resolveProjectAgent(c *client.Client, opts initOptions, p projcfg.Paths, pr
 	if len(choices) == 0 {
 		return "", "", usageErr("no agents yet - re-run with --name <name> to create this project's agent")
 	}
-	// Reuse the first (server order ≈ most-recent); deterministic and zero-config.
-	pick := choices[0]
-	if pick.addr != "" {
-		return pick.addr, pick.domain, nil
-	}
-	if pick.name != "" {
-		return pick.name, pick.domain, nil
-	}
-	return "", "", &client.ProblemError{Status: 502, Detail: "couldn't resolve an agent for this project"}
+	return "", "", nothingNamedRefusal("whisper init", choices, true)
 }
 
 // relTo returns target relative to base (forward-slashed for cross-OS stability), falling back
@@ -804,7 +825,10 @@ func printInitSummary(p projcfg.Paths, cfg projcfg.Config, sres projcfg.Settings
 	}
 	printConnectionStatus(w, alreadyLive, daemonNote, "the SessionStart hook will bring it up")
 
-	fmt.Fprintf(w, "\n→ run `claude` in this dir and all its traffic (and its subagents) leaves from %s\n", cfg.Agent)
+	// The settings.local.json wiring is the same TCP-only proxy `whisper run` uses, so the
+	// summary says what leaves from the /128 and what does not, rather than "all its traffic".
+	fmt.Fprintf(w, "\n→ run `claude` in this dir and its proxied (TCP) traffic, subagents included, leaves from %s\n", cfg.Agent)
+	fmt.Fprintf(w, "  %s\n", runCoverageNote(runtime.GOOS, runEnforceForm("claude", true)))
 }
 
 // printInitEnvToolSummary prints the result of an env-proxy `init <tool>`: identity/port/files,

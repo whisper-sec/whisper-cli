@@ -5,6 +5,7 @@ package secfile
 
 import (
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -20,8 +21,8 @@ import (
 //	sudo whisper enroll --name <the name you already enrolled>
 //	sudo whisper service restart --sensor
 //
-// sudo preserves HOME, so `enroll` writes ~/.config/whisper/bound into the
-// INVOKING USER's directory - owned by root, at the 0600 this package exists to
+// A sudo that preserves HOME (macOS, and a sudoers with env_keep HOME) has
+// `enroll` write ~/.config/whisper/bound into the INVOKING USER's directory - owned by root, at the 0600 this package exists to
 // guarantee. The sensor (root) reads it and reports perfectly. The user's own
 // `whisper status` cannot open it, reports no_bound_identity, and prints the
 // very command that just produced this state. Running it again writes the same
@@ -33,9 +34,13 @@ import (
 //
 //   - root only, and only when SUDO_UID/SUDO_GID name a non-root user. Without
 //     sudo there is no second party to hand anything to.
-//   - only INSIDE that user's home. A genuine root-owned path (/etc/whisper,
-//     /var/lib/whisper-sensor, /var/root) keeps root's ownership; handing those
-//     to a user would be a privilege bug, not a fix for one.
+//   - only INSIDE that user's home, and only when HOME IS that user's home. A
+//     genuine root-owned path (/etc/whisper, /var/lib/whisper-sensor, /var/root)
+//     keeps root's ownership; handing those to a user would be a privilege bug,
+//     not a fix for one. Ubuntu's sudo resets HOME to /root, and "inside HOME"
+//     alone then handed root's own key and its sensor's marker to the invoking
+//     user, so HOME is checked against the invoker's entry in the user
+//     database before anything inside it changes hands.
 //   - the mode is untouched. 0600 stays 0600; only the owner moves, from a user
 //     who cannot read their own file to the one who is supposed to.
 //
@@ -71,6 +76,9 @@ func reownTarget(path, goos string, euid int) (abs string, uid, gid int, ok bool
 	if !ok {
 		return "", 0, 0, false
 	}
+	if !homeIsInvokers(uid) {
+		return "", 0, 0, false
+	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", 0, 0, false
@@ -90,6 +98,30 @@ func sudoInvoker() (int, int, bool) {
 		return 0, 0, false
 	}
 	return uid, gid, true
+}
+
+// invokerHomeFn names uid's home from the user database. A seam, because the
+// accounts a test can name are the real ones on whatever host runs it.
+var invokerHomeFn = func(uid int) (string, bool) {
+	u, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil || strings.TrimSpace(u.HomeDir) == "" {
+		return "", false
+	}
+	return u.HomeDir, true
+}
+
+// homeIsInvokers reports whether this process's HOME is the invoking user's own
+// home, rather than root's (a sudo that resets HOME) or anyone else's.
+func homeIsInvokers(uid int) bool {
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return false
+	}
+	want, ok := invokerHomeFn(uid)
+	if !ok {
+		return false
+	}
+	return filepath.Clean(home) == filepath.Clean(want)
 }
 
 // underInvokerHome reports whether abs sits inside the HOME sudo preserved.

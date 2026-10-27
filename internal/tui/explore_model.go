@@ -4,6 +4,7 @@
 package tui
 
 import (
+	"encoding/json"
 	"sort"
 	"strconv"
 	"strings"
@@ -554,6 +555,8 @@ func anyToStr(v any) string {
 			return strconv.FormatInt(int64(t), 10)
 		}
 		return strconv.FormatFloat(t, 'g', -1, 64)
+	case json.Number:
+		return t.String() // a graph row's number, verbatim
 	default:
 		return ""
 	}

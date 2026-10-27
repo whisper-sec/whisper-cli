@@ -76,6 +76,12 @@ func SetIdentityDirForTest(dir string) func() {
 	return func() { identityDir = saved }
 }
 
+// Dir is the directory this process reads and writes identity keys in, so an error about a key can
+// say where the key came from.
+func Dir() string {
+	return identityDir()
+}
+
 func defaultIdentityDir() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
@@ -96,6 +102,13 @@ func PathFor(handle string) string {
 	h = strings.ReplaceAll(h, ":", "_")
 	h = strings.ReplaceAll(h, "/", "_")
 	return filepath.Join(identityDir(), h+".pem")
+}
+
+// LoadFile reads a persisted identity key from an explicit path, for a caller that has decided
+// itself which store to read (the enforced run under sudo reads the invoking user's, read-only).
+// It never mints and never writes.
+func LoadFile(path string) (*Keypair, error) {
+	return load(path)
 }
 
 // LoadOrGenerate loads the persisted identity key for handle, or mints + persists a fresh one if none
@@ -121,6 +134,59 @@ func LoadOrGenerate(handle string) (*Keypair, error) {
 // because a freshly-minted key would present an unpinned - and thus unverifiable - leaf.
 func Load(handle string) (*Keypair, error) {
 	return load(PathFor(handle))
+}
+
+// ErrLinkedElsewhere is Link's answer when the handle already holds a DIFFERENT key. Nothing is
+// replaced: the key already there may be the one an identity's records publish.
+var ErrLinkedElsewhere = errors.New("idkey: a different key is already stored for this handle")
+
+// Link stores kp under handle too, so every form that reaches one agent (its /128, a name, or
+// the connect-first default) reaches the SAME key. It creates the file exclusively and
+// never overwrites: an existing file holding the same key is success, one holding another key is
+// ErrLinkedElsewhere and is left exactly as it was.
+func Link(handle string, kp *Keypair) error {
+	if kp == nil || kp.Private == nil {
+		return errors.New("idkey: no key to link")
+	}
+	path := PathFor(handle)
+	if cur, err := load(path); err == nil {
+		if cur.MarshalSPKIBase64() == kp.MarshalSPKIBase64() {
+			return nil
+		}
+		return ErrLinkedElsewhere
+	}
+	if err := secfile.MkdirAllFor(path); err != nil {
+		return err
+	}
+	der, err := x509.MarshalECPrivateKey(kp.Private)
+	if err != nil {
+		return err
+	}
+	// Written whole to a private temporary first and then hard-linked into place: the link never
+	// replaces an existing file, and no reader ever sees the handle's file half written.
+	tmp := fmt.Sprintf("%s.link-%d-%d", path, os.Getpid(), time.Now().UnixNano())
+	f, err := secfile.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_EXCL)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(tmp)
+	_, werr := f.Write(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}))
+	if cerr := f.Close(); werr == nil {
+		werr = cerr
+	}
+	if werr != nil {
+		return werr
+	}
+	if err := os.Link(tmp, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			if cur, lerr := load(path); lerr == nil && cur.MarshalSPKIBase64() == kp.MarshalSPKIBase64() {
+				return nil
+			}
+			return ErrLinkedElsewhere
+		}
+		return err
+	}
+	return nil
 }
 
 // load reads + parses a persisted EC PRIVATE KEY PEM file.

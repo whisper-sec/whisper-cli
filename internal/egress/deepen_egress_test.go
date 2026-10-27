@@ -189,6 +189,50 @@ func deepenegress_muteTLSEgress(t *testing.T) string {
 	return ln.Addr().String()
 }
 
+// deepenegress_holdingTLSEgress is a TLS egress that reads the CONNECT and then says nothing while
+// keeping the connection open, the shape of an egress whose own outbound dial is still pending.
+func deepenegress_holdingTLSEgress(t *testing.T) string {
+	t.Helper()
+	return deepenegress_tlsEgress(t, func(c net.Conn) {
+		buf := make([]byte, 1024)
+		_, _ = c.Read(buf)
+		_, _ = c.Read(buf) // blocks until the client gives up and closes
+	})
+}
+
+// deepenegress_garbageTLSEgress answers the CONNECT with bytes that are not an HTTP status line.
+func deepenegress_garbageTLSEgress(t *testing.T) string {
+	t.Helper()
+	return deepenegress_tlsEgress(t, func(c net.Conn) {
+		buf := make([]byte, 1024)
+		_, _ = c.Read(buf)
+		_, _ = c.Write([]byte("\x05\x00 not http at all\r\n\r\n"))
+	})
+}
+
+func deepenegress_tlsEgress(t *testing.T, serve func(net.Conn)) string {
+	t.Helper()
+	cert := selfSigned(t)
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
+	if err != nil {
+		t.Fatalf("egress listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer c.Close()
+				serve(c)
+			}()
+		}
+	}()
+	return ln.Addr().String()
+}
+
 // deepenegress_earlyByteEgress is a TLS CONNECT egress that flushes the 200
 // reply AND some early tunnel bytes in ONE write (one TLS record), then echoes
 // everything that follows. A correct client preserves those early bytes
@@ -603,8 +647,22 @@ func TestDeepenEgress_UpstreamErrorMapping(t *testing.T) {
 		_, err := u.Dial(context.Background(), "example.com:443")
 		assertClean(t, err, "TLS handshake to the Whisper egress failed")
 	})
-	t.Run("egress never answers the CONNECT", func(t *testing.T) {
+	t.Run("egress closes before answering the CONNECT", func(t *testing.T) {
 		u := newUpstream(t, deepenegress_muteTLSEgress(t))
+		_, err := u.Dial(context.Background(), "example.com:443")
+		assertClean(t, err, "the Whisper egress closed the connection before answering the CONNECT")
+	})
+	// The egress accepted the CONNECT and its own outbound dial never completed, so it said
+	// nothing until our deadline. That is not an unreadable reply, and saying so sent people
+	// debugging a parser.
+	t.Run("egress holds the CONNECT past the deadline", func(t *testing.T) {
+		u := newUpstream(t, deepenegress_holdingTLSEgress(t))
+		u.dialTO = 300 * time.Millisecond
+		_, err := u.Dial(context.Background(), "example.com:443")
+		assertClean(t, err, "the Whisper egress did not answer the CONNECT for example.com:443 within 300ms")
+	})
+	t.Run("egress answers with something that is not HTTP", func(t *testing.T) {
+		u := newUpstream(t, deepenegress_garbageTLSEgress(t))
 		_, err := u.Dial(context.Background(), "example.com:443")
 		assertClean(t, err, "egress CONNECT reply unreadable")
 	})

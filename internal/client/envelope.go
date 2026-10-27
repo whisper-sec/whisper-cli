@@ -55,6 +55,34 @@ type Envelope struct {
 	Raw json.RawMessage
 }
 
+// ErrNoListing is a reply that parsed and claimed success but carried no listing.
+var ErrNoListing = errors.New("the control plane answered without a listing")
+
+// Listing returns the listing an op:list reply carries, and an error when the reply is not one:
+// a failed envelope, a status that is not a success, or a result that names no columns. The
+// decoder reads an empty or shapeless reply as an empty result, so a reader that decides
+// anything from "the account has no agents" asks here instead. A real listing always names its
+// columns, empty or not.
+func (e *Envelope) Listing() (*Result, error) {
+	if e == nil {
+		return nil, &ProblemError{Status: 502, Detail: "empty control-plane reply"}
+	}
+	if !e.Ok {
+		if e.Err != nil {
+			return nil, e.Err
+		}
+		return nil, &ProblemError{Status: e.Status, Detail: "control plane reported failure"}
+	}
+	if e.Status < 200 || e.Status > 299 {
+		return nil, &ProblemError{Status: e.Status,
+			Detail: fmt.Sprintf("the control plane answered with status %d", e.Status)}
+	}
+	if e.Result == nil || len(e.Result.Columns) == 0 {
+		return nil, ErrNoListing
+	}
+	return e.Result, nil
+}
+
 // rawEnvelope is the logical/dev-guide wire shape:
 //
 //	{ "ok": true, "status": 200, "result": {"columns":[...],"rows":[...]}, "error": null }

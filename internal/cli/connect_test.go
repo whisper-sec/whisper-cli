@@ -197,6 +197,9 @@ func TestConnect_BearerNeverInOutput(t *testing.T) {
 			defer func() { g = savedG }()
 
 			af := filepath.Join(t.TempDir(), "agent")
+			if err := client.SaveAgent(af, "2a04:2a01:9::abcd"); err != nil { // this host's saved agent
+				t.Fatal(err)
+			}
 			args := []string{"--agent-file", af}
 			if mode == "verbose" {
 				args = append(args, "--verbose")
@@ -350,6 +353,9 @@ func TestConnect_FullCommand_NestedEnvelope(t *testing.T) {
 	defer func() { g = savedG }()
 
 	af := filepath.Join(t.TempDir(), "agent")
+	if err := client.SaveAgent(af, "2a04:2a01:beef::1"); err != nil { // this host's saved agent
+		t.Fatal(err)
+	}
 	cmd := newConnectCmd()
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	cmd.SetArgs([]string{"--agent-file", af})

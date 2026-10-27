@@ -299,11 +299,13 @@ func TestDeepenCLI_GuidedOne_TTYDeclineCreatesANamedAgent(t *testing.T) {
 	if err := guidedOne(guidedOptions{tty: true, quiet: true}, gio, only); err != nil {
 		t.Fatalf("guidedOne decline: %v", err)
 	}
-	body, ok := bodyForOp(seen, "identity")
-	if !ok || !strings.Contains(body, "fresh-name") {
+	// The account has an agent, so the new one is minted with op:register. op:identity
+	// answers this key's own /128 and on such an account hands back the existing agent.
+	body, ok := bodyForOp(seen, "register")
+	if !ok || !strings.Contains(body, "fresh-name") || containsOp(opsSeen(seen), "identity") {
 		t.Fatalf("declining must create the NAMED agent (never unnamed), body=%q ops=%v", body, opsSeen(seen))
 	}
-	if !strings.Contains(out.String(), "2a04:2a01:9::abcd") {
+	if !strings.Contains(out.String(), "2a04:2a01:9::beef") {
 		t.Fatalf("the created agent's /128 must be connected: %q", out.String())
 	}
 }

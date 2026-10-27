@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 )
@@ -53,6 +54,24 @@ type sessionRecord struct {
 	// on a record written before this field, and both read as "we do not know, say the guess".
 	NAT64Prefix string `json:"nat64_prefix,omitempty"`
 	NAT64Source string `json:"nat64_source,omitempty"`
+	// TunnelState / TunnelSince are what a Tier 1 holder last saw its tunnel doing (up,
+	// handshaking, down) and since when. The local proxy answers whether the tunnel carries
+	// anything or not, so without these a dead tunnel read as connected. Written by the holder
+	// alone, on a change (see publishTunnelState); absent on an egress-tier record and on one
+	// written before these fields, which keep the answer they always had.
+	TunnelState string    `json:"tunnel_state,omitempty"`
+	TunnelSince time.Time `json:"tunnel_since,omitempty"`
+	// TunnelReason is the Whisper side's own words, made safe to publish, for a "refused" state.
+	TunnelReason string `json:"tunnel_reason,omitempty"`
+	// NoProxy marks the record of a holder that is alive but serves nothing right now: its
+	// tunnel is gone and the next fresh session is due at ReconnectingAt, or it was refused.
+	// Such a record is kept while its pid lives, so status reports the outage instead of
+	// advising a second connect that would fight this holder for the address.
+	NoProxy        bool      `json:"no_proxy,omitempty"`
+	ReconnectingAt time.Time `json:"reconnecting_at,omitempty"`
+	// Renews is set by a holder that renews its session when the tunnel asks. Another holder
+	// of the same address waits for one of these, never for a session that cannot renew.
+	Renews bool `json:"renews,omitempty"`
 
 	// path is the file this record was READ from. Not serialised: it is how a sweep
 	// removes the record it is actually looking at instead of recomputing a name, which is what
@@ -180,7 +199,8 @@ func writeSessionRecord(sess *egressSession) {
 			continue
 		}
 		path := filepath.Join(dst.dir, name)
-		if os.WriteFile(path, b, dst.mode) == nil {
+		// Atomic, as every later rewrite of it is: a reader sees a whole record or none.
+		if writeFileAtomic(path, b, dst.mode) == nil {
 			// Remember exactly what we wrote, so teardown removes THAT file and nothing else.
 			sess.recordPath = path
 			return
@@ -239,6 +259,26 @@ func removeSessionRecordAt(path string) {
 
 // readSessionRecords loads every parseable record in the registry (unreadable/garbled files are
 // skipped - liberal in what we accept; the probe is the real gate anyway).
+// heldWithoutProxy reports whether a record belongs to a holder that is alive and between
+// sessions: its proxy does not answer, and that is not a crash. A sweep must leave it be.
+//
+// A live pid is not enough on its own: session directories outlive a reboot, a pid is reused,
+// and on Windows any existing pid reads as alive. The holder refreshes ReconnectingAt on every
+// attempt, so a record whose next try is long past is a dead holder's, whatever its pid says.
+func heldWithoutProxy(rec sessionRecord) bool {
+	if !rec.NoProxy || rec.ReconnectingAt.IsZero() {
+		return false
+	}
+	if time.Now().After(rec.ReconnectingAt.Add(holderStaleAfter)) {
+		return false
+	}
+	return holderAlive(rec.PID)
+}
+
+// holderStaleAfter is how far past its own next try a between-sessions record may be and still
+// be believed: one full renewal (both deadlines) and a little more for the tick.
+const holderStaleAfter = renewRegisterTimeout + renewBringUpTimeout + 4*superviseEvery
+
 func readSessionRecords() []sessionRecord {
 	// BOTH registries, because a host can hold both kinds of session at once: the user's own
 	// `whisper connect` in one terminal, and the installed service holding the machine's
@@ -259,8 +299,9 @@ func readSessionRecords() []sessionRecord {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
 				continue
 			}
-			b, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
-			if rerr != nil {
+			// Never a record planted by a user who is neither root, the caller nor the directory's owner
+			b, trusted := readTrustedRecord(dir, filepath.Join(dir, e.Name()))
+			if !trusted {
 				continue
 			}
 			var rec sessionRecord
@@ -284,23 +325,23 @@ func readSessionRecords() []sessionRecord {
 // The returned session has local==nil, so the caller's `defer sess.Stop()` is a no-op and the
 // daemon's tunnel/peer is untouched, which is the whole point of reusing it.
 func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressSession, bool) {
-	recs := readSessionRecords()
+	// A holder between sessions serves nothing, so it is never a reuse target; its record is
+	// left alone, because its holder is alive and will serve that port again.
+	var recs []sessionRecord
+	for _, rec := range readSessionRecords() {
+		if !rec.NoProxy && rec.TunnelState != tunnelRefused {
+			recs = append(recs, rec)
+		}
+	}
 	if len(recs) == 0 {
 		return nil, false
 	}
 	// Resolve the target /128 the caller means, cheapest first: an explicit /128 selector; else the
 	// persisted default agent; a bare name/id resolves through the SAME client-side resolver connect
 	// uses (one op:list - only paid when a name selector meets a non-empty registry).
-	target := strings.TrimSpace(sel)
-	if target == "" {
-		target = client.ReadAgentFile("")
-	}
-	if target != "" && !looksLikeV6(target) {
-		resolved, err := resolveConnectAgent(c, cx, target)
-		if err != nil || !looksLikeV6(resolved) {
-			return nil, false // can't prove the selector maps to a held /128 - fresh connect
-		}
-		target = resolved
+	target, ok := reuseTarget(cx, c, sel)
+	if !ok {
+		return nil, false // can't prove the selector maps to a held /128 - fresh connect
 	}
 	var match *sessionRecord
 	if target != "" {
@@ -345,19 +386,169 @@ func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressS
 	}, true
 }
 
+// reuseTarget resolves the /128 a reuse must match, cheapest first: an explicit /128 selector; else
+// the persisted default agent; a bare name/id through the SAME client-side resolver connect uses (one
+// op:list). "" with ok means no selector anywhere; !ok means a selector that maps to no /128.
+func reuseTarget(cx context.Context, c *client.Client, sel string) (string, bool) {
+	target := strings.TrimSpace(sel)
+	if target == "" {
+		target = client.ReadAgentFile("")
+	}
+	if target != "" && !looksLikeV6(target) {
+		resolved, err := resolveConnectAgent(c, cx, target)
+		if err != nil || !looksLikeV6(resolved) {
+			return "", false
+		}
+		target = resolved
+	}
+	return target, true
+}
+
+// observeEgress and directEgress are the two network reads the reuse proof makes: the source address a
+// request through a local endpoint arrives from, and this host's own. Package vars so tests stub them.
+var (
+	observeEgress = func(ctx context.Context, c *client.Client, endpoint string) (string, error) {
+		return c.ObservedEgressIP(ctx, endpoint)
+	}
+	directEgress = func(ctx context.Context, c *client.Client) (string, error) {
+		return c.DirectEgressIP(ctx)
+	}
+)
+
+// unprovenSessionError stops a run whose target /128 has a live local session that did not answer the
+// identity check. Opening a fresh session instead would replace that session's server-side peer and
+// end its tunnel, so the person is told which session it is and decides.
+type unprovenSessionError struct {
+	addr string
+	port int
+	pid  int
+}
+
+func (e *unprovenSessionError) Error() string {
+	return fmt.Sprintf("a whisper session for %s is listening on 127.0.0.1:%d (pid %d) but did not prove it "+
+		"egresses as that agent; stop that session or try again (a new one would replace its tunnel)",
+		e.addr, e.port, e.pid)
+}
+
+// findProvenSession is `whisper run`'s reuse gate. findLiveSession trusts a record once a
+// SOCKS5 handshake on its port succeeds, which proves that something speaks SOCKS5 there and nothing
+// about whose /128 it egresses as: a stale record whose port another agent's forwarder now holds
+// passed it, and the child left as that other agent. Here every candidate is PROVED, by observing the
+// source a request through it arrives from:
+//   - observed as the target (or, with no selector at all, as the record's own address): reused;
+//   - observed as anything else, another /128 or not through Whisper: the record is stale, swept, and
+//     the next candidate is tried;
+//   - no observation, twice: the run stops with unprovenSessionError rather than replacing a session
+//     that may well be the agent's own.
+//
+// No candidate at all is (nil, nil): a fresh session, exactly as with an empty registry. With
+// requireTarget (an explicit --tier wireguard) and no target /128 anywhere, nothing is reused.
+func findProvenSession(cx context.Context, c *client.Client, sel string, requireTarget bool) (*egressSession, error) {
+	var recs []sessionRecord
+	for _, rec := range readSessionRecords() {
+		if !rec.NoProxy && rec.TunnelState != tunnelRefused {
+			recs = append(recs, rec)
+		}
+	}
+	if len(recs) == 0 {
+		return nil, nil
+	}
+	target, ok := reuseTarget(cx, c, sel)
+	if !ok {
+		return nil, nil
+	}
+	var cands []sessionRecord
+	switch {
+	case target != "":
+		for _, r := range recs {
+			if sameIP(r.Addr, target) {
+				cands = append(cands, r)
+			}
+		}
+	case requireTarget:
+		return nil, nil
+	case len(recs) == 1:
+		cands = recs // no selector and ONE held session: proved against its own address below
+	}
+	var unproven *unprovenSessionError
+	for _, r := range cands {
+		want := r.Addr
+		if target != "" {
+			want = target
+		}
+		if !probeWhisperProxy(r.Port) {
+			removeSessionRecordAt(r.path)
+			continue
+		}
+		// a bounded read per candidate, so a slow echo on one cannot leave the next unproven
+		cc, cancel := ctx()
+		observed, err := observeEgress(cc, c, r.Endpoint)
+		if err != nil {
+			observed, err = observeEgress(cc, c, r.Endpoint)
+		}
+		direct, haveDirect := "", false
+		if err == nil && !inWhisperRange(observed) {
+			if d, derr := directEgress(cc, c); derr == nil {
+				direct, haveDirect = d, true
+			}
+		}
+		cancel()
+		if err != nil {
+			// No observation (the echo itself may be down). A record this host trusts whose holder is still
+			// running is reused with a warning: refusing it would fail every run while the echo is down, and a
+			// fresh session would replace that holder's tunnel. Anything else stops the run.
+			if pidAlive(r.PID) {
+				if !g.quiet {
+					fmt.Fprintf(os.Stderr, "whisper: reusing the live session for %s on 127.0.0.1:%d (pid %d); "+
+						"its identity could not be checked just now (%v)\n", want, r.Port, r.PID, err)
+				}
+				return &egressSession{endpoint: r.Endpoint, addr: want, tier: r.Tier, verified: false, local: nil}, nil
+			}
+			unproven = &unprovenSessionError{addr: want, port: r.Port, pid: r.PID}
+			continue
+		}
+		switch classifyEgress(observed, want, direct, haveDirect).kind {
+		case egressPinned:
+			return &egressSession{endpoint: r.Endpoint, addr: want, tier: r.Tier, verified: true, local: nil}, nil
+		case egressTunnelled:
+			// Through Whisper but not pinnable to a /128: it may be this agent's own session.
+			unproven = &unprovenSessionError{addr: want, port: r.Port, pid: r.PID}
+		default:
+			removeSessionRecordAt(r.path) // egresses as someone else: the record no longer describes that port
+		}
+	}
+	if unproven != nil {
+		return nil, unproven
+	}
+	return nil, nil
+}
+
+// recordOwnerTrusted decides whether a session record file may be believed: written by root (the
+// machine service), by the caller, or by the owner of the directory it sits in (root reading a user's
+// registry through a kept HOME). A record anyone else planted is ignored. Trusting the
+// directory's owner assumes the directory is not the attacker's: the machine registry is root's, a
+// login's registry is that login's.
+func recordOwnerTrusted(fileUID, callerUID, dirUID uint32) bool {
+	return fileUID == 0 || fileUID == callerUID || fileUID == dirUID
+}
+
 // noteTierIfDifferent emits ONE calm stderr note when a one-shot asked for a different --tier than
 // the live session it is reusing. Clobbering a live tunnel to honour a tier flag would be strictly
 // worse than reusing it, so we reuse and say so - silent under --quiet.
 func noteTierIfDifferent(sess *egressSession, requestedTier string) {
 	want := strings.TrimSpace(requestedTier)
-	if want == "" || g.quiet || canonTier(want) == canonTier(sess.tier) {
+	// "auto" (or no flag) states no preference, so reusing any live tier honours it.
+	if isAutoTier(want) || g.quiet || canonTier(want) == canonTier(sess.tier) {
 		return
 	}
 	fmt.Fprintf(os.Stderr, "whisper: reusing your live %s connection for %s (requested --tier %s left untouched)\n",
 		canonTier(sess.tier), sess.addr, want)
 }
 
-// canonTier normalizes a tier token for comparison ("wg" == "wireguard"; blank == the default socks5).
+// canonTier normalizes a tier token for comparison ("wg" == "wireguard"). A blank tier is read as
+// socks5 because that is what a session record without one was written by; it is NOT the default
+// a command negotiates (that is auto, wireguard first). Callers treat auto as "no preference"
+// before they get here (see noteTierIfDifferent).
 func canonTier(t string) string {
 	if isWireGuardTier(t) {
 		return "wireguard"

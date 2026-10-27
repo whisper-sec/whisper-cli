@@ -1,0 +1,5 @@
+DOMAIN        STATE   
+everwatch.io  verified
+example.org   pending 
+--- stderr ---
+2 domain(s)

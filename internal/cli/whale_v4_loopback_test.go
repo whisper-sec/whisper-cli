@@ -118,3 +118,12 @@ func TestWhaleV4MissingAddressRendersAsADash(t *testing.T) {
 		t.Fatalf("note = %q, want the unknown address rendered as a dash", v.Note)
 	}
 }
+
+func TestWhaleV4SaysAnIPv4DestinationCannotAttributeTheAgent(t *testing.T) {
+	for _, tier := range []string{"wireguard", "socks5"} {
+		v := whaleV4Status([]statusSession{{Address: "2a04:2a01:8000::7", Endpoint: "socks5h://127.0.0.1:1080", Port: 1080, Tier: tier}}, nil)
+		if !strings.Contains(v.Note, "cannot attribute the connection to this agent") {
+			t.Fatalf("%s tier: the IPv4 answer must say a v4 destination cannot attribute the agent: %q", tier, v.Note)
+		}
+	}
+}

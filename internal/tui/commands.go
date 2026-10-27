@@ -29,7 +29,8 @@ func tick() tea.Cmd {
 
 // loadFleet runs op:list and maps rows to Agents (newest first). Per the caveat
 // the list may miss connect-created agents; the app unions these with agents seen in
-// the live stream, so a fail-open empty list is fine here (never an error to the user).
+// the live stream. A reply with no listing in it is an error the app shows, never an
+// empty fleet: the account was not read.
 func loadFleet(c *client.Client) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
@@ -38,11 +39,12 @@ func loadFleet(c *client.Client) tea.Cmd {
 		if err != nil {
 			return fleetMsg{err: err}
 		}
-		if !env.Ok {
-			return fleetMsg{err: envErr(env)}
+		res, err := env.Listing()
+		if err != nil {
+			return fleetMsg{err: err}
 		}
 		var agents []model.Agent
-		for _, rec := range env.Result.Records() {
+		for _, rec := range res.Records() {
 			a := model.AgentFromListItem(rec)
 			if a.Key() == "" {
 				continue

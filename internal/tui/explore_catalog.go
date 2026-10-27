@@ -28,9 +28,8 @@ var nodeRefKinds = map[string]bool{
 var procRe = regexp.MustCompile(`CALL\s+([A-Za-z0-9_.]+)`)
 
 var (
-	catalogOnce     sync.Once
-	catalogVerbs    []catalogVerb
-	catalogDocsBase string
+	catalogOnce  sync.Once
+	catalogVerbs []catalogVerb
 )
 
 // loadCatalog projects the shared catalog once into the verb list the picker renders.
@@ -38,7 +37,6 @@ var (
 // verb list (the picker states it plainly), never a panic: the deck must stay usable.
 func loadCatalog() []catalogVerb {
 	catalogOnce.Do(func() {
-		catalogDocsBase = catalog.DocsBase()
 		entries := catalog.All()
 		direct := make([]catalogVerb, 0, len(entries))
 		flows := make([]catalogVerb, 0, len(entries))
@@ -100,9 +98,14 @@ func verbFromEntry(e catalog.Entry) catalogVerb {
 }
 
 // catalogDocURL is the honest console deep-link for a flow (docsBase + docPath).
+// It reads the base from the catalog itself, which loads once and is never empty
+// (it falls back to the published docs root). It used to read a copy loadCatalog
+// filled as a side effect, so a caller that had not built the verb list yet got
+// "" for a pathless verb and a bare path for the rest.
 func catalogDocURL(cv catalogVerb) string {
+	base := catalog.DocsBase()
 	if cv.DocPath == "" {
-		return catalogDocsBase
+		return base
 	}
-	return strings.TrimSuffix(catalogDocsBase, "/") + cv.DocPath
+	return strings.TrimSuffix(base, "/") + cv.DocPath
 }

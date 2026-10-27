@@ -75,7 +75,9 @@ func recordingServer(t *testing.T, agents []agentChoice, seen *[]recordedCall) *
 		case "host":
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["record_id","fqdn","type","value","ttl","status"],"rows":[["rec-1","_x402.created-name","TXT","x402-wallet=0xabc",300,"upserted"]]}}`))
 		case "domain":
-			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["domain",{"label":"example.com","fqdn":"example.com.","state":"pending"}]]}}`))
+			// The real submit shape: [kind, value]. This stub used to answer an agent-item
+			// shape op:domain never sends, which is how renderFleet looked correct here.
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","value"],"rows":[["state","pending"],["name","example.com"],["record","example.com. 3600 IN NS ns1.whisper.online."]]}}`))
 		default: // list - the shape depends on the kind/mode asked for
 			switch body := string(raw); {
 			// The CALLER'S OWN handle, which the plane answers in ONE row. The
@@ -180,9 +182,11 @@ func TestConnect_NameMapsToLabelNotFriendlyName(t *testing.T) {
 	}
 }
 
-// Sibling: with an EXISTING agent, connect must NOT create anything - it binds egress to the
-// fleet (the zero-config reuse path stays intact; the guard only fires for a fresh account).
-func TestConnect_ExistingAgent_NoCreate(t *testing.T) {
+// Sibling: with an EXISTING agent, nothing saved for this host and nothing named, a
+// headless connect neither takes the existing agent nor creates one unnamed. It used to send
+// op:connect with no selector, and the control plane bound one of the account's agents, on the
+// routed tier replacing its peer. It refuses, naming the agent and both fixes.
+func TestConnect_ExistingAgentUnnamed_NeitherTakesNorCreates(t *testing.T) {
 	var seen []recordedCall
 	srv := recordingServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:1::1"}}, &seen)
 	defer srv.Close()
@@ -197,14 +201,19 @@ func TestConnect_ExistingAgent_NoCreate(t *testing.T) {
 	cmd := newConnectCmd()
 	cmd.SilenceUsage, cmd.SilenceErrors = true, true
 	cmd.SetArgs([]string{"--agent-file", af})
-	if err := cmd.Execute(); err != nil {
-		t.Fatalf("connect with an existing agent errored: %v", err)
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatalf("connect with nothing named must refuse, ops=%v", opsSeen(seen))
 	}
-	if containsOp(opsSeen(seen), "identity") {
-		t.Fatalf("connect must NOT create when the caller already has an agent, ops=%v", opsSeen(seen))
+	for _, want := range []string{"solo", "--agent", "--name"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the refusal must name %q: %v", want, err)
+		}
 	}
-	if !containsOp(opsSeen(seen), "connect") {
-		t.Fatalf("connect with an existing agent must fire op:connect, ops=%v", opsSeen(seen))
+	for _, bad := range []string{"identity", "register", "connect"} {
+		if containsOp(opsSeen(seen), bad) {
+			t.Fatalf("op:%s ran for an agent nobody named, ops=%v", bad, opsSeen(seen))
+		}
 	}
 }
 

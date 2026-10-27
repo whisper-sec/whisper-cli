@@ -7,8 +7,12 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
+
+	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/enforce"
 )
 
 // whisperPrefix is the Whisper agent address space (2a04:2a01::/32, announced by
@@ -34,21 +38,34 @@ func newIPCmd() *cobra.Command {
 			"remediation line tells you what to run). `--json` emits {ip,verified,agent}.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if addr := strings.TrimSpace(os.Getenv(enforcedAddrEnv)); addr != "" && enforce.InsideEnforced() {
+				return enforcedIP(addr)
+			}
 			c, err := resolveClient(true, false)
 			if err != nil {
 				return err
 			}
-			// The shared resolver: --agent <name> works here exactly like it does on
-			// connect (a /128 or "" passes through free). A stale
-			// persisted-FILE selector is refused with one clear error naming the
-			// account's agents, never swapped for another device's identity.
-			rawSel, selFromFile := resolveAgentSelectorSource(agent, agentFile)
-			cxSel, cancelSel := ctx()
-			sel, rerr := resolveAgentArg(c, cxSel, rawSel, selFromFile, agentFile)
-			cancelSel()
+			// The shared selection rule (agent_pick.go): --agent, then this host's saved
+			// agent (a stale one is refused, naming the account's agents), then a `whisper
+			// connect` running here. `ip` verifies and never creates, so with none of those it
+			// refuses, naming the fix. It used to send op:connect with no selector and verify
+			// whichever existing agent the control plane picked.
+			opts := agentPickOpts{agent: agent, agentFile: agentFile, noCreate: true, nameless: true, command: "whisper ip"}
+			if strings.TrimSpace(agentFile) == "" {
+				opts.hostSession = func() (*egressSession, error) {
+					cx, cancel := ctx()
+					defer cancel()
+					if s, ok := findLiveSession(cx, c, ""); ok {
+						return s, nil
+					}
+					return nil, nil
+				}
+			}
+			pick, rerr := pickAgent(c, opts)
 			if rerr != nil {
 				return rerr
 			}
+			sel := pick.sel
 			cx, cancel := ctx()
 			defer cancel()
 			// Detect-and-reuse: when a long-lived `whisper connect` daemon on this host
@@ -70,7 +87,7 @@ func newIPCmd() *cobra.Command {
 				if sel != "" {
 					args["agent"] = sel
 				}
-				env, err := c.Agents(cx, "connect", args)
+				env, err := opConnect(cx, c, args)
 				if err != nil {
 					return err
 				}
@@ -101,6 +118,37 @@ func newIPCmd() *cobra.Command {
 	cmd.Flags().StringVar(&agent, "agent", "", "verify THIS agent's egress (id or /128); overrides the persisted agent")
 	cmd.Flags().StringVar(&agentFile, "agent-file", "", "override the agent file (default ~/.config/whisper/agent)")
 	return cmd
+}
+
+// enforcedIP is `whisper ip` inside an enforced agent's namespace. There is no proxy to bring
+// up and no key to spend: the namespace's network IS the tunnel, so the keyless echo is asked
+// directly and the source it saw must be the /128 the agent was enforced as.
+func enforcedIP(addr string) error {
+	c, err := resolveClient(false, false)
+	if err != nil {
+		return err
+	}
+	cx, cancel := ctx()
+	defer cancel()
+	observed, oerr := c.DirectEgressIP(cx)
+	verified := oerr == nil && inWhisperRange(observed) && sameIP(observed, addr)
+	if g.jsonOut {
+		emitJSONValue(map[string]any{"ip": observed, "verified": verified, "agent": addr, "enforced": true})
+		if !verified {
+			os.Exit(1)
+		}
+		return nil
+	}
+	if oerr != nil {
+		return &client.ProblemError{Status: 502, Detail: "the Whisper echo could not be reached from inside the " +
+			"enforced namespace, which means the tunnel is not carrying right now (connections are refused, not leaked)"}
+	}
+	if !verified {
+		return &client.ProblemError{Status: 502, Detail: "the egress seen from inside this enforced namespace is " +
+			observed + ", not " + addr}
+	}
+	fmt.Fprintln(os.Stdout, green(observed+"  ✓ egress verified (enforced)"))
+	return nil
 }
 
 // agentDisplay picks the most useful agent identifier for the --json `agent` field:

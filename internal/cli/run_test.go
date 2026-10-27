@@ -4,7 +4,9 @@
 package cli
 
 import (
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -80,7 +82,7 @@ func TestRun_EnvInjectedAtSpawn(t *testing.T) {
 
 	// The child prints its inherited ALL_PROXY; we capture the real stdout fd.
 	stdout, _ := captureStd(t, func() {
-		_ = runWithEgress("2a04:2a01:9::abcd", "", "", "sh", []string{"-c", "printf '%s' \"$ALL_PROXY\""})
+		_ = runWithEgress("2a04:2a01:9::abcd", "", "", "sh", []string{"-c", "printf '%s' \"$ALL_PROXY\""}, false)
 	})
 	if !strings.HasPrefix(stdout, "socks5h://127.0.0.1:") {
 		t.Fatalf("child did not inherit ALL_PROXY at spawn, child stdout=%q", stdout)
@@ -101,8 +103,18 @@ func TestRun_MissingBinaryCleanError(t *testing.T) {
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", quiet: true, timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 
-	err := runWithEgress("2a04:2a01:9::abcd", "", "", "definitely-not-a-real-binary-xyzzy", nil)
+	err := runWithEgress("2a04:2a01:9::abcd", "", "", "definitely-not-a-real-binary-xyzzy", nil, false)
 	if err == nil || !isUsageError(err) {
 		t.Fatalf("a missing child binary must be a clean usage error, got %v", err)
+	}
+}
+
+// TestRunMarkerEnvNamesThisProcess: the child of
+// `whisper run` carries WHISPER_RUN=<the run's pid>, so the host sensor can
+// bind a descendant that left the parent chain. It carries nothing else.
+func TestRunMarkerEnvNamesThisProcess(t *testing.T) {
+	want := "WHISPER_RUN=" + strconv.Itoa(os.Getpid())
+	if got := runMarkerEnv(); got != want {
+		t.Fatalf("runMarkerEnv() = %q, want %q", got, want)
 	}
 }

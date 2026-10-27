@@ -31,7 +31,11 @@ func newPolicyCmd() *cobra.Command {
 			"DNS/query logs are kept (0-3650). Only the flags you pass are changed - anything\n" +
 			"you leave off keeps its current value, the lists included: omitting --allow keeps the\n" +
 			"allow list you already have. To CLEAR a list rather than keep it, pass it explicitly\n" +
-			"empty over the API (allow: []).",
+			"empty over the API (allow: []).\n\n" +
+			"--agent <name|id|/128> reads or sets that one device's policy instead of the tenant's;\n" +
+			"a device's policy takes precedence over the tenant's for that device. (An agent made\n" +
+			"with `whisper create --register` also has a tenant of its own; this flag does not set\n" +
+			"that tenant's policy.)",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			args := map[string]any{}
@@ -66,6 +70,21 @@ func newPolicyCmd() *cobra.Command {
 			}
 			cx, cancel := ctx()
 			defer cancel()
+			// --agent (the global selector) scopes the call to that device's own policy:
+			// op:policy takes the device by {address} or {agent}. It used to be accepted and
+			// ignored, so `whisper policy --agent X --default deny` set the WHOLE tenant to deny.
+			// A name resolves through the shared resolver, like every other selector.
+			if sel := strings.TrimSpace(g.agent); sel != "" {
+				resolved, rerr := resolveAgentArg(c, cx, sel, false, "")
+				if rerr != nil {
+					return rerr
+				}
+				if looksLikeV6(resolved) {
+					args["address"] = resolved
+				} else {
+					args["agent"] = resolved
+				}
+			}
 			env, err := c.Agents(cx, "policy", args)
 			if err != nil {
 				return err

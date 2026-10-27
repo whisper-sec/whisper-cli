@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
@@ -114,21 +115,60 @@ func debugf(format string, args ...any) {
 // the Tier-1.5 retry. It is the one connect body BOTH the forced --tier path and each
 // auto-negotiation leg run, so the two modes can never drift apart.
 func connectTierAttempt(cx context.Context, c *client.Client, base map[string]any, tier, sel string, port int) (*egressSession, error) {
+	env, keys, err := connectTierEnvelope(cx, c, base, tier, sel)
+	if err != nil {
+		return nil, err
+	}
+	// A pinned port binds a REAL socket, so it goes through connectAndVerifyOnPort
+	// directly; the free-port path rides the connectAndVerify var (the test stub seam).
+	var sess *egressSession
+	if port > 0 {
+		sess, err = connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, port)
+	} else {
+		sess, err = connectAndVerify(cx, c, env.Result, displayName(env.Result), keys)
+	}
+	if sess != nil {
+		sess.keys = keys // a held session renews with the very keys it came up with
+	}
+	return sess, err
+}
+
+// connectTierEnvelope is the control-plane half of connectTierAttempt: per-tier key prep,
+// op:connect and the birth-pin self-heal, returning the envelope and the keys for whichever
+// bring-up the caller runs. connectTierAttempt hands them to the local proxy or tunnel; the
+// enforced run hands them to its namespace. One body, so the two can never disagree about
+// how an agent connects.
+func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]any, tier, sel string) (*client.Envelope, *connectKeys, error) {
 	args := make(map[string]any, len(base)+3)
 	for k, v := range base {
 		args[k] = v
 	}
 	args["tier"] = tier
+	if !isWireGuardTier(tier) {
+		delete(args, "adopt_identity_key") // an adopt names the routed tier's key; no other tier has one
+	}
 	wgKey, err := prepareWireGuard(tier, args)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	idKey, err := prepareIdentityKey(tier, args, sel)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	keys := &connectKeys{wg: wgKey, identity: idKey}
-	env, err := c.Agents(cx, "connect", args)
+	env, err := connectWithSelfHeal(cx, c, args, idKey, tier)
+	if err != nil {
+		return nil, nil, err
+	}
+	settleIdentity(args, env.Result, keys)
+	return env, keys, nil
+}
+
+// connectWithSelfHeal sends one op:connect and answers the one refusal a client can honestly
+// answer for itself. A first connect and a held session's renewal both come through here, so a
+// renewal heals exactly as a connect does.
+func connectWithSelfHeal(cx context.Context, c *client.Client, args map[string]any, idKey *idkey.Keypair, tier string) (*client.Envelope, error) {
+	env, err := opConnect(cx, c, args)
 	if err != nil {
 		return nil, err
 	}
@@ -154,7 +194,7 @@ func connectTierAttempt(cx context.Context, c *client.Client, base map[string]an
 		// the SERVER's decision and it is unchanged - we are answering the question it asked.
 		if idKey != nil && serverHoldsNoPin(perr) && retryAsBirthPin(args, idKey) {
 			debugf("tier %s: the box holds no pin for this address, re-sending the key as a first enrolment", tier)
-			env, err = c.Agents(cx, "connect", args)
+			env, err = opConnect(cx, c, args)
 			if err != nil {
 				return nil, err
 			}
@@ -165,12 +205,7 @@ func connectTierAttempt(cx context.Context, c *client.Client, base map[string]an
 			return nil, perr
 		}
 	}
-	// A pinned port binds a REAL socket, so it goes through connectAndVerifyOnPort
-	// directly; the free-port path rides the connectAndVerify var (the test stub seam).
-	if port > 0 {
-		return connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, port)
-	}
-	return connectAndVerify(cx, c, env.Result, displayName(env.Result), keys)
+	return env, nil
 }
 
 // negotiateConnect is the AUTO orchestration: try Tier-1 (WireGuard) first under
@@ -188,6 +223,12 @@ func negotiateConnect(parent context.Context, c *client.Client, base map[string]
 		sess.negotiated = true
 		return sess, nil
 	}
+	if adopt, _ := base["adopt_identity_key"].(bool); adopt || identityCustodyRefusal(wgErr) {
+		// The box refused this connect over the identity key itself, or the user asked to adopt a
+		// key, which only Tier 1 carries. Tier 1.5 would succeed and hide that, leaving the agent
+		// quietly without its routed /128 or its adopted key: say it instead.
+		return nil, wgErr
+	}
 	wgFail := &autoTierFailure{tier: tierWireGuard, err: wgErr}
 	debugf("auto tier: %s - downgrading to %s", wgFail, tierSocks5)
 	sess, sErr := connectTierAttempt(parent, c, base, tierSocks5, sel, port)
@@ -198,6 +239,32 @@ func negotiateConnect(parent context.Context, c *client.Client, base map[string]
 	s5Fail := &autoTierFailure{tier: tierSocks5, err: sErr}
 	debugf("auto tier: %s - no tier left", s5Fail)
 	return nil, bothTiersFailed(wgFail, s5Fail)
+}
+
+// identityCustodyRefusal reports whether a Tier-1 failure is the server refusing the connect over
+// the identity key: a key other than the pinned one (409 IDENTITY_KEY_PINNED), or an
+// unsigned connect on a tenant that requires a signature (403 IDENTITY_SIGNATURE_REQUIRED). The
+// code is matched first; the status plus the server's own words only when no code came through.
+func identityCustodyRefusal(err error) bool {
+	pe, ok := client.AsProblem(err)
+	if !ok {
+		return false
+	}
+	for _, code := range []string{pe.Title, pe.Type} {
+		switch strings.ToUpper(strings.TrimSpace(code)) {
+		case "IDENTITY_KEY_PINNED", "IDENTITY_SIGNATURE_REQUIRED":
+			return true
+		}
+	}
+	d := strings.ToLower(pe.Detail)
+	switch pe.Status {
+	case 409:
+		return strings.Contains(d, "pinned to a different identity key") || strings.Contains(d, "identity key pinned for") ||
+			strings.Contains(d, "device binding for")
+	case 403:
+		return strings.Contains(d, "identity_signature")
+	}
+	return false
 }
 
 // bothTiersFailed collapses the two attempt failures into exactly ONE clear, helpful
@@ -271,51 +338,184 @@ var prepareWireGuard = func(tier string, args map[string]any) (*wgtun.Keypair, e
 var wgListenPort int
 
 // prepareIdentityKey is the command-layer pre-step, run ALONGSIDE prepareWireGuard: for the
-// routed (WireGuard) tier ONLY, it loads-or-mints a LOCAL EC P-256 identity keypair and injects ONLY
-// its public SPKI into the op:connect args as identity_public_key - so the server pins the agent's
-// OWN key, verbatim; the server pins SHA-256 of exactly this SPKI and never derives or serves a
-// Whisper-minted key for a held /128. Default-ON for the
-// routed tier: this is the tier the trust-boundary claim ("we can never speak as your agent") is
-// about. For any other tier it is a no-op (nil keypair, args untouched) - a hosted identity's
-// credential stays Whisper-derived (the server rejects the arg there anyway).
+// routed (WireGuard) tier ONLY it decides what the connect says about the agent's identity key.
+// The server publishes the identity's TLSA/SSHFP/OPENPGPKEY from that key, and the published
+// key moves only at birth, on a signature by the key pinned now, or on an
+// explicit adopt_identity_key. So the client never offers a key to an existing identity unless
+// the user asked for it:
 //
-// handle is the persistence key (an already-resolved agent id/address, or "" for a connect-first
-// flow - see idkey.PathFor) so a RECONNECT for the same agent reuses the SAME key rather than
-// rotating on every call (the server's idempotent re-pin then costs zero zone writes). It is a
-// package var so a command test can stub it to a deterministic keypair without real crypto.
+//   - adopt (args["adopt_identity_key"], set only by `whisper connect --adopt-key`): this host's
+//     key, loaded or minted, is sent with the flag, asking by name for it to be published.
+//   - an address this host holds a key for: possession is PROVED with a signature, and no key is
+//     sent. The pin is already published; there is nothing to re-pin.
+//   - an address this host holds NO key for: nothing is sent. The identity keeps its published
+//     key, and this session serves no self-signed leaf, because it has nothing the server pinned.
+//   - no selector, or one that is not an address (an agent with no /128 yet): this host's key is
+//     sent. That is a birth, or the server's own match of a device to the identity it pinned or
+//     bound; neither moves a published key.
+//
+// In a sudo context (identityBorrow set) it never mints: a key minted into root's store is one
+// the invoking user's own connects never see, which is how one host came to offer two keys for
+// one agent. For any other tier it is a no-op (nil keypair, args untouched). A package var so a
+// command test can stub it.
 var prepareIdentityKey = func(tier string, args map[string]any, handle string) (*idkey.Keypair, error) {
+	adopt, _ := args["adopt_identity_key"].(bool)
 	if !isWireGuardTier(tier) {
+		delete(args, "adopt_identity_key")
 		return nil, nil
 	}
-	// RECONNECT to a known /128 whose key we already hold: PROVE possession
-	// instead of resending the key. Two things change for the better at once. The server can
-	// refuse an enrolment that carries no proof (which is what makes a stolen API key unable to
-	// mint a peer for somebody else's node), and the connect stops carrying
-	// identity_public_key, which the zone-write classifier reads as re-authoring and forwards
-	// to the primary - resent on every reconnect, that lands every Tier-1 tunnel in the fleet
-	// on one box. The pin is already published; there is nothing to re-pin.
-	//
-	// Strictly narrower than the path below: it needs an address-shaped selector AND a key
-	// already persisted for it. A first connect, a connect-first flow, or an agent-id selector
-	// all fall through to the unchanged birth-pin behaviour.
-	if addr, aerr := netip.ParseAddr(strings.TrimSpace(handle)); aerr == nil {
-		if kp, lerr := idkey.Load(handle); lerr == nil {
-			wgPub, _ := args["public_key"].(string)
-			window := idkey.EnrolmentWindow(time.Now())
-			if sig, serr := kp.SignEnrolment(addr, wgPub, window); serr == nil {
-				args["identity_signature"] = sig
-				args["identity_signature_window"] = window
-				return kp, nil
+	if !adopt {
+		delete(args, "adopt_identity_key")
+	}
+	h := strings.TrimSpace(handle)
+	addr, aerr := netip.ParseAddr(h)
+	isAddr := aerr == nil
+	held, lerr := loadIdentity(h)
+	if adopt {
+		kp := held
+		if lerr != nil {
+			if identityNoMint() {
+				return nil, &client.ProblemError{Status: 400, Detail: "this host holds no identity key for " +
+					firstNonBlank(h, "this agent") + " to adopt, and a key is never minted as root; run " +
+					"`whisper connect --adopt-key` as the user who runs the agent"}
+			}
+			var err error
+			if kp, err = idkey.LoadOrGenerate(h); err != nil {
+				return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key - please try again"}
 			}
 		}
+		args["identity_public_key"] = kp.MarshalSPKIBase64()
+		args["adopt_identity_key"] = true
+		return kp, nil
 	}
-	kp, err := idkey.LoadOrGenerate(handle)
-	if err != nil {
-		return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key - please try again"}
+	if isAddr {
+		if lerr != nil {
+			// The normal state for a hosted identity addressed by its /128, so a diagnostic, not a note.
+			debugf("no identity key for %s on this host; its published TLSA/SSHFP/OPENPGPKEY are unchanged. "+
+				"To publish this host's key, run `whisper connect --adopt-key`.", addr)
+			return nil, nil
+		}
+		wgPub, _ := args["public_key"].(string)
+		window := idkey.EnrolmentWindow(time.Now())
+		if sig, serr := held.SignEnrolment(addr, wgPub, window); serr == nil {
+			args["identity_signature"] = sig
+			args["identity_signature_window"] = window
+			return held, nil
+		}
+		// A key that cannot sign is treated as no key: never offered in its place.
+		return nil, nil
+	}
+	kp := held
+	if lerr != nil {
+		if identityNoMint() {
+			return nil, nil // a birth then gets the derived key, and nothing is minted as root
+		}
+		var err error
+		if kp, err = idkey.LoadOrGenerate(h); err != nil {
+			return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key - please try again"}
+		}
 	}
 	// The server hashes EXACTLY this base64 DER, verbatim - never a private key, never re-encoded.
 	args["identity_public_key"] = kp.MarshalSPKIBase64()
 	return kp, nil
+}
+
+// identityNoMint reports whether this context must never mint an identity key: the enforced run
+// under sudo, which reads the invoking user's store and must not grow a second one in root's.
+func identityNoMint() bool { return identityBorrow != nil }
+
+// identityNoteOnce prints each custody note at most once per process, so a renewal loop or a
+// tier retry does not repeat it.
+var (
+	identityNotesMu   sync.Mutex
+	identityNotesSeen = map[string]bool{}
+)
+
+// identityNote is the user-facing line about what happened to the identity key. stderr, never
+// under --quiet, once per distinct line.
+var identityNote = func(format string, a ...any) {
+	msg := fmt.Sprintf(format, a...)
+	identityNotesMu.Lock()
+	seen := identityNotesSeen[msg]
+	identityNotesSeen[msg] = true
+	identityNotesMu.Unlock()
+	if seen || g.quiet {
+		return
+	}
+	fmt.Fprintln(os.Stderr, msg)
+}
+
+// notAdoptedMarker is the fragment the service's "kept the hosted key" notes carry, for an
+// account key and for an agent key alike. The service pins it with a contract test, because this
+// client reads its absence, after a connect that sent our key, as "our key is the published pin".
+// A machine-readable pin digest in the connect answer is the follow-up that replaces this
+// sentence match, and also lets a signed reconnect tell a published key from a device binding.
+const notAdoptedMarker = "was not adopted"
+
+// keyNotAdopted reports whether a connect answer's note says the key it carried was kept only as
+// the device binding, not published. Case-insensitive, anywhere in a note that may join several.
+func keyNotAdopted(note string) bool {
+	return strings.Contains(strings.ToLower(note), notAdoptedMarker)
+}
+
+// settleIdentity records, after a successful routed connect, what the answer says about the key
+// the connect carried. A key that was SENT and not reported as kept-only-as-binding is the
+// published pin: it is linked under the /128 the answer names, so every later handle form for the
+// agent (the address, a name, or no selector) reaches the same key. A key reported as not adopted
+// is a device binding only: this session serves no self-signed leaf with it and nothing is linked.
+// A signed connect sent no key and leaves both as they were.
+func settleIdentity(args map[string]any, res *client.Result, keys *connectKeys) {
+	if keys == nil || keys.identity == nil || res == nil {
+		return
+	}
+	sent, _ := args["identity_public_key"].(string)
+	if sent == "" || sent != keys.identity.MarshalSPKIBase64() {
+		return
+	}
+	var note, address string
+	if recs := res.Records(); len(recs) > 0 {
+		note = field(recs[0], "note")
+		address = field(recs[0], "address", "addr128")
+	}
+	adopt, _ := args["adopt_identity_key"].(bool)
+	notAdopted := keyNotAdopted(note)
+	if n := strings.TrimSpace(note); n != "" && (adopt || notAdopted) {
+		if notAdopted && !strings.Contains(strings.ToLower(n), "owner") {
+			// The service names the API argument; this is the CLI's spelling of it.
+			n += " With this CLI: `whisper connect --adopt-key`."
+		}
+		identityNote("whisper: %s", n)
+	}
+	if notAdopted {
+		keys.unpinned = true
+		return
+	}
+	if identityNoMint() {
+		return // the sudo context never writes into either store
+	}
+	if a, err := netip.ParseAddr(strings.TrimSpace(address)); err == nil {
+		if lerr := idkey.Link(a.String(), keys.identity); lerr != nil {
+			debugf("identity key not linked under %s: %v", a, lerr)
+		}
+	}
+}
+
+// identityBorrow, when set, is asked for an agent's identity key before this context's own
+// store. The enforced run sets it under sudo: it runs in root's context, and reading the invoking
+// user's key for the agent (read-only, from a regular file the user owns) keeps ONE identity key
+// per agent on the host whichever of the two connected last, so a proof of possession made as
+// root matches the pin the user's own connect published, and the reverse.
+var identityBorrow func(handle string) (*idkey.Keypair, bool)
+
+// loadIdentity is the persisted identity key for handle: a borrowed one first, then this
+// context's own. It never mints.
+func loadIdentity(handle string) (*idkey.Keypair, error) {
+	if identityBorrow != nil {
+		if kp, ok := identityBorrow(handle); ok {
+			return kp, nil
+		}
+	}
+	return idkey.Load(handle)
 }
 
 // serverHoldsNoPin reports whether a control-plane refusal is the one specific "I have
@@ -352,6 +552,12 @@ func retryAsBirthPin(args map[string]any, kp *idkey.Keypair) bool {
 type connectKeys struct {
 	wg       *wgtun.Keypair
 	identity *idkey.Keypair
+	// unpinned marks an identity key the server kept only as the device binding (it answered
+	// that the key "was not adopted"): it may sign, but it is not the published pin, so no
+	// self-signed leaf is served with it. A signed reconnect cannot tell, so a legacy
+	// binding key there still serves its leaf; the pin digest the connect answer should carry is
+	// the follow-up that closes it.
+	unpinned bool
 }
 
 // localEndpoint is the shared surface BOTH egress tiers expose: the bearer/key-free local
@@ -381,6 +587,13 @@ type egressSession struct {
 	// exact path, after checking the pid in it is still ours, so one session's exit can never
 	// unlink another's row.
 	recordPath string
+
+	// renew, when set, is how the holder replaces this session if its tunnel stops carrying
+	// traffic (session_renew.go). Nil for a one-shot and for the egress tiers.
+	renew *sessionRenewer
+	// keys are the WireGuard and identity keys this session came up with, kept so a renewal
+	// re-adds the same peer and proves the same identity. In memory only, never written out.
+	keys *connectKeys
 }
 
 // nat64 reports the NAT64 prefix this session's tunnel SETTLED on and where that came from, for
@@ -674,22 +887,9 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 	if keys != nil {
 		wgKey = keys.wg
 	}
-	privHex := ""
-	if wgKey != nil {
-		privHex = wgKey.PrivateKeyHex
-	}
-	cfg, err := wgtun.FromWgQuick(
-		ce.wgServerPubKey, ce.wgEndpoint, ce.address, ce.wgDNS, ce.wgNat64Prefix, ce.wgQuick, privHex)
+	cfg, err := wireGuardConfig(ce, wgKey)
 	if err != nil {
-		return nil, &client.ProblemError{Status: 502,
-			Detail: "the control plane returned an unusable WireGuard config"}
-	}
-	// Zero-key fallback: we sent no public key, so the server minted the keypair and returned
-	// the private key once. Convert it to hex for the device. (The default path uses OUR key.)
-	if cfg.PrivateKeyHex == "" && strings.TrimSpace(ce.wgPrivKeyB64) != "" {
-		if hexKey, perr := wgtun.PrivateKeyBase64ToHex(ce.wgPrivKeyB64); perr == nil {
-			cfg.PrivateKeyHex = hexKey
-		}
+		return nil, err
 	}
 	// One safe operational line on reconnects (stderr; never a key/endpoint/target). Silent
 	// under --quiet so a scripted endpoint capture stays clean.
@@ -711,7 +911,7 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 	}
 	// serve the agent-held identity leaf on the tunnel's own /128:443, now that the server has
 	// returned the assigned address + canonical/friendly FQDN. Best-effort - never fails bring-up.
-	if keys != nil && keys.identity != nil {
+	if keys != nil && keys.identity != nil && !keys.unpinned {
 		if addr, aerr := netip.ParseAddr(strings.TrimSpace(ce.address)); aerr == nil {
 			// op:connect{tier:wireguard} returns only the canonical fqdn (no separate friendly-CNAME
 			// column) - the leaf carries just that one dNSName SAN + the /128 iPAddress SAN.
@@ -735,6 +935,29 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 		tier:     "wireguard",
 		local:    tun,
 	}, nil
+}
+
+// wireGuardConfig builds the device configuration from a WireGuard connect envelope: OUR
+// private key on the best-practice path, or, only when the server minted the keypair (the
+// zero-key path), the private key it returned once. Shared by the userspace tier and the
+// enforced run, so both drive the device from the same document.
+func wireGuardConfig(ce connectEnvelope, wgKey *wgtun.Keypair) (wgtun.Config, error) {
+	privHex := ""
+	if wgKey != nil {
+		privHex = wgKey.PrivateKeyHex
+	}
+	cfg, err := wgtun.FromWgQuick(
+		ce.wgServerPubKey, ce.wgEndpoint, ce.address, ce.wgDNS, ce.wgNat64Prefix, ce.wgQuick, privHex)
+	if err != nil {
+		return wgtun.Config{}, &client.ProblemError{Status: 502,
+			Detail: "the control plane returned an unusable WireGuard config"}
+	}
+	if cfg.PrivateKeyHex == "" && strings.TrimSpace(ce.wgPrivKeyB64) != "" {
+		if hexKey, perr := wgtun.PrivateKeyBase64ToHex(ce.wgPrivKeyB64); perr == nil {
+			cfg.PrivateKeyHex = hexKey
+		}
+	}
+	return cfg, nil
 }
 
 // cleanWgError maps a wgtun bring-up error to a plain, non-leaky remediation line.

@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 )
 
 // secfile_unix.go is the mode-bit half of the seam. Here the guarantee IS the
@@ -63,6 +64,15 @@ func HardenDir(path string) error {
 	return os.Chmod(path, DirMode)
 }
 
+// HardenMachine and HardenMachineDir are Harden and HardenDir here. On unix a
+// machine-wide service runs as root, root can read anything, and owner-only
+// already says "the service and the administrators". The names exist
+// so a caller writing a service's file says what it means on every platform.
+func HardenMachine(path string) error { return Harden(path) }
+
+// HardenMachineDir is HardenDir on unix, for the reason HardenMachine gives.
+func HardenMachineDir(path string) error { return HardenDir(path) }
+
 // Verify reports whether the file at path is owner-only, reading the inode
 // rather than trusting that a write happened. It never modifies anything.
 //
@@ -93,6 +103,20 @@ func verify(path string, wantDir bool) error {
 	}
 	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
 		return fmt.Errorf("%s is mode %04o: %w", path, perm, ErrExposed)
+	}
+	return nil
+}
+
+// replaceFile renames from over to, then syncs the directory so the rename itself is durable.
+// A directory that cannot be opened for the sync (rare, and only ever a weaker guarantee) does
+// not fail a rename that has already happened.
+func replaceFile(from, to string) error {
+	if err := os.Rename(from, to); err != nil {
+		return err
+	}
+	if d, err := os.Open(filepath.Dir(to)); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
 	}
 	return nil
 }

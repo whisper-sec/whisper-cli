@@ -75,7 +75,7 @@ func TestRenderWhaleWhois_AnRDAPOutageIsStated(t *testing.T) {
 // TestFillRDAP_LiftsTheFieldsAPersonReads, and tolerates every one of them being absent.
 func TestFillRDAP_LiftsTheFieldsAPersonReads(t *testing.T) {
 	body := json.RawMessage(`{
-	  "handle":"a126fa16e389f9bf6",
+	  "handle":"a00000000000000db",
 	  "name":"db-ledger-01",
 	  "startAddress":"2a04:2a01::1",
 	  "endAddress":"2a04:2a01::2",
@@ -85,7 +85,7 @@ func TestFillRDAP_LiftsTheFieldsAPersonReads(t *testing.T) {
 	}`)
 	var view whaleWhoisView
 	fillRDAP(&view, body)
-	if view.RDAPHandle != "a126fa16e389f9bf6" || view.RDAPName != "db-ledger-01" {
+	if view.RDAPHandle != "a00000000000000db" || view.RDAPName != "db-ledger-01" {
 		t.Fatalf("handle/name not lifted: %+v", view)
 	}
 	if view.RDAPRange != "2a04:2a01::1 - 2a04:2a01::2" {

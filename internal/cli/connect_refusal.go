@@ -67,6 +67,14 @@ type connectRefusal struct {
 	Fix       string `json:"fix,omitempty"`
 	Port      int    `json:"port,omitempty"`
 	Tier      string `json:"tier,omitempty"`
+	// Source is where the agent the attempt tried to bind came from: the saved agent file,
+	// an explicit --agent, or none. Selector is that agent, or the /128 proven gone.
+	Source   string `json:"source,omitempty"`
+	Selector string `json:"selector,omitempty"`
+	// Fixable and FixCommand are filled on read, never stored: whether the one-click fix applies
+	// to this refusal, and the line that starts it by hand.
+	Fixable    bool   `json:"fixable"`
+	FixCommand string `json:"fix_command,omitempty"`
 	// AgeSecs is filled on read, never stored: a record always says how old it is.
 	AgeSecs int `json:"age_seconds"`
 }
@@ -111,7 +119,7 @@ func (e *egressCheckError) Unwrap() error { return e.cause }
 var connectRefusalFile = func() string {
 	home, err := os.UserHomeDir()
 	if err != nil || home == "" {
-		return filepath.Join(".config", "whisper", "connect-refusal.json")
+		return "" // no home: nothing is written, rather than a path relative to wherever we are
 	}
 	return filepath.Join(home, ".config", "whisper", "connect-refusal.json")
 }
@@ -165,7 +173,10 @@ func egressCheckFix(cause error) string {
 // writeConnectRefusal stores the record (0600, in a 0700 directory). Best-effort: a machine
 // whose home cannot be written still gets the reason on stderr, which is where it always went.
 func writeConnectRefusal(r connectRefusal) {
-	r.AgeSecs = 0
+	r.AgeSecs, r.Fixable, r.FixCommand = 0, false, ""
+	if connectRefusalFile() == "" {
+		return
+	}
 	raw, err := json.Marshal(r)
 	if err != nil {
 		return
@@ -194,7 +205,39 @@ func readConnectRefusal() (connectRefusal, bool) {
 			r.AgeSecs = int(age.Round(time.Second) / time.Second)
 		}
 	}
+	r.Fixable = refusalFixable(r, client.ReadAgentFile(""), client.DefaultBoundFile())
+	if r.Kind == refusalIdentityGone {
+		r.FixCommand = "whisper enroll --force --preview"
+	}
 	return r, true
+}
+
+// refusalFixable reports whether the one-click fix applies: the identity is proven gone, the
+// agent came from this device's own binding rather than one a person named, and the refusal is
+// about the binding on disk now. A refusal written by an attempt that read the old binding
+// before a fix replaced it is not.
+func refusalFixable(r connectRefusal, saved, markerPath string) bool {
+	if r.Kind != refusalIdentityGone {
+		return false
+	}
+	switch r.Source {
+	case "file", "none":
+	default:
+		return false
+	}
+	sel := strings.TrimSpace(r.Selector)
+	if sel == "" {
+		return r.Source == "none"
+	}
+	if s := strings.TrimSpace(saved); s != "" && (strings.EqualFold(s, sel) || sameIP(s, sel)) {
+		return true
+	}
+	if id, ok := client.ReadBoundFile(markerPath); ok {
+		if (id.Agent != "" && strings.EqualFold(id.Agent, sel)) || (id.Addr.IsValid() && sameIP(id.Addr.String(), sel)) {
+			return true
+		}
+	}
+	return false
 }
 
 // clearConnectRefusal removes the record. Called the moment a connect holds a session, so the

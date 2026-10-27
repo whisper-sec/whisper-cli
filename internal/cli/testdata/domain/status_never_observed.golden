@@ -1,0 +1,8 @@
+everwatch.io  pending
+  anchor         unknown
+  served here    no
+  last observed  never
+pending: we have not looked at your parent for this domain yet, so we are not claiming anything about what it publishes. If you have not already, publish the NS records pointing at ns1/ns2.whisper.online and the DS record(s) at your registrar
+  also: run domain{op:'verify', name:'everwatch.io'} to have us look at your parent right now, or wait for the next scheduled check - the DNSSEC chain counts as proven only once we have observed it ourselves
+  also: DNSSEC delegation chain not validating in the wild yet (DS must match our key and validate from multiple public resolvers)
+--- stderr ---

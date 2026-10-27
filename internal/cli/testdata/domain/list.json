@@ -1,0 +1,1 @@
+{"columns": ["op", "ok", "status", "result", "error", "retry_after", "elapsed_ms"], "rows": [{"op": "domain", "ok": true, "status": 200, "result": {"columns": ["name", "state"], "rows": [["everwatch.io", "verified"], ["example.org", "pending"]], "sensitive": []}, "error": null, "retry_after": null, "elapsed_ms": 21}], "statistics": {"rowCount": 1, "executionTimeMs": 21}}

@@ -11,7 +11,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
+
+	"github.com/whisper-sec/whisper-cli/internal/enforce"
 )
 
 // graph.go is the PUBLIC graph surface of the client: arbitrary parameterised Cypher
@@ -97,6 +100,14 @@ func (c *Client) GraphQueryRows(ctx context.Context, cypher string, params map[s
 // It requires a credential. The keyless public procedures (whisper.assess /
 // .identify / .explain) go through GraphQueryPublic instead.
 func (c *Client) GraphQuery(ctx context.Context, query string, params map[string]any) (*GraphResult, error) {
+	// Raw Cypher can carry an op:connect too (`whisper query`, the MCP query tools). Its arguments cannot be
+	// read the way Agents reads them, so while an enforced run is live on this host a raw connect is refused
+	// outright and the message says to use `whisper connect --agent`, which can name the agent it means.
+	if rawConnect(query, params) {
+		if held := EnforcedHolders(); len(held) > 0 {
+			return nil, &enforce.HeldError{Addr: held[0], PID: EnforcedHolder(held[0]), Exclusive: true, Unnamed: true}
+		}
+	}
 	if c.cred.IsZero() {
 		return nil, &ProblemError{Status: 401, Title: "no key",
 			Detail: "graph queries need an API key - run 'whisper login', set WHISPER_API_KEY, or pass --key"}
@@ -195,12 +206,12 @@ func DecodeGraphResult(body []byte, httpStatus int) (*GraphResult, error) {
 	}
 	for _, rr := range wire.Rows {
 		var obj map[string]any
-		if json.Unmarshal(rr, &obj) == nil {
+		if decodeExact(rr, &obj) == nil {
 			res.Rows = append(res.Rows, obj)
 			continue
 		}
 		var arr []any
-		if json.Unmarshal(rr, &arr) == nil {
+		if decodeExact(rr, &arr) == nil {
 			obj = make(map[string]any, len(wire.Columns))
 			for i, col := range wire.Columns {
 				if i < len(arr) {
@@ -212,6 +223,25 @@ func DecodeGraphResult(body []byte, httpStatus int) (*GraphResult, error) {
 		// A row that is neither object nor array is dropped, not fatal (liberal-in).
 	}
 	return res, nil
+}
+
+// decodeExact decodes one row with every JSON number, at any depth, kept as a
+// json.Number: its literal, byte for byte. The default decoding makes each number a
+// float64, which silently rounds an integer above 2^53 (a 64-bit id or counter) to the
+// nearest double, so the table showed 18446744073709551617 as 1.8446744073709552e+19.
+// A row reader that needs arithmetic converts the json.Number itself.
+func decodeExact(raw []byte, v any) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(v); err != nil {
+		return err
+	}
+	// One row is one JSON value: trailing bytes mean it was not a row, exactly as
+	// json.Unmarshal would have said.
+	if _, err := dec.Token(); err != io.EOF {
+		return fmt.Errorf("graph row: trailing data after the value")
+	}
+	return nil
 }
 
 // FlowEvent is one raw Server-Sent Event from a gallery/run flow: the event name
@@ -323,4 +353,24 @@ func readFlowSSE(ctx context.Context, r io.Reader, emit func(FlowEvent)) error {
 		return err
 	}
 	return ctx.Err()
+}
+
+// opConnectWord is "connect" as a word of its own: not "disconnect", not "connections".
+var opConnectWord = regexp.MustCompile(`\bconnect\b`)
+
+// rawConnect reports whether a raw Cypher call names whisper.agents with an op:connect, in its text or in
+// its parameters (CALL whisper.agents($m) with {m:{op:'connect'}} is the shape the MCP query tools send).
+func rawConnect(query string, params map[string]any) bool {
+	q := strings.ToLower(query)
+	if !strings.Contains(q, "whisper.agents") {
+		return false
+	}
+	if opConnectWord.MatchString(q) {
+		return true
+	}
+	if len(params) == 0 {
+		return false
+	}
+	b, err := json.Marshal(params)
+	return err == nil && opConnectWord.Match(bytes.ToLower(b))
 }

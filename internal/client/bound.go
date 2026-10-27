@@ -120,15 +120,71 @@ func WriteBoundFile(path string, mode string, addr netip.Addr, name, agent strin
 	if path == "" {
 		path = DefaultBoundFile()
 	}
+	return writeBound(path, mode, addr, name, agent, secfile.MkdirAllFor, secfile.WriteFileAtomic)
+}
+
+// WriteServiceBoundFile is WriteBoundFile for the marker a machine-wide service reads
+// from its own account's profile, written there by an administrator. Same
+// format, same refusal of an empty address; the only difference is the ACL, which on
+// Windows names LocalSystem and Administrators and not the account that wrote it.
+func WriteServiceBoundFile(path string, mode string, addr netip.Addr, name, agent string) error {
+	if path == "" {
+		return errors.New("refusing to write a service bind marker with no path")
+	}
+	mkdir := func(p string) error { return secfile.MkdirAllMachine(filepath.Dir(p)) }
+	return writeBound(path, mode, addr, name, agent, mkdir, secfile.WriteMachineFile)
+}
+
+func writeBound(path, mode string, addr netip.Addr, name, agent string,
+	mkdir func(string) error, write func(string, []byte) error) error {
 	if !addr.IsValid() {
 		return errors.New("refusing to write a bind marker with no address: an unbound endpoint" +
 			" must look unbound, not bound to nothing")
 	}
-	if err := secfile.MkdirAllFor(path); err != nil {
+	if err := mkdir(path); err != nil {
 		return err
 	}
 	body := fmt.Sprintf("mode=%s\naddress=%s\nname=%s\nagent=%s\nbound_at=%s\n",
 		mode, addr.String(), strings.TrimSuffix(name, "."), agent,
 		time.Now().UTC().Format(time.RFC3339))
-	return secfile.WriteFile(path, []byte(body))
+	return write(path, []byte(body))
+}
+
+// BoundFileState is what ReadBoundFileStrict found.
+type BoundFileState int
+
+const (
+	BoundAbsent     BoundFileState = iota // no marker, or one this process cannot read
+	BoundComplete                         // a whole record: an address, a bound_at line, a final newline
+	BoundIncomplete                       // a marker exists but is not a whole record
+)
+
+// ReadBoundFileStrict is ReadBoundFile for a caller about to act on the identity: it trusts the
+// address only in a whole record. Every writer ends the record with bound_at and a newline, so
+// a file without them was cut off, and a prefix of an address can parse as another, nearby
+// address. Such a file is reported as incomplete rather than read.
+func ReadBoundFileStrict(path string) (BoundIdentity, BoundFileState) {
+	if path == "" {
+		path = DefaultBoundFile()
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return BoundIdentity{}, BoundAbsent
+	}
+	text := string(b)
+	if !strings.HasSuffix(text, "\n") {
+		return BoundIdentity{}, BoundIncomplete
+	}
+	hasBoundAt := false
+	for _, line := range strings.Split(text, "\n") {
+		k, v, found := strings.Cut(strings.TrimSpace(line), "=")
+		if found && strings.EqualFold(strings.TrimSpace(k), "bound_at") && strings.TrimSpace(v) != "" {
+			hasBoundAt = true
+		}
+	}
+	id, ok := ReadBoundFile(path)
+	if !ok || !hasBoundAt {
+		return BoundIdentity{}, BoundIncomplete
+	}
+	return id, BoundComplete
 }

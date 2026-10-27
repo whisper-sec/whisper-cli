@@ -309,7 +309,7 @@ func TestRun_ExplicitFlagOverridesProjectConfig(t *testing.T) {
 	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", quiet: true, timeout: 5 * time.Second}
 	defer func() { g = savedG }()
 
-	_ = runWithEgress("2a04:2a01:9::cafe", "", "", "true", nil)
+	_ = runWithEgress("2a04:2a01:9::cafe", "", "", "true", nil, false)
 	body, ok := bodyForOp(seen, "connect")
 	if !ok {
 		t.Fatalf("no op:connect recorded, ops=%v", opsSeen(seen))
@@ -340,7 +340,7 @@ func TestRun_PrefersProjectConfigAgent(t *testing.T) {
 	defer func() { g = savedG }()
 
 	// No explicit --agent: must adopt the project config's agent.
-	if err := runWithEgress("", "", "", "true", nil); err != nil {
+	if err := runWithEgress("", "", "", "true", nil, false); err != nil {
 		// `true` may not exist on all platforms; the connect body is what we assert.
 		_ = err
 	}

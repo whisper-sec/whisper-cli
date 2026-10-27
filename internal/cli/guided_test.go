@@ -54,7 +54,11 @@ func sniffOp(body string) string {
 func listJSON(agents []agentChoice) string {
 	var rows []string
 	for _, a := range agents {
-		rows = append(rows, `["agent",{"label":"`+a.name+`","address":"`+a.addr+`"}]`)
+		id := ""
+		if a.id != "" {
+			id = `,"agent":"` + a.id + `"`
+		}
+		rows = append(rows, `["agent",{"label":"`+a.name+`","address":"`+a.addr+`"`+id+`}]`)
 	}
 	return `{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[` + strings.Join(rows, ",") + `]}}`
 }

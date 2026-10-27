@@ -7,10 +7,8 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"os/signal"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -81,7 +79,12 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 	// through with zero round-trips. Project state is explicit (never the persisted
 	// agent file), so the stale-FILE fallback does not apply here.
 	sel := strings.TrimSpace(cfg.Agent)
-	if sel != "" {
+	if sel == "" {
+		// A connect with no selector lets the control plane pick one of the account's agents and
+		// replace its peer, so a config that names no agent is refused, never guessed.
+		return errNoProjectAgent
+	}
+	{
 		cxSel, cancelSel := ctx()
 		resolved, rerr := resolveAgentArg(c, cxSel, sel, false, "")
 		cancelSel()
@@ -125,6 +128,12 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 	// raced twin daemon claimed the port meanwhile we exit cleanly - already ensured. The same
 	// keys/args are reused across attempts (the server's re-pin is idempotent). Bounded: after
 	// the schedule is exhausted the last error is returned (never an unbounded spin).
+	// The same shared per-/128 lock an interactive connect holds, for the daemon's life.
+	agentLock, lerr := lockAgentForConnect(sel)
+	if lerr != nil {
+		return lerr
+	}
+	defer func() { agentLock.Release() }()
 	var sess *egressSession
 	for attempt := 0; ; attempt++ {
 		var aerr error
@@ -140,7 +149,13 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 			return nil // another live daemon took the port while we backed off - already ensured
 		}
 	}
-	defer sess.Stop()
+	// From here the hold owns the session and stops whatever is current when it ends.
+	if agentLock == nil {
+		if agentLock, lerr = lockAgentForConnect(sess.addr); lerr != nil {
+			sess.Stop()
+			return lerr
+		}
+	}
 
 	// An optional observer of this daemon's live egress session. Nil unless a build
 	// installs one; where nothing sets it, the daemon simply does not tap. A nil here
@@ -154,6 +169,12 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 	// short of being usable: the port used to be whatever the kernel handed out, it changed
 	// on every restart, and the only way to find it was ss against the unit's MainPID.
 	announceDaemonEndpoint(sess)
+
+	// A Tier 1 tunnel whose box drops its peer is re-connected by the hold (session_renew.go).
+	if isWireGuardTier(sess.tier) {
+		sess.renew = renewerFor(c, args, sess, false, sel)
+		sess.renew.supervised = supervised
+	}
 
 	// Refresh the pidfile with OUR pid (the spawn wrote the parent-observed child pid; this is
 	// the authoritative one and lets `whisper status` / teardown find the live daemon).
@@ -182,32 +203,50 @@ var daemonRetryBackoff = []time.Duration{
 func daemonConnectAttempt(c *client.Client, cfg projcfg.Config, keys *connectKeys, args map[string]any) (*egressSession, error) {
 	cx, cancel := ctx()
 	defer cancel()
-	env, err := c.Agents(cx, "connect", args)
+	env, err := opConnect(cx, c, args)
 	if err != nil {
 		return nil, err
 	}
 	if perr := envelopeError(env); perr != nil {
 		return nil, perr
 	}
-	return connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, cfg.Port)
+	settleIdentity(args, env.Result, keys)
+	sess, err := connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, cfg.Port)
+	if sess != nil {
+		sess.keys = keys // the renewal re-adds this peer with this very key
+	}
+	return sess, err
 }
 
 // holdDaemonUntilSignal parks the daemon until SIGINT/SIGTERM, then tears the tunnel down and
 // removes the pidfile so a later `--ensure` re-spawns cleanly. A package var so a test can
-// return immediately instead of parking on a real signal.
+// return immediately instead of parking on a real signal; holdDaemonUntilSignalLive is the real
+// body, which a test can also drive with its own tick and signal.
 //
 // The daemon registers its held session in the local session registry (and clears it on
 // teardown), so a one-shot never opens a competing op:connect for the /128 this daemon serves.
-var holdDaemonUntilSignal = func(p projcfg.Paths, sess *egressSession) {
+var holdDaemonUntilSignal = holdDaemonUntilSignalLive
+
+func holdDaemonUntilSignalLive(p projcfg.Paths, sess *egressSession) {
 	writeSessionRecord(sess)
-	defer func() {
-		clearSessionRecord(sess)
-		sess.Stop()
-		_ = os.Remove(p.PIDFile)
-	}()
-	sigs := make(chan os.Signal, 1)
-	signal.Notify(sigs, os.Interrupt, syscall.SIGTERM)
-	<-sigs
+	defer removeOwnPIDFile(p.PIDFile)
+	// Watch the session until the signal, renewing a Tier 1 tunnel whose box has dropped it,
+	// then stop whatever session is current and clear its record. The supervisor also returns
+	// when another Whisper proxy has taken this port over, which for a daemon means the
+	// connection is already ensured.
+	superviseUntilSignal(sess, daemonLogf)
+}
+
+// removeOwnPIDFile removes the pidfile only while it still names this process. A daemon that
+// stood down for a replacement must not take the replacement's pidfile with it.
+func removeOwnPIDFile(path string) {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	if pid, perr := strconv.Atoi(strings.TrimSpace(string(b))); perr == nil && pid == os.Getpid() {
+		_ = os.Remove(path)
+	}
 }
 
 // onEgressSession is an optional observer of live daemon-held egress sessions. Nil
@@ -297,3 +336,8 @@ func resolveDaemonPort(pinned int, supervised bool) (int, bool) {
 // about, and exiting cleanly is correct. A SERVICE was installed and started deliberately,
 // so exiting cleanly leaves systemd reporting it active over a host with no egress, the one
 // outcome worse than a visible failure. Supervised, a busy port is never "already ensured".
+
+// errNoProjectAgent refuses a project config that names no agent: a connect with no selector lets
+// the control plane pick one of the account's agents and replace its peer.
+var errNoProjectAgent = usageErr("the project's .whisper/config names no agent, so there is nothing to connect: " +
+	"re-run 'whisper init' with --agent {agent} or --name {name}")

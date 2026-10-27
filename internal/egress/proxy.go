@@ -537,7 +537,7 @@ func (u *upstream) Dial(ctx context.Context, target string) (net.Conn, error) {
 	resp, err := http.ReadResponse(br, &http.Request{Method: http.MethodConnect})
 	if err != nil {
 		tlsConn.Close()
-		return nil, fmt.Errorf("egress CONNECT reply unreadable")
+		return nil, connectReplyError(err, target, u.dialTO)
 	}
 	_ = resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -559,6 +559,23 @@ func (u *upstream) Dial(ctx context.Context, target string) (net.Conn, error) {
 		return &prefixedConn{Conn: tlsConn, pre: append([]byte(nil), pre...)}, nil
 	}
 	return tlsConn, nil
+}
+
+// connectReplyError says what actually happened when no usable CONNECT reply arrived. "Unreadable"
+// is kept for a reply that is not HTTP. The other two are not parse failures and used to read as one:
+// an egress that accepted the CONNECT but whose own outbound connection never completed says nothing
+// until our deadline, and one that hangs up says nothing at all. Neither message names the egress host
+// or carries the bearer.
+func connectReplyError(err error, target string, timeout time.Duration) error {
+	var ne net.Error
+	switch {
+	case errors.As(err, &ne) && ne.Timeout():
+		return fmt.Errorf("the Whisper egress did not answer the CONNECT for %s within %s", target, timeout)
+	case errors.Is(err, io.EOF), errors.Is(err, io.ErrUnexpectedEOF):
+		return errors.New("the Whisper egress closed the connection before answering the CONNECT")
+	default:
+		return errors.New("egress CONNECT reply unreadable")
+	}
 }
 
 // stripScheme removes a leading scheme:// and any user:pass@ a caller might have

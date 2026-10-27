@@ -257,7 +257,7 @@ func TestRun_ProxyLiveForChild(t *testing.T) {
 	probe := "child-sees-live-proxy"
 	script := childSocksProbeScript(target, probe)
 	stdout, _ := captureStd(t, func() {
-		_ = runWithEgress("2a04:2a01:9::abcd", "", "", "sh", []string{"-c", script})
+		_ = runWithEgress("2a04:2a01:9::abcd", "", "", "sh", []string{"-c", script}, false)
 	})
 	// No python3 in the child env ⇒ inconclusive (the child can't probe). The core run.go
 	// lifetime is covered without a child by TestRun_ProxyLiveAfterControlCtxCancel, so skip

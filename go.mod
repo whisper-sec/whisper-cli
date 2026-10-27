@@ -2,7 +2,7 @@
 // Copyright (c) 2026 viaGraph B.V. (Whisper Security)
 module github.com/whisper-sec/whisper-cli
 
-go 1.26.9
+go 1.26.10
 
 require (
 	github.com/charmbracelet/bubbles v1.0.0
@@ -19,7 +19,7 @@ require (
 	golang.zx2c4.com/wireguard v0.0.0-20260522210424-ecfc5a8d5446
 )
 
-require golang.org/x/net v0.60.0 // indirect
+require golang.org/x/net v0.60.0
 
 require (
 	github.com/atotto/clipboard v0.1.4 // indirect

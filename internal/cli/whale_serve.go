@@ -61,8 +61,9 @@ import (
 // type out of habit and refuses any other value, with the reason.
 
 // whaleServeFleetRefresh is how often a running serve re-reads its fleet, so a peer added
-// or removed while it runs takes effect without a restart.
-const whaleServeFleetRefresh = 60 * time.Second
+// or removed while it runs takes effect without a restart. A var only so a test can
+// shorten it; it is read once, on the serve's own goroutine, when the refresher starts.
+var whaleServeFleetRefresh = 60 * time.Second
 
 // whaleServeStartBudget bounds how long `--bg` waits for the detached holder to come up
 // before it says so rather than claiming a serve that is not there.
@@ -333,13 +334,16 @@ func runWhaleServe(cmd *cobra.Command, opt serveOptions) error {
 	// Never take a tunnel away from something already holding one. op:connect binds ONE
 	// WireGuard peer per /128, so connecting for an address a local daemon is serving
 	// would replace its peer and kill it (session_registry.go says why at length).
-	sel := strings.TrimSpace(opt.agent)
-	if sel != "" {
-		if resolved, rerr := resolveAgentArg(c, cx, sel, false, ""); rerr == nil {
-			sel = resolved
-		} else {
-			return rerr
-		}
+	// Which agent: --agent, else this host's saved agent (agent_pick.go). With neither it refuses,
+	// naming the fix: a serve with no selector let the control plane pick an existing agent of the
+	// account and replace its WireGuard peer.
+	pick, perr := pickAgent(c, agentPickOpts{agent: opt.agent, noCreate: true, nameless: true, noSave: true, command: "whisper whale " + opt.scope.Verb()})
+	if perr != nil {
+		return perr
+	}
+	sel := pick.sel
+	if note := peerReplacementNote(pick, tierWireGuard); note != "" && !g.quiet {
+		fmt.Fprintln(os.Stderr, note)
 	}
 	if live, ok := findLiveSession(cx, c, sel); ok {
 		return &client.ProblemError{Status: 409, Title: "connection already held", Detail: fmt.Sprintf(
@@ -414,7 +418,11 @@ func runWhaleServe(cmd *cobra.Command, opt serveOptions) error {
 	whaleServeInstall(tun, proxy)
 	defer whaleServeInstall(tun, nil)
 
-	go gate.refreshLoop(c, opt.scope)
+	// The refresher is bound to this serve: it stops, and is waited for, before the serve
+	// returns, so it never outlives the serve that started it. The call timeout is
+	// read here, once, so the loop never reads the package globals from its own goroutine.
+	stopRefresh := gate.startRefresh(c, opt.scope, callTimeout(), whaleServeFleetRefresh)
+	defer stopRefresh()
 
 	if !g.quiet && !opt.held {
 		renderServeState(st)
@@ -473,15 +481,16 @@ var whaleServeConnect = func(cx context.Context, c *client.Client, sel string) (
 	if err != nil {
 		return nil, nil, err
 	}
-	env, err := c.Agents(cx, "connect", args)
+	env, err := opConnect(cx, c, args)
 	if err != nil {
 		return nil, nil, err
 	}
 	if perr := envelopeError(env); perr != nil {
 		return nil, nil, perr
 	}
-	sess, err := connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result),
-		&connectKeys{wg: wgKey, identity: idKey}, 0)
+	keys := &connectKeys{wg: wgKey, identity: idKey}
+	settleIdentity(args, env.Result, keys)
+	sess, err := connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, 0)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -562,16 +571,41 @@ func (g *fleetGate) refresh(cx context.Context, c *client.Client) error {
 	return nil
 }
 
-// refreshLoop keeps the fleet current for as long as the serve runs. A failed refresh
-// KEEPS the last good set: the previous answer is both the safest and the most accurate
-// thing we have, and a transient control-plane fault must not change who is answered.
-func (g *fleetGate) refreshLoop(c *client.Client, scope whale.ServeScope) {
+// startRefresh keeps the fleet current for as long as the serve runs, and returns the
+// function that ends it: that function cancels the loop, aborts any refresh in flight, and
+// returns only once the loop has exited. A failed refresh KEEPS the last good set: the
+// previous answer is both the safest and the most accurate thing we have, and a transient
+// control-plane fault must not change who is answered.
+//
+// stop() waits for the refresh in flight. Every refresh's context derives from the loop's,
+// so a cancel ends it at once for any reader that honours its context (the real control
+// client does); a reader that ignored it would hold the serve's exit for up to timeout.
+func (g *fleetGate) startRefresh(c *client.Client, scope whale.ServeScope, timeout, every time.Duration) (stop func()) {
 	if scope.Public() {
-		return
+		return func() {}
 	}
+	loop, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		g.refreshLoop(loop, c, timeout, every)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
+func (g *fleetGate) refreshLoop(loop context.Context, c *client.Client, timeout, every time.Duration) {
+	tick := time.NewTicker(every)
+	defer tick.Stop()
 	for {
-		time.Sleep(whaleServeFleetRefresh)
-		cx, cancel := ctx()
+		select {
+		case <-loop.Done():
+			return
+		case <-tick.C:
+		}
+		cx, cancel := context.WithTimeout(loop, timeout)
 		_ = g.refresh(cx, c)
 		cancel()
 	}

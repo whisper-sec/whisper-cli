@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"sort"
@@ -35,6 +36,18 @@ func newListCmd() *cobra.Command {
 			cx, cancel := ctx()
 			defer cancel()
 			env, err := c.Agents(cx, "list", map[string]any{"kind": kind})
+			if kind == "agents" {
+				// The account's agents: a reply with no listing in it is not an empty account.
+				if err == nil {
+					_, err = env.Listing()
+					if err != nil && g.jsonOut {
+						emitJSON(env)
+					}
+				}
+				if err != nil {
+					return &accountReadError{cause: err}
+				}
+			}
 			if err != nil {
 				return err
 			}
@@ -44,6 +57,12 @@ func newListCmd() *cobra.Command {
 			}
 			if perr != nil {
 				return perr
+			}
+			if kind != "agents" {
+				// Records and identities are not agents. renderFleet reads agent fields
+				// only, so it rendered every other kind as "no agents yet" and exited 0.
+				renderListItems(os.Stdout, os.Stderr, env.Result, kind)
+				return nil
 			}
 			renderFleet(env.Result)
 			return nil
@@ -183,9 +202,10 @@ func newCreateCmd() *cobra.Command {
 			"With --register, mint a brand-new agent with its own API key via op:register\n" +
 			"(the key is shown ONCE - capture it). Add --reuse to make that bind idempotent\n" +
 			"on the name: when an agent is ALREADY registered under --name, its existing\n" +
-			"/128 is returned instead of minting a duplicate - the installer's fleet\n" +
-			"auto-bind uses this so an upgrade or re-run preserves the endpoint's identity\n" +
-			"(a reuse cannot re-show the agent's API key; only a fresh mint carries one).\n\n" +
+			"/128 is returned instead of minting a duplicate, so an upgrade or re-run keeps\n" +
+			"the endpoint's identity (a reuse cannot re-show the agent's API key; only a\n" +
+			"fresh mint carries one). When the account cannot be read, --reuse registers\n" +
+			"nothing and says so; run it again once the control plane answers.\n\n" +
 			"Typed identity (one of): register the object under a domain-specific identifier it\n" +
 			"already carries, and its /128 is DERIVED from that identifier - the same id always\n" +
 			"yields the same address, on either nameserver and after any restart, so re-running\n" +
@@ -260,11 +280,15 @@ func newCreateCmd() *cobra.Command {
 				// An upgrade / re-image / lost-marker re-run of the installer must
 				// re-find the agent this endpoint already registered as, never mint a
 				// duplicate /128 (which strands the old identity and moves the
-				// telemetry). The lookup is best-effort by design: a listing failure
-				// falls through to the mint, so a genuinely fresh endpoint (or an
-				// unreachable list) still binds.
+				// telemetry). A listing that did not answer says nothing about whether
+				// the name is taken, so it refuses, registers nothing and names the
+				// command to run again, exactly as `whisper enroll` does.
 				if reuse {
-					if renv, found := reuseRegisteredAgent(c, strings.TrimSpace(chosen)); found {
+					renv, found, lerr := reuseRegisteredAgent(c, strings.TrimSpace(chosen))
+					if lerr != nil {
+						return createReuseRefusal(strings.TrimSpace(chosen), lerr)
+					}
+					if found {
 						handled, perr := renderEnvelope(renv)
 						if perr != nil {
 							return perr
@@ -568,24 +592,44 @@ func preCreateIdentityAddrs(c *client.Client) map[string]string {
 // unreachable autobind marker, a different $HOME) re-finds the SAME /128 instead
 // of minting a duplicate that strands the old identity and moves the telemetry.
 //
-// Matching is liberal (Postel): the friendly label, the agent handle, or the
-// fqdn's first (per-agent) label, all case-insensitive - whichever the server
-// surfaced. Only a live agent is reused (state active or unstated); a revoked or
-// released one is never resurrected. When several match (exactly the duplicates
-// this fix stops accruing), the NEWEST wins: that is the identity currently
-// shipping telemetry, so continuity is preserved.
-//
-// Best-effort BY DESIGN: any listing failure returns found=false and the caller
-// proceeds to mint - the installer must bind a fresh endpoint even when the list
-// is briefly unreachable. The reuse envelope mirrors the op:register result shape
-// (columns/rows, so install.sh's json_field and --json consumers read it
-// unchanged) but carries NO api_key: a key is shown once at mint, never again.
-func reuseRegisteredAgent(c *client.Client, name string) (*client.Envelope, bool) {
+// A non-nil error is a listing that did not answer, which says nothing about whether
+// the agent exists, and the caller refuses; found=false with a nil error is a listing
+// that answered without it, and the caller registers.
+func reuseRegisteredAgent(c *client.Client, name string) (*client.Envelope, bool, error) {
 	if name == "" {
-		return nil, false
+		return nil, false, nil
 	}
 	live, err := liveAgents(c)
 	if err != nil {
+		return nil, false, err
+	}
+	env, found := registeredAgentIn(live, name)
+	return env, found, nil
+}
+
+// createReuseRefusal is what `create --register --reuse` says when it could not read the
+// account: what it was checking, that nothing was registered, and the command to run again.
+// Dropping --reuse is named too, as the choice it is: a new agent with no check.
+func createReuseRefusal(name string, lerr error) error {
+	return fmt.Errorf("could not read this account's agents to check whether an agent named %q "+
+		"is already registered: %s. Nothing was registered. Run 'whisper create --register --reuse "+
+		"--name %s' again once the control plane answers, or drop --reuse to register a new agent "+
+		"without the check", name, strings.TrimRight(friendly(lerr), "."), pasteWord(name))
+}
+
+// registeredAgentIn finds the agent registered under name in a listing that answered.
+//
+// Matching is liberal (Postel): the friendly label, the agent handle, or the
+// fqdn's first (per-agent) label, all case-insensitive - whichever the server
+// surfaced. Only a live agent is in the listing (state active or unstated); a revoked or
+// released one is never resurrected. When several match (exactly the duplicates
+// this fix stops accruing), the NEWEST wins: that is the identity currently
+// shipping telemetry, so continuity is preserved. The reuse envelope mirrors the
+// op:register result shape (columns/rows, so install.sh's json_field and --json
+// consumers read it unchanged) but carries NO api_key: a key is shown once at mint,
+// never again.
+func registeredAgentIn(live []liveAgent, name string) (*client.Envelope, bool) {
+	if name == "" {
 		return nil, false
 	}
 	var best *liveAgent
@@ -605,26 +649,19 @@ func reuseRegisteredAgent(c *client.Client, name string) (*client.Envelope, bool
 	return reuseEnvelope(*best, firstNonBlank(best.label, name))
 }
 
-// reuseMarkedAgent looks for the identity a bind marker recorded, by its /128 (unique) or its
-// agent handle, among the account's live agents. found=false with a nil error is a
-// listing that answered without it: the identity is provably gone. A non-nil error is a listing
-// that did not answer, which proves nothing either way.
-func reuseMarkedAgent(c *client.Client, prev client.BoundIdentity) (*client.Envelope, bool, error) {
-	live, err := liveAgents(c)
-	if err != nil {
-		return nil, false, err
-	}
+// markedAgentIn finds the identity a bind marker recorded, by its /128 (unique) or its agent
+// handle, in a listing that answered. found=false is the identity provably gone.
+func markedAgentIn(live []liveAgent, prev client.BoundIdentity) (*client.Envelope, bool) {
 	for _, m := range live {
 		if (prev.Addr.IsValid() && sameIP(m.addr, prev.Addr.String())) ||
 			(prev.Agent != "" && m.agent != "" && strings.EqualFold(m.agent, prev.Agent)) {
 			// The handle the marker recorded when the listing carries none, so the marker and the
 			// saved agent keep naming the agent, not its (non-unique) label.
 			m.agent = firstNonBlank(m.agent, prev.Agent)
-			env, ok := reuseEnvelope(m, firstNonBlank(m.label, prev.Agent))
-			return env, ok, nil
+			return reuseEnvelope(m, firstNonBlank(m.label, prev.Agent))
 		}
 	}
-	return nil, false, nil
+	return nil, false
 }
 
 // liveAgent is one active agent with an address, as op:list reported it.
@@ -633,24 +670,69 @@ type liveAgent struct {
 	created                  int64
 }
 
-// liveAgents lists the account's agents that may be reused: active (or with no state) and
-// carrying an address. A revoked or released identity is never resurrected. An error is a
-// listing that did not answer, including an envelope that is not ok.
-func liveAgents(c *client.Client) ([]liveAgent, error) {
-	cx, cancel := ctx()
-	defer cancel()
+// accountListing lists the account's agents and returns the listing only when the control
+// plane genuinely answered one. Everything else is an error: no reply, a timeout, a body that
+// does not parse, an envelope that is not ok, a status that is not a success, and a reply that
+// carries no listing at all. The envelope decoder reads an empty or shapeless reply as an empty
+// result, which is right for a read that only displays, and wrong for a caller that decides
+// from it: "no agent here" read off a reply that listed nothing is how a device that has an
+// identity gets a second one. A real listing always names its columns, empty or not.
+func accountListing(c *client.Client, cx context.Context) (*client.Result, error) {
 	env, err := c.Agents(cx, "list", map[string]any{"kind": "agents"})
 	if err != nil {
 		return nil, err
 	}
-	if env == nil || !env.Ok || env.Result == nil {
-		if perr := envelopeError(env); perr != nil {
-			return nil, perr
-		}
-		return nil, fmt.Errorf("op:list returned no result")
+	return env.Listing()
+}
+
+// accountReadError is a listing of the account that did not answer, in the words a person
+// needs: the account could not be read. What a reader would otherwise print about the account
+// (no agents yet, no agent by that name, the saved agent is gone) is not known, so none of it
+// is said. Unwrap keeps the cause visible to a caller that branches on its problem status.
+type accountReadError struct{ cause error }
+
+func (e *accountReadError) Error() string {
+	msg := "could not read this account's agents: " + strings.TrimRight(friendly(e.cause), ".")
+	if pe, ok := client.AsProblem(e.cause); ok && (pe.Status == 401 || pe.Status == 403) {
+		return msg
 	}
-	var out []liveAgent
-	for _, rec := range env.Result.Records() {
+	return msg + ". Try again once the control plane answers"
+}
+
+func (e *accountReadError) Unwrap() error { return e.cause }
+
+// isAccountReadError reports whether err is a listing of the account that did not answer.
+func isAccountReadError(err error) bool {
+	var are *accountReadError
+	return errors.As(err, &are)
+}
+
+// readAccount is accountListing for a reader that reports the failure as it is.
+func readAccount(c *client.Client, cx context.Context) (*client.Result, error) {
+	res, err := accountListing(c, cx)
+	if err != nil {
+		return nil, &accountReadError{cause: err}
+	}
+	return res, nil
+}
+
+// liveAgents lists the account's agents that may be reused: active (or with no state) and
+// carrying an address. A revoked or released identity is never resurrected. An error is a
+// listing that did not answer (accountListing).
+func liveAgents(c *client.Client) ([]liveAgent, error) {
+	cx, cancel := ctx()
+	defer cancel()
+	res, err := accountListing(c, cx)
+	if err != nil {
+		return nil, err
+	}
+	return liveAgentsIn(res), nil
+}
+
+// liveAgentsIn is the reusable agents of a listing that answered.
+func liveAgentsIn(res *client.Result) []liveAgent {
+	out := []liveAgent{}
+	for _, rec := range res.Records() {
 		item := rec
 		if m, ok := rec["item"].(map[string]any); ok {
 			item = m
@@ -668,7 +750,7 @@ func liveAgents(c *client.Client) ([]liveAgent, error) {
 			fqdn: field(item, "fqdn"), label: field(item, "label"),
 			created: parseEpoch(field(item, "created", "allocated_at"))})
 	}
-	return out, nil
+	return out
 }
 
 // reuseEnvelope mirrors the op:register result shape for a reused agent, with no api_key.
@@ -852,6 +934,9 @@ func newKillCmd() *cobra.Command {
 		Use:   "kill <agent|address|label>",
 		Short: "Release an identity (IRREVERSIBLE) - or --revoke an agent's Whisper access",
 		Long: "Release the caller's own /128 identity (op:identity release) - IRREVERSIBLE.\n" +
+			"Releasing an identity does not cut off the device's key: the agent's API key still\n" +
+			"works. To cut off a lost or stolen device, revoke it with --revoke.\n" +
+			"\n" +
 			"With --revoke (admin:dns), revoke an agent: withdraw its /128, PTR and egress\n" +
 			"tokens and refuse its control-plane access (op:revoke). The API key is a Whisper\n" +
 			"API key managed by Whisper auth and is NOT deleted. Confirms unless --yes; in a\n" +
@@ -882,6 +967,9 @@ func newKillCmd() *cobra.Command {
 
 			var op string
 			var a map[string]any
+			// revokeAs is the agent a follow-up --revoke must name. A release leaves the
+			// agent and its key in place, so the id is read now, from the same list row.
+			revokeAs := target
 			if full {
 				op, a = "revoke", map[string]any{"agent": target}
 			} else {
@@ -889,13 +977,22 @@ func newKillCmd() *cobra.Command {
 				a = map[string]any{"release": true}
 				if looksLikeV6(target) {
 					a["address"] = target
+					// Best effort: an address is released whether or not the list answers.
+					if item, lerr := findAgentItem(c, target); lerr == nil {
+						revokeAs = agentIDOr(item, target)
+					}
 				} else {
 					// op:identity release wants the address; resolve the id via list if needed.
-					addr, rerr := resolveAddress(c, target)
+					item, rerr := findAgentItem(c, target)
 					if rerr != nil {
 						return rerr
 					}
+					addr := field(item, "address", "addr128")
+					if addr == "" {
+						return agentNotFound(target)
+					}
 					a["address"] = addr
+					revokeAs = agentIDOr(item, target)
 				}
 			}
 			env, err := c.Agents(cx, op, a)
@@ -907,6 +1004,9 @@ func newKillCmd() *cobra.Command {
 				return perr
 			}
 			renderKilled(env.Result, target)
+			if !full {
+				renderReleaseKeyNote(revokeAs)
+			}
 			return nil
 		},
 	}
@@ -926,30 +1026,56 @@ func renderKilled(res *client.Result, target string) {
 	fmt.Fprintf(os.Stderr, "whisper: %s - %s\n", target, st)
 }
 
+// renderReleaseKeyNote says what a release leaves behind: the agent's key, and
+// the one command that cuts it off, with the agent filled in so it can be pasted.
+func renderReleaseKeyNote(agent string) {
+	fmt.Fprintf(os.Stderr, "whisper: the agent's key still works; to cut it off: whisper kill --revoke %s\n", agent)
+}
+
+// agentIDOr is the row's agent id, or fallback when the row carries none.
+func agentIDOr(item map[string]any, fallback string) string {
+	if id := strings.TrimSpace(asString(item["agent"])); id != "" {
+		return id
+	}
+	return fallback
+}
+
 // resolveAddress maps an agent id to its /128 address via op:list (confined to the
 // caller's tenant). Returns a clean not-found error for a foreign/unknown id.
 func resolveAddress(c *client.Client, target string) (string, error) {
-	cx, cancel := ctx()
-	defer cancel()
-	env, err := c.Agents(cx, "list", map[string]any{"kind": "agents"})
+	item, err := findAgentItem(c, target)
 	if err != nil {
 		return "", err
 	}
-	if perr := envelopeError(env); perr != nil {
-		return "", perr
+	if addr := field(item, "address", "addr128"); addr != "" {
+		return addr, nil
 	}
-	for _, rec := range env.Result.Records() {
+	return "", agentNotFound(target)
+}
+
+// findAgentItem is the caller's list row for target (confined to the caller's tenant):
+// the first row that names it and carries an address. A clean not-found otherwise.
+func findAgentItem(c *client.Client, target string) (map[string]any, error) {
+	cx, cancel := ctx()
+	defer cancel()
+	res, err := readAccount(c, cx)
+	if err != nil {
+		return nil, err
+	}
+	for _, rec := range res.Records() {
 		item := rec
 		if m, ok := rec["item"].(map[string]any); ok {
 			item = m
 		}
-		if agentItemMatches(item, target) {
-			if addr := field(item, "address", "addr128"); addr != "" {
-				return addr, nil
-			}
+		if agentItemMatches(item, target) && field(item, "address", "addr128") != "" {
+			return item, nil
 		}
 	}
-	return "", &client.ProblemError{Status: 404, Detail: fmt.Sprintf("agent %q not found in your account", target)}
+	return nil, agentNotFound(target)
+}
+
+func agentNotFound(target string) error {
+	return &client.ProblemError{Status: 404, Detail: fmt.Sprintf("agent %q not found in your account", target)}
 }
 
 // agentItemMatches answers whether one list row IS the agent the user named.

@@ -216,15 +216,14 @@ type whalePeer struct {
 // whaleFleet is a package var for the same reason lookupWhaleAAAA is: a test drives the
 // real resolution order without a control plane on the other end.
 var whaleFleet = func(ctx context.Context, c *client.Client) ([]whalePeer, error) {
-	env, err := c.Agents(ctx, "list", map[string]any{"kind": "agents"})
+	// accountListing, not the lenient decode: a reply with no listing in it is not an empty
+	// fleet, and a migration that read it as one would mint a second identity per node.
+	res, err := accountListing(c, ctx)
 	if err != nil {
 		return nil, err
 	}
-	if perr := envelopeError(env); perr != nil {
-		return nil, perr
-	}
 	var peers []whalePeer
-	for _, rec := range env.Result.Records() {
+	for _, rec := range res.Records() {
 		item := rec
 		if m, ok := rec["item"].(map[string]any); ok {
 			item = m

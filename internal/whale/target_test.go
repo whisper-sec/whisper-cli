@@ -49,7 +49,7 @@ func TestParseTarget_NamesNormaliseTheSameWay(t *testing.T) {
 		{"db-01.t9f.agents.whisper.online.", "db-01.t9f.agents.whisper.online", KindFQDN},
 		{"  DB-01.T9F.Agents.Whisper.Online.  ", "db-01.t9f.agents.whisper.online", KindFQDN},
 		{"_whisper-agentkey.example.com", "_whisper-agentkey.example.com", KindFQDN},
-		{"agent-af392aa87c7f2b274", "agent-af392aa87c7f2b274", KindLabel},
+		{"agent-a0000000000000002", "agent-a0000000000000002", KindLabel},
 	}
 	for _, c := range cases {
 		got, err := ParseTarget(c.in)
