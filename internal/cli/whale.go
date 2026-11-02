@@ -56,6 +56,7 @@ func newWhaleCmd() *cobra.Command {
 			"  route      subnet routes: what this node carries, and what advertising needs\n" +
 			"  exit-node  the ways out, ranked on the graph rather than on latency alone\n" +
 			"  ssh        SSH to a node, host key proven from the IANA DNSSEC root\n" +
+			"  caller     who an accepted connection really came from, for sshd to ask\n" +
 			"  migrate    move a Tailscale tailnet here, plan first, nothing silently widened\n" +
 			"  serve      put a local port in front of your fleet, pinned by the published TLSA\n" +
 			"  funnel     the same port, answered for the whole internet, deliberately\n" +
@@ -73,6 +74,7 @@ func newWhaleCmd() *cobra.Command {
 		newWhaleWhoisCmd(),
 		newWhaleDNSCmd(),
 		newWhaleSSHCmd(),
+		newWhaleCallerCmd(),
 		newWhaleMigrateCmd(),
 		newWhaleRouteCmd(),
 		newWhaleExitNodeCmd(),

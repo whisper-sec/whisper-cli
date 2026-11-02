@@ -944,10 +944,17 @@ func newKillCmd() *cobra.Command {
 			"\n" +
 			"The target is anything `whisper list` printed: the AGENT id, the ADDRESS, or the\n" +
 			"LABEL. A label that names more than one of your agents is refused rather than\n" +
-			"guessed - use the id or the address to say which one.",
+			"guessed - use the id or the address to say which one.\n" +
+			"\n" +
+			"A --revoke that finds no agent of yours by that name revokes nothing and exits 3,\n" +
+			"so a script can tell \"already gone\" from a failure (exit 1).",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			target := args[0]
+			// A pasted id often carries a stray space or newline; the agent is the same.
+			target := strings.TrimSpace(args[0])
+			if target == "" {
+				return usageErr("name the agent to kill: its id, its address or its label ('whisper list' prints all three)")
+			}
 			if !yes {
 				if !isInteractive() {
 					return fmt.Errorf("refusing to release %q without confirmation in a non-interactive run - pass --yes", target)
@@ -997,11 +1004,16 @@ func newKillCmd() *cobra.Command {
 			}
 			env, err := c.Agents(cx, op, a)
 			if err != nil {
-				return err
+				return killOutcome(full, err)
 			}
 			handled, perr := renderEnvelope(env)
+			if full && perr == nil && client.RevokeMatchedNothing(env, nil) {
+				// A plane from before the fix answers a revoke that matched nothing with an ok row
+				// whose status is not_found. That never reads as success here, --json or not.
+				perr = revokeMatchedNothingErr(target)
+			}
 			if handled || perr != nil {
-				return perr
+				return killOutcome(full, perr)
 			}
 			renderKilled(env.Result, target)
 			if !full {
@@ -1016,14 +1028,45 @@ func newKillCmd() *cobra.Command {
 }
 
 func renderKilled(res *client.Result, target string) {
-	recs := res.Records()
-	st := "submitted"
-	if len(recs) > 0 {
-		if v := field(recs[0], "status", "state"); v != "" {
-			st = v
-		}
+	st := killedStatus(res)
+	if st == "" {
+		st = "submitted"
 	}
 	fmt.Fprintf(os.Stderr, "whisper: %s - %s\n", target, st)
+}
+
+// killedStatus is the status the kill's reply row carries, "" when it carries none.
+func killedStatus(res *client.Result) string {
+	if res == nil {
+		return ""
+	}
+	if recs := res.Records(); len(recs) > 0 {
+		return field(recs[0], "status", "state")
+	}
+	return ""
+}
+
+// killExitNothingMatched is the exit code of a `whisper kill --revoke` that found no agent of this
+// account by that name: it ran, and the answer is that there was nothing to revoke. It is kept
+// apart from 1 (could not ask) so an uninstaller re-run, or a script cleaning up, can tell
+// "already gone" from a failure. Like every verdict code, it is still non-zero.
+const killExitNothingMatched = 3
+
+// killOutcome maps a kill's error to its exit: a --revoke that matched nothing is the verdict
+// code above, with the plane's own words; anything else is returned as it was.
+func killOutcome(full bool, err error) error {
+	if full && isRevokeMatchedNothing(err) {
+		return &exitCodeError{code: killExitNothingMatched, msg: err.Error()}
+	}
+	return err
+}
+
+// revokeMatchedNothingErr is what `whisper kill --revoke` says when the plane found no agent of
+// this account by that name: nothing was revoked, and the forms it does take.
+func revokeMatchedNothingErr(target string) error {
+	return &client.ProblemError{Status: 404, Title: "NOT_FOUND", Detail: fmt.Sprintf("nothing was revoked: no agent of "+
+		"yours matches %q. Pass its id (with or without the agent- prefix), its /128 address or its label, "+
+		"as 'whisper list' prints them", target)}
 }
 
 // renderReleaseKeyNote says what a release leaves behind: the agent's key, and

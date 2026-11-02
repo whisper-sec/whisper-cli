@@ -29,8 +29,8 @@ const (
 	akeyZone  = "agents.example."
 	akeyAFQDN = "a1.te08.agents.example."
 	akeyBFQDN = "b2.te08.agents.example."
-	akeyAAddr = "2a04:2a01:9:0:a4df:67f8:5ca4:aaa1"
-	akeyBAddr = "2a04:2a01:9:0:a4df:67f8:5ca4:bbb2"
+	akeyAAddr = "2a04:2a01:9::aaa1"
+	akeyBAddr = "2a04:2a01:9::bbb2"
 )
 
 // keyAgent is one agent's identity: its name, its /128 and the EC P-256 key its

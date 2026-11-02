@@ -57,12 +57,23 @@ func newWhoamiCmd() *cobra.Command {
 			// dashboard's tenant lookup).
 			if view.KeyPresent {
 				if c, err := resolveClient(false, false); err == nil {
-					view.Tenant, view.AgentTenants, view.Agents, view.agentsKnown, view.reachErr =
-						whoamiFleet(c)
+					view.Tenant, view.AgentTenants, view.Agents, view.reachErr = whoamiFleet(c)
+				} else {
+					view.reachErr = err
 				}
+			}
+			if view.reachErr != nil {
+				view.Error = friendly(view.reachErr)
 			}
 			if g.jsonOut {
 				emitJSONValue(view)
+				// A machine surface that could not fill its fields must not exit 0: a
+				// script checks the exit code before it reads "agents", and a read that timed
+				// out used to reach it as a clean answer. The object above still carries what
+				// DID answer, and names what did not in "error".
+				if view.reachErr != nil {
+					return &exitCodeError{code: 1, msg: "whoami is incomplete: " + view.Error}
+				}
 				return nil
 			}
 			keyCell := "not set - run: whisper login"
@@ -74,8 +85,8 @@ func newWhoamiCmd() *cobra.Command {
 			// tenant handle that had answered perfectly well.
 			tenantCell := orDash(view.Tenant)
 			agentsCell := "-"
-			if view.KeyPresent && view.agentsKnown {
-				agentsCell = fmt.Sprintf("%d", view.Agents)
+			if view.Agents != nil {
+				agentsCell = fmt.Sprintf("%d", *view.Agents)
 			}
 			rows := [][]string{
 				{"key", keyCell},
@@ -94,7 +105,7 @@ func newWhoamiCmd() *cobra.Command {
 			rows = append(rows, []string{"selected", orVal(view.Selected, "none - run: whisper use {agent}")})
 			printTable([]string{"FIELD", "VALUE"}, rows)
 			if view.reachErr != nil {
-				fmt.Fprintf(os.Stderr, "whisper: could not reach the control plane - %s\n", friendly(view.reachErr))
+				fmt.Fprintf(os.Stderr, "whisper: whoami is incomplete - %s\n", view.Error)
 			}
 			return nil
 		},
@@ -113,13 +124,17 @@ type whoamiView struct {
 	// AgentTenants is how many OTHER handles this key's agents log under, each agent logging
 	// under its own rather than its owner's. It is a pointer so that null (the plane did
 	// not say) and 0 (nothing logs elsewhere) stay different answers on a machine surface.
-	// `agents` below is an int because it already was one and a script reading it predates
-	// this; its unknown case is the "-" in the table.
-	AgentTenants *int   `json:"agent_tenants"`
-	Agents       int    `json:"agents"`
-	Selected     string `json:"selected_agent"`
-	agentsKnown  bool   // whether the fleet read answered at all (drives the "-" cell)
-	reachErr     error  // control-plane reachability, human note only (never in JSON)
+	AgentTenants *int `json:"agent_tenants"`
+	// Agents is the fleet size, and ABSENT when the count could not be read. It used to
+	// be a plain int, so a timed-out read reached --json as "agents": 0, which is a measurement
+	// of an empty fleet rather than "could not count". A script reading it now finds either a
+	// real total or no field, with "error" saying why.
+	Agents   *int   `json:"agents,omitempty"`
+	Selected string `json:"selected_agent"`
+	// Error names whatever the control plane could not answer, so a reader of the JSON knows
+	// which absent fields are unknown rather than empty. Absent when every read answered.
+	Error    string `json:"error,omitempty"`
+	reachErr error  // the same failure as an error, for the exit code and the stderr note
 }
 
 // whoamiFleet answers the two halves of "who am I" with two cheap reads, run
@@ -131,10 +146,11 @@ type whoamiView struct {
 // is how many agents that key holds. A registered agent's events live under the AGENT'S
 // handle, so the first can never be read off the second value.
 //
-// Bounded short so whoami stays snappy; any failure is returned for the caller's degrade
-// path, never propagated as a command error.
+// Bounded short so whoami stays snappy. A failure degrades only its own cell, and is
+// returned so the caller can say which cell is unknown: on stderr for the table, in "error"
+// and the exit code for --json. agents is nil when the count did not answer.
 func whoamiFleet(c *client.Client) (
-	tenant string, agentTenants *int, agents int, agentsKnown bool, err error) {
+	tenant string, agentTenants *int, agents *int, err error) {
 	cx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	var (
@@ -143,7 +159,8 @@ func whoamiFleet(c *client.Client) (
 	)
 	wg.Add(2)
 	go func() { defer wg.Done(); tenant, agentTenants, ownErr = callerTenant(cx, c) }()
-	go func() { defer wg.Done(); agents, fleetErr = fleetSize(cx, c) }()
+	var count int
+	go func() { defer wg.Done(); count, fleetErr = fleetSize(cx, c) }()
 	wg.Wait()
 	// Each read degrades its OWN cell and nothing else. Substituting a handle we could not
 	// confirm is the defect this fixes; discarding one that DID answer because the other read
@@ -151,14 +168,20 @@ func whoamiFleet(c *client.Client) (
 	if ownErr != nil {
 		tenant, agentTenants = "", nil
 	}
-	// The note on stderr is about reachability, so either failure earns it.
-	if ownErr != nil {
-		err = ownErr
+	if fleetErr == nil {
+		agents = &count
 	}
-	if fleetErr != nil {
-		err = fleetErr
+	// Both halves are named when both failed: reporting only the last one would leave a
+	// reader of "error" believing the other absent field was simply empty.
+	switch {
+	case ownErr != nil && fleetErr != nil:
+		err = fmt.Errorf("tenant: %s; agents: %s", friendly(ownErr), friendly(fleetErr))
+	case ownErr != nil:
+		err = fmt.Errorf("tenant: %s", friendly(ownErr))
+	case fleetErr != nil:
+		err = fmt.Errorf("agents: %s", friendly(fleetErr))
 	}
-	return tenant, agentTenants, agents, fleetErr == nil, err
+	return tenant, agentTenants, agents, err
 }
 
 // callerTenant asks the plane what the CALLER'S OWN key files activity under:
@@ -169,9 +192,9 @@ func whoamiFleet(c *client.Client) (
 // (the CLI never sees a userId), and what used to stand in for it was the FIRST agent's
 // handle, derived off that agent's fqdn. That is a different tenant by construction, and
 // a convincing one: right shape, stable, and genuinely belonging to something the caller
-// owns. A real investigation was spent on it before it was recognised. An
-// empty return means the plane did not say, and every caller then shows "-" rather than a
-// substitute.
+// owns. A real investigation was spent on it before it was recognised. A
+// reply that does not mark exactly one row self is an ERROR, not an empty answer: every
+// caller then shows "-" rather than a substitute, and says why.
 func callerTenant(cx context.Context, c *client.Client) (own string, agentTenants *int, err error) {
 	env, aerr := c.Agents(cx, "list", map[string]any{"kind": "activityTenants", "view": "self"})
 	if aerr != nil {
@@ -205,8 +228,13 @@ func callerTenant(cx context.Context, c *client.Client) (own string, agentTenant
 			agentTenants = nil
 		}
 	}
-	if own == "" || marked != 1 {
-		return "", nil, nil
+	switch {
+	case marked == 0:
+		return "", nil, fmt.Errorf("the control plane did not name this key's own tenant")
+	case marked > 1:
+		return "", nil, fmt.Errorf("the control plane named %d tenants as this key's own, so none is shown", marked)
+	case own == "":
+		return "", nil, fmt.Errorf("the control plane named this key's own tenant without a handle")
 	}
 	return own, agentTenants, nil
 }

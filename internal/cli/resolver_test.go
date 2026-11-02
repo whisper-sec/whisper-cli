@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/resolverprofile"
 )
 
@@ -529,5 +530,76 @@ func TestT2Resolver_ModeConflictIsUsageError(t *testing.T) {
 	_, _, err := t2rRun(t, "--doh", "--resolver")
 	if err == nil || !isUsageError(err) {
 		t.Fatalf("--doh with --resolver must be a usage error, got: %v", err)
+	}
+}
+
+// A revoke that matched nothing is the plane's NOT_FOUND now, never an ok row. For --off
+// that means the device is already gone (an earlier --off whose reply was lost), so it finishes:
+// the state file goes and the run succeeds. A bare 404 without the plane's code (a wrong control
+// URL, a proxy) is a failure to reach the plane and keeps the state for a retry.
+func TestT2Resolver_OffTreatsTheNotFoundRevokeAsAlreadyRevoked(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reply    string
+		status   int
+		finishes bool
+	}{
+		{"the plane's NOT_FOUND envelope", `{"ok":false,"status":404,"result":null,"error":{"code":"NOT_FOUND","message":"nothing was revoked","retryable":false}}`, 200, true},
+		{"an older plane's not_found row", `{"ok":true,"status":200,"result":{"columns":["agent","status"],"rows":[["x","not_found"]]}}`, 200, true},
+		{"a bare HTTP 404", `not here`, 404, false},
+		{"a 404 envelope with another code", `{"ok":false,"status":404,"result":null,"error":{"code":"UNKNOWN_OP","message":"no such op"}}`, 200, false},
+		{"a 503", `{"ok":false,"status":503,"result":null,"error":{"code":"STORE_UNAVAILABLE","message":"retry"}}`, 200, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &t2rFakeApplier{host: resolverprofile.Host{ResolvedActive: true}}
+			t2rSetup(t, "linux", fake)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.reply))
+			}))
+			defer srv.Close()
+			g.controlURL, g.key = srv.URL, "whisper_live_test"
+			saveResolverState(resolverState{Token: t2rTok, Address: t2rAddr, DoHURL: t2rDoH, Mode: "doh", OS: "linux"})
+
+			_, stderr, err := t2rRun(t, "--off")
+			_, statErr := os.Stat(resolverStatePathFn())
+			if tc.finishes {
+				if err != nil {
+					t.Fatalf("an already-revoked device finishes --off: %v (stderr=%s)", err, stderr)
+				}
+				if !strings.Contains(stderr, "nothing was revoked") || !strings.Contains(stderr, "whisper kill --revoke "+t2rAddr) {
+					t.Fatalf("it says nothing was revoked, both reasons, and the address to revoke with the other key: %s", stderr)
+				}
+				if !os.IsNotExist(statErr) {
+					t.Fatalf("the state file is removed")
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("a failure to reach the plane is not read as revoked")
+			}
+			if statErr != nil {
+				t.Fatalf("the state is kept for a retry: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestIsRevokeMatchedNothing(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want bool
+	}{
+		{&client.ProblemError{Status: 404, Title: "NOT_FOUND"}, true},
+		{&client.ProblemError{Status: 0, Title: " not_found "}, true},
+		{&client.ProblemError{Status: 404}, false},
+		{&client.ProblemError{Status: 403, Title: "NOT_FOUND"}, false},
+		{errors.New("NOT_FOUND"), false},
+		{nil, false},
+	} {
+		if got := isRevokeMatchedNothing(tc.err); got != tc.want {
+			t.Fatalf("isRevokeMatchedNothing(%v) = %v, want %v", tc.err, got, tc.want)
+		}
 	}
 }

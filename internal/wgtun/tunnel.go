@@ -205,6 +205,11 @@ type Tunnel struct {
 	// nil (the default) leaves the listener documents-only, exactly as shipped it.
 	serveH http.Handler
 
+	// acceptor is the inbound TCP accept set (accept.go): the ports the operator opened
+	// on this /128 and the connections they carry. nil (the default) opens nothing. Guarded by
+	// mu; Stop closes it with the rest of the tunnel.
+	acceptor *acceptor
+
 	stop   chan struct{} // closed by Stop() to end the monitor
 	closed sync.Once
 }
@@ -238,6 +243,7 @@ func (t *Tunnel) Stop() {
 	if ln != nil {
 		_ = ln.Close() // stop serving the identity leaf alongside the rest of the tunnel
 	}
+	t.stopAccept() // the accepted ports and every connection they carry go with it
 	// The proxy's onStop (wired in Start) closes the device AFTER the accept loop + tunnels
 	// drain, so no splice is mid-dial on the netstack when it goes away. Stop() blocks on that.
 	if t.proxy != nil {

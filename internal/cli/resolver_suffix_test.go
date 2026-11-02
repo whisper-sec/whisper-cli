@@ -36,7 +36,7 @@ func TestSearchSuffixPrefersTheMemberNamespace(t *testing.T) {
 	island := "tfedcba9876543210fedcba9876543210.agents.whisper.online"
 
 	reparented := map[string]any{
-		"fqdn":   "a124d220cdcd4b538." + island + ".",
+		"fqdn":   "a00000000000000d1." + island + ".",
 		"member": "db-01." + fleet + ".",
 	}
 	if got := parentOfFqdn(field(reparented, "member", "fqdn")); got != fleet {
@@ -45,7 +45,7 @@ func TestSearchSuffixPrefersTheMemberNamespace(t *testing.T) {
 
 	// A control plane from before the member column returns no `member` at all; the fqdn's
 	// parent is still the right answer there, so the fallback is not a degradation.
-	legacyShape := map[string]any{"fqdn": "a124d220cdcd4b538." + island + "."}
+	legacyShape := map[string]any{"fqdn": "a00000000000000d1." + island + "."}
 	if got := parentOfFqdn(field(legacyShape, "member", "fqdn")); got != island {
 		t.Errorf("legacy-shape agent: search suffix = %q, want %q", got, island)
 	}

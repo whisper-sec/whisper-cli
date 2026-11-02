@@ -460,8 +460,21 @@ func runResolverOff(o resolverOpts, osName string) error {
 		cx, cancel := ctx()
 		defer cancel()
 		env, rerr := c.Agents(cx, "revoke", map[string]any{"agent": st.Address})
+		nothingRevoked := client.RevokeMatchedNothing(env, rerr)
 		if rerr == nil {
 			rerr = envelopeError(env)
+		}
+		if nothingRevoked {
+			// A revoke that matched nothing is a 404 now, and an older plane's ok row with
+			// status not_found means the same and is read the same. The plane gives
+			// one answer for "already revoked" and "not in this key's account", by design, so the
+			// note says both and keeps the address: an earlier --off whose reply was lost leaves
+			// nothing to do, and a device minted under another account's key is revoked with it.
+			// The state goes either way, as it always has, so a later --off does not trip on it.
+			fmt.Fprintf(os.Stderr, "whisper: this key's account has no resolve-only device at %s, so nothing was revoked: "+
+				"it was revoked already, or it was set up with another account's key (revoke it with that key: whisper kill --revoke %s)\n",
+				st.Address, st.Address)
+			rerr = nil
 		}
 		if rerr != nil {
 			fmt.Fprintln(os.Stderr, "whisper: DNS reverted, but revoking the device token failed - re-run `whisper resolver --off` to retry")
@@ -670,4 +683,12 @@ func renderResolverApplied(r resolverprofile.Rendered) {
 		fmt.Fprintf(os.Stderr, "  note      %s\n", n)
 	}
 	fmt.Fprintln(os.Stderr, "  revert    whisper resolver --off")
+}
+
+// isRevokeMatchedNothing is the control plane's own answer that op:revoke found no agent of
+// the caller's by that selector: the NOT_FOUND code, on a 404 or with no status. It
+// is read off the code, never off the status alone: a 404 from a mistyped control URL or a
+// proxy in the way is a failure to reach the plane, not a statement that the device is gone.
+func isRevokeMatchedNothing(err error) bool {
+	return client.IsNotFound(err)
 }

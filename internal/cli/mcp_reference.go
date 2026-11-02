@@ -24,8 +24,8 @@ import (
 // RESOURCES whisper://schema/full, whisper://stats, whisper://quota, whisper://server
 // PROMPTS one gallery-driven investigation prompt per catalog workflow
 //
-// The cypher tools + graph-backed resources are keyed (X-API-Key); read_docs, the
-// server descriptor, and prompt discovery are keyless (public). Every tool description
+// The cypher tools + graph-backed resources are keyed (X-API-Key); read_docs,
+// list_workflows, the server descriptor, and prompt discovery are keyless (public). Every tool description
 // ends with a docs link, matching the reference server. Handlers back onto the SAME
 // public endpoints the reference server uses (the graph /api/query, its /stats
 // companion, the console gallery/run stream, the text2cypher translator, and the
@@ -43,10 +43,10 @@ const (
 	mcpText2CypherToolName      = "text2cypher"
 )
 
-// mcpReferenceTools returns the whisper-ai-mirrored tool definitions (the keyed cypher
-// surface). read_docs is keyless-capable but, like the rest of the graph surface, it is
-// only advertised alongside a resolved key so the keyless tier stays exactly
-// verify/rdap (the established two-tier boundary).
+// mcpReferenceTools returns the whisper-ai-mirrored tool definitions for a key-holder.
+// read_docs and list_workflows need no key, so they are also in the keyless listing
+// (mcpReferenceKeylessTools); the rest refuse a keyless call with mcpNoKeyErr. What
+// tools/list shows without a key and what answers without a key are the same set.
 func mcpReferenceTools() []map[string]any {
 	graphDocs := catalog.RawCypherDocsURL()
 	return []map[string]any{
@@ -95,37 +95,8 @@ func mcpReferenceTools() []map[string]any {
 				},
 			},
 		},
-		{
-			"name": mcpReadDocsToolName,
-			"description": "Read whisper.security documentation on demand - the canonical Cypher, schema, recipe, " +
-				"and reference guides. Three modes: no argument lists the available pages; {\"query\":\"rpki\"} " +
-				"searches pages by keyword; {\"path\":\"reference/graph-schema\"} fetches that page's markdown. " +
-				"Only indexed whisper.security/docs pages are served (path is index-relative, never a URL). " +
-				"No API key needed. Docs: " + catalog.DocsBase() + "/docs",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"query": map[string]any{"type": "string", "description": "optional keyword search over doc titles/sections/summaries/paths"},
-					"path":  map[string]any{"type": "string", "description": "optional index-relative doc path to fetch (e.g. \"reference/graph-schema\")"},
-				},
-			},
-		},
-		{
-			"name": mcpListWorkflowsToolName,
-			"description": "List or search the gallery of ready-made investigations (workflows) and recipes you " +
-				"can run with run_workflow - so a multi-step investigation is ONE call instead of many " +
-				"hand-written queries. CALL THIS FIRST for attack-surface, footprint, recon, domain/ASN/IP/" +
-				"prefix profiling, DNS & email posture, BGP/RPKI health, and takeover checks. Returns each " +
-				"item's slug, kind (workflow|recipe), title, summary, its inputs, and its tunable params. " +
-				"Filter with keyword and/or kind. Docs: " + catalog.DocsBase() + "/docs",
-			"inputSchema": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"keyword": map[string]any{"type": "string", "description": "case-insensitive substring over slug/title/summary"},
-					"kind":    map[string]any{"type": "string", "enum": []string{"workflow", "recipe"}, "description": "workflow (multi-step flow) or recipe (single direct call); omit for both"},
-				},
-			},
-		},
+		mcpReadDocsTool(),
+		mcpListWorkflowsTool(),
 		{
 			"name": mcpRunWorkflowToolName,
 			"description": "Run one or more gallery workflows/recipes by slug and return their results - " +
@@ -803,4 +774,73 @@ func mcpPromptGet(name string, args map[string]any) (map[string]any, bool) {
 			{"role": "user", "content": map[string]any{"type": "text", "text": b.String()}},
 		},
 	}, true
+}
+
+// mcpReadDocsTool is read_docs: public documentation, so it is listed and answered with or
+// without a key.
+func mcpReadDocsTool() map[string]any {
+	return map[string]any{
+		"name": mcpReadDocsToolName,
+		"description": "Read whisper.security documentation on demand - the canonical Cypher, schema, recipe, " +
+			"and reference guides. Three modes: no argument lists the available pages; {\"query\":\"rpki\"} " +
+			"searches pages by keyword; {\"path\":\"reference/graph-schema\"} fetches that page's markdown. " +
+			"Only indexed whisper.security/docs pages are served (path is index-relative, never a URL). " +
+			"No API key needed. Docs: " + catalog.DocsBase() + "/docs",
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"query": map[string]any{"type": "string", "description": "optional keyword search over doc titles/sections/summaries/paths"},
+				"path":  map[string]any{"type": "string", "description": "optional index-relative doc path to fetch (e.g. \"reference/graph-schema\")"},
+			},
+		},
+	}
+}
+
+// mcpListWorkflowsTool is list_workflows: the embedded gallery is local data, so it is listed
+// and answered with or without a key. Running an entry through run_workflow is keyed,
+// so the description says which entries a keyless client can still run, as their own tools.
+func mcpListWorkflowsTool() map[string]any {
+	return map[string]any{
+		"name": mcpListWorkflowsToolName,
+		"description": "List or search the gallery of ready-made investigations (workflows) and recipes you " +
+			"can run with run_workflow - so a multi-step investigation is ONE call instead of many " +
+			"hand-written queries. CALL THIS FIRST for attack-surface, footprint, recon, domain/ASN/IP/" +
+			"prefix profiling, DNS & email posture, BGP/RPKI health, and takeover checks. Returns each " +
+			"item's slug, kind (workflow|recipe), title, summary, its inputs, and its tunable params. " +
+			"Filter with keyword and/or kind. Listing needs no API key; running an entry with " +
+			"run_workflow does. Without a key, " + mcpKeylessRecipeToolNames() + " run as their own tools. " +
+			"Docs: " + catalog.DocsBase() + "/docs",
+		"inputSchema": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"keyword": map[string]any{"type": "string", "description": "case-insensitive substring over slug/title/summary"},
+				"kind":    map[string]any{"type": "string", "enum": []string{"workflow", "recipe"}, "description": "workflow (multi-step flow) or recipe (single direct call); omit for both"},
+			},
+		},
+	}
+}
+
+// mcpReferenceKeylessTools is the part of the reference surface that answers without a key,
+// listed in the keyless tier so a keyless client learns it can read the docs and browse the
+// gallery.
+func mcpReferenceKeylessTools() []map[string]any {
+	return []map[string]any{mcpReadDocsTool(), mcpListWorkflowsTool()}
+}
+
+// mcpKeylessRecipeToolNames renders the keyless graph recipe tools as "a, b and c", read from
+// the catalog so the list_workflows description cannot drift from what the keyless tier lists.
+func mcpKeylessRecipeToolNames() string {
+	var names []string
+	for _, t := range mcpGraphKeylessTools() {
+		if n, _ := t["name"].(string); n != "" {
+			names = append(names, n)
+		}
+	}
+	switch len(names) {
+	case 0:
+		return "no gallery entries"
+	case 1:
+		return names[0]
+	}
+	return strings.Join(names[:len(names)-1], ", ") + " and " + names[len(names)-1]
 }

@@ -864,3 +864,65 @@ func TestPlanPersistsNothingInTheUserConfigDir(t *testing.T) {
 		t.Error("the credential was echoed to the terminal")
 	}
 }
+
+// A rollback whose undo revoke the plane answers NOT_FOUND (an earlier rollback reached it and
+// lost the reply) counts it rolled back, so a re-run converges; any other failure still fails.
+func TestRollbackCountsANotFoundRevokeAsAlreadyRolledBack(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		reply    string
+		converge bool
+	}{
+		{"the plane's NOT_FOUND", `{"ok":false,"status":404,"result":null,"error":{"code":"NOT_FOUND","message":"nothing was revoked"}}`, true},
+		{"a store fault", `{"ok":false,"status":503,"result":null,"error":{"code":"STORE_UNAVAILABLE","message":"retry"}}`, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			real := migrateControlServer(t, nil)
+			defer real.Close()
+			front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				raw, _ := io.ReadAll(r.Body)
+				if sniffOp(string(raw)) == "revoke" {
+					w.Header().Set("Content-Type", "application/json")
+					_, _ = w.Write([]byte(tc.reply))
+					return
+				}
+				resp, err := http.Post(real.URL+r.URL.Path, r.Header.Get("Content-Type"), strings.NewReader(string(raw)))
+				if err != nil {
+					w.WriteHeader(502)
+					return
+				}
+				defer resp.Body.Close()
+				b, _ := io.ReadAll(resp.Body)
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(resp.StatusCode)
+				_, _ = w.Write(b)
+			}))
+			defer front.Close()
+			migrateGlobals(t, front.URL)
+			plan := writeTestPlan(t, t.TempDir(), false)
+			if _, _, err := runWhale(t, "whale", "migrate", "apply", "-f", plan); err != nil {
+				t.Fatalf("apply: %v", err)
+			}
+			_, _, err := runWhale(t, "whale", "migrate", "rollback", "-f", plan, "--yes")
+			after, lerr := whale.LoadPlan(plan)
+			if lerr != nil {
+				t.Fatal(lerr)
+			}
+			stillApplied := 0
+			for _, r := range after.Receipts {
+				if r.Applied() {
+					stillApplied++
+				}
+			}
+			if tc.converge {
+				if err != nil || stillApplied != 0 {
+					t.Fatalf("an already-gone agent is rolled back: err %v, %d still applied", err, stillApplied)
+				}
+				return
+			}
+			if err == nil || stillApplied == 0 {
+				t.Fatalf("a store fault stays a failed rollback: err %v, %d still applied", err, stillApplied)
+			}
+		})
+	}
+}

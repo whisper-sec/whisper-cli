@@ -594,6 +594,12 @@ type egressSession struct {
 	// keys are the WireGuard and identity keys this session came up with, kept so a renewal
 	// re-adds the same peer and proves the same identity. In memory only, never written out.
 	keys *connectKeys
+	// accepts / acceptScope are the ports this session's tunnel opened on its /128 and who they
+	// admit (connect_accept.go), recorded so status can say so. Empty for every session that
+	// was not asked to accept anything.
+	accepts     []acceptRecord
+	acceptScope string
+	acceptFrom  []string
 }
 
 // nat64 reports the NAT64 prefix this session's tunnel SETTLED on and where that came from, for
@@ -929,12 +935,21 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 			}
 		}
 	}
-	return &egressSession{
+	sess := &egressSession{
 		endpoint: tun.Endpoint(),
 		addr:     ce.address,
 		tier:     "wireguard",
 		local:    tun,
-	}, nil
+	}
+	// The ports this process was asked to accept, opened on every tunnel it brings up, so a
+	// session renewed after the box dropped its peer answers on them again.
+	if p := currentAcceptPlan(); p != nil {
+		sess.accepts, sess.acceptScope = p.open(tun)
+		if len(sess.accepts) > 0 {
+			sess.acceptFrom = p.fromText()
+		}
+	}
+	return sess, nil
 }
 
 // wireGuardConfig builds the device configuration from a WireGuard connect envelope: OUR

@@ -187,6 +187,11 @@ func (a *App) yankSelected() (tea.Model, tea.Cmd) {
 func (a *App) onWriteResult(m writeResultMsg) (tea.Model, tea.Cmd) {
 	if m.err != nil {
 		a.setToast(friendlyErr(m.err), true)
+		if m.nothingRevoked {
+			// A final answer, not a fault to retry: the agent the operator picked is already
+			// gone from this account, so the fleet the pick came from is refreshed.
+			return a, loadFleet(a.client)
+		}
 		// keep the form open so the operator can correct + retry (never lose their input)
 		return a, nil
 	}

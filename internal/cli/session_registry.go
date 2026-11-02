@@ -72,6 +72,13 @@ type sessionRecord struct {
 	// Renews is set by a holder that renews its session when the tunnel asks. Another holder
 	// of the same address waits for one of these, never for a session that cannot renew.
 	Renews bool `json:"renews,omitempty"`
+	// Accept / AcceptScope are the TCP ports this holder opened on its /128 and who may reach
+	// them. On disk because a node answering on a port is a fact about the HOST that
+	// `whisper whale status` must show from any shell, and above all a public one. Absent when
+	// nothing is accepted, which is the default.
+	Accept      []acceptRecord `json:"accept,omitempty"`
+	AcceptScope string         `json:"accept_scope,omitempty"`
+	AcceptFrom  []string       `json:"accept_from,omitempty"`
 
 	// path is the file this record was READ from. Not serialised: it is how a sweep
 	// removes the record it is actually looking at instead of recomputing a name, which is what
@@ -163,6 +170,9 @@ func writeSessionRecord(sess *egressSession) {
 		Tier:     firstNonBlank(sess.tier, "socks5"),
 		Port:     endpointPort(sess.endpoint),
 		PID:      os.Getpid(),
+	}
+	if len(sess.accepts) > 0 {
+		rec.Accept, rec.AcceptScope, rec.AcceptFrom = sess.accepts, sess.acceptScope, sess.acceptFrom
 	}
 	if prefix, source, ok := sess.nat64(); ok {
 		rec.NAT64Prefix, rec.NAT64Source = prefix, source

@@ -96,7 +96,10 @@ func stubWhaleAAAA(t *testing.T, name, addr string) {
 // stubSSHDial replaces the ssh(1) exec so a test can assert the argv without connecting.
 func stubSSHDial(t *testing.T, got *[]string) {
 	t.Helper()
-	savedRun, savedVer := whaleSSHRun, sshVersionBanner
+	savedRun, savedVer, savedRoutes := whaleSSHRun, sshVersionBanner, sshConfigRoutes
+	// The developer's own ~/.ssh/config must not decide what these tests see.
+	sshConfigRoutes = func(string, []string, string) bool { return false }
+	t.Cleanup(func() { sshConfigRoutes = savedRoutes })
 	whaleSSHRun = func(path string, args []string) error {
 		*got = append([]string{path}, args...)
 		return nil

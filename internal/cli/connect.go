@@ -23,6 +23,8 @@ func newConnectCmd() *cobra.Command {
 	var vin, ecuSerial string
 	var verbose, ensure, adoptKey bool
 	var port int
+	var acceptPorts, acceptFrom []string
+	var acceptPublic, acceptYes bool
 	cmd := &cobra.Command{
 		Use:   "connect",
 		Short: "Connect egress bound to your /128 (auto: Tier-1 WireGuard, falling back to Tier-1.5 SOCKS5)",
@@ -48,7 +50,14 @@ func newConnectCmd() *cobra.Command {
 			"on the WireGuard tier that would replace the peer another host holds for it.\n" +
 			"A saved agent your account no longer has is refused, naming your agents.\n\n" +
 			"Every agent has a human name, so a create asks for --name (a terminal prompts;\n" +
-			"headless --name is required). connect never mints an unnamed agent.",
+			"headless --name is required). connect never mints an unnamed agent.\n\n" +
+			"Inbound (--accept): on the routed tier this node's /128 answers only the ports you\n" +
+			"open. `--accept 22` passes TCP on port 22 of the /128 to 127.0.0.1:22, and\n" +
+			"`--accept 2222=127.0.0.1:22` maps one port to another. It is off by default and\n" +
+			"admits your fleet only; --accept-from adds addresses or prefixes, and\n" +
+			"--accept-public admits the whole internet once you confirm it. `whisper whale\n" +
+			"status` lists what is accepted, and `whisper service install --accept 22 --now`\n" +
+			"keeps it up across reboots.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --ensure: the IDEMPOTENT daemon path (used by `whisper init claude` + the
@@ -60,6 +69,28 @@ func newConnectCmd() *cobra.Command {
 			}
 			if adoptKey && ensure {
 				return usageErr("--adopt-key is a one-off request; run it as a plain `whisper connect --adopt-key`, then use --ensure as usual")
+			}
+			// --accept: validated, and the public form confirmed, before anything is
+			// built. It needs the routed tier, because only a routed node has a /128 to answer on.
+			acceptReq, aerr := buildAcceptRequest(acceptPorts, acceptFrom, acceptPublic)
+			if aerr != nil {
+				return usageErr("%s", aerr.Error())
+			}
+			if acceptReq != nil {
+				if ensure {
+					return usageErr("--accept is held by a connection that stays up; for a project, write it into the " +
+						"service with `whisper service install --accept ...`, or run `whisper connect --accept ...` itself")
+				}
+				switch {
+				case isAutoTier(tier):
+					tier = tierWireGuard // no fallback: Tier-1.5 has no /128 of its own to answer on
+				case !isWireGuardTier(tier):
+					return usageErr("--accept answers on this node's own /128, which only the routed tier has; "+
+						"drop --tier %s, or use --tier wireguard", tier)
+				}
+				if cerr := confirmAcceptPublic(acceptReq, acceptYes); cerr != nil {
+					return cerr
+				}
 			}
 			if ensure {
 				return runEnsure(configFile, port)
@@ -120,6 +151,12 @@ func newConnectCmd() *cobra.Command {
 				c, err := resolveClient(true, false)
 				if err != nil {
 					return err
+				}
+				if acceptReq != nil {
+					fcx, fcancel := context.WithTimeout(context.Background(), acceptStartupBudget)
+					plan := newAcceptPlan(fcx, c, acceptReq, foregroundLogf())
+					fcancel()
+					defer installAcceptPlan(plan)()
 				}
 				// With --agent, --name is the label op:connect carries (as it always was), not a
 				// second selector, so the pick sees it only when no agent was named.
@@ -234,6 +271,10 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&verbose, "verbose", false, "show the full egress detail block (default: one line)")
 	cmd.Flags().BoolVar(&ensure, "ensure", false, "idempotent: reuse a live proxy on the project's port, else start the tunnel as a detached daemon (used by `whisper init claude`)")
 	cmd.Flags().IntVar(&port, "port", 0, "pin the local proxy to a fixed loopback port (default: a free one)")
+	cmd.Flags().StringSliceVar(&acceptPorts, "accept", nil, "answer TCP on this node's /128 and pass it to a local service: 22, or 2222=127.0.0.1:22 (repeatable; off by default; your fleet only)")
+	cmd.Flags().StringSliceVar(&acceptFrom, "accept-from", nil, "also admit these source addresses or prefixes to the accepted ports (repeatable)")
+	cmd.Flags().BoolVar(&acceptPublic, "accept-public", false, "admit THE WHOLE INTERNET to the accepted ports, not only your fleet (asks you to confirm)")
+	cmd.Flags().BoolVar(&acceptYes, "yes", false, "confirm --accept-public without the prompt (scripts)")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to a project's .whisper/config (for --ensure; default: discovered from the cwd)")
 	return cmd
 }

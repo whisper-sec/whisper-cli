@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"os"
@@ -101,6 +102,12 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 	tier := projcfg.NormalizeTier(cfg.Tier)
 	if tier != "" {
 		args["tier"] = tier
+	}
+	// The ports `whisper service install --accept` recorded, opened on every tunnel this daemon
+	// brings up for as long as it runs. A section that cannot be honoured is said once and costs
+	// the accept, never the host's connection.
+	if remove := daemonAcceptPlan(c, cfg, tier); remove != nil {
+		defer remove()
 	}
 	// --tier wireguard: mint a local WG keypair (+ the identity keypair); only the public
 	// halves go to the server. No-op for socks5. (Same best-practice flow as every other
@@ -341,3 +348,25 @@ func resolveDaemonPort(pinned int, supervised bool) (int, bool) {
 // the control plane pick one of the account's agents and replace its peer.
 var errNoProjectAgent = usageErr("the project's .whisper/config names no agent, so there is nothing to connect: " +
 	"re-run 'whisper init' with --agent {agent} or --name {name}")
+
+// daemonAcceptPlan turns the config's accept section into the process's plan, or returns nil
+// when there is nothing to accept or it cannot be honoured.
+func daemonAcceptPlan(c *client.Client, cfg projcfg.Config, tier string) (remove func()) {
+	req, err := acceptRequestFromConfig(cfg.Accept, daemonLogf)
+	if err != nil {
+		daemonLogf("whisper: the config's accept section cannot be used (%v), so no port is accepted. The connection is unaffected", err)
+		return nil
+	}
+	if req == nil {
+		return nil
+	}
+	if !isWireGuardTier(tier) {
+		daemonLogf("whisper: the config asks to accept %s, which answers on this node's own /128, and only the routed "+
+			"tier has one. This config runs %s, so no port is accepted: re-run `whisper service install --tier wireguard --accept ...`",
+			strings.Join(cfg.Accept.Ports, ", "), orVal(tier, "socks5"))
+		return nil
+	}
+	fcx, cancel := context.WithTimeout(context.Background(), acceptStartupBudget)
+	defer cancel()
+	return installAcceptPlan(newAcceptPlan(fcx, c, req, daemonLogf))
+}

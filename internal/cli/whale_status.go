@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -114,8 +116,11 @@ type whaleStatusView struct {
 	// Serving is what this host is exposing right now, or nil. It is read from the
 	// on-disk record rather than from this process, so a funnel started in another shell
 	// still shows up here - which is the whole point of putting it in status.
-	Serving  *whale.ServeState `json:"serving,omitempty"`
-	PathNote string            `json:"path_note"`
+	Serving *whale.ServeState `json:"serving,omitempty"`
+	// Accepting is every TCP port a live session on this host opened on its /128, and
+	// who it admits. Read from the holders' records, so a service's ports show from any shell.
+	Accepting []whaleAccept `json:"accepting,omitempty"`
+	PathNote  string        `json:"path_note"`
 	// Snapshot is how old each authoritative node's copy of the agent zone is. It is here
 	// rather than behind a flag because two nodes answering from different snapshots is
 	// invisible unless somebody is shown it without asking.
@@ -150,7 +155,9 @@ func buildWhaleStatus(cx context.Context, agentFile string, wantPeers, probe boo
 
 	// The live local session is the most authoritative statement about this node: it is
 	// the one that was verified against the echo when it came up.
-	if live := liveStatusSessions(); len(live) > 0 {
+	live := liveStatusSessions()
+	view.Accepting = whaleAccepting(live)
+	if len(live) > 0 {
 		s := live[0]
 		view.Self.Address = s.Address
 		view.Self.Tier = orVal(s.Tier, "socks5")
@@ -409,6 +416,11 @@ func renderWhaleStatus(view whaleStatusView, showSelf, showPeers, probed bool) {
 		renderServeState(*view.Serving)
 	}
 
+	if len(view.Accepting) > 0 {
+		fmt.Fprintln(os.Stdout)
+		renderWhaleAccepting(view.Accepting)
+	}
+
 	if showPeers && len(view.Peers) > 0 {
 		fmt.Fprintln(os.Stdout)
 		if probed {
@@ -472,4 +484,46 @@ func connSuffix(s whaleSelf) string {
 		return ""
 	}
 	return " via " + s.Endpoint
+}
+
+// whaleAccept is one port this host answers on its /128, as `whale status` reports it.
+type whaleAccept struct {
+	Port    int      `json:"port"`
+	Target  string   `json:"target"`
+	Scope   string   `json:"scope"`
+	From    []string `json:"from,omitempty"`
+	Address string   `json:"address"`
+}
+
+// whaleAccepting flattens every live session's accepted ports into one list.
+func whaleAccepting(sessions []statusSession) []whaleAccept {
+	var out []whaleAccept
+	for _, s := range sessions {
+		scope := string(whale.ScopeFleet)
+		if whale.ServeScope(s.AcceptScope).Public() {
+			scope = string(whale.ScopeInternet)
+		}
+		for _, a := range s.Accept {
+			out = append(out, whaleAccept{Port: a.Port, Target: a.Target, Scope: scope, From: s.AcceptFrom, Address: s.Address})
+		}
+	}
+	return out
+}
+
+// renderWhaleAccepting prints the ACCEPTING table, and says so loudly when a port is public.
+func renderWhaleAccepting(rows []whaleAccept) {
+	table := make([][]string, 0, len(rows))
+	public := false
+	for _, a := range rows {
+		who := acceptScopeText(a.Scope)
+		if !whale.ServeScope(a.Scope).Public() && len(a.From) > 0 {
+			who += " and " + strings.Join(a.From, ", ")
+		}
+		table = append(table, []string{strconv.Itoa(a.Port), a.Target, who, orDash(a.Address)})
+		public = public || whale.ServeScope(a.Scope).Public()
+	}
+	printTable([]string{"ACCEPTING", "TO", "WHO", "ON"}, table)
+	if public {
+		whaleNote("a port here admits THE INTERNET. `whisper service install --no-accept`, or stopping the connection, ends it.")
+	}
 }

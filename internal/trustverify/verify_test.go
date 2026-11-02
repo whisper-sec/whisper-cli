@@ -21,7 +21,7 @@ import (
 )
 
 const (
-	agentFQDN   = "aa4df67f85ca4792a.te08.agents.example."
+	agentFQDN   = "a0000000000000e08.te08.agents.example."
 	agentZone   = "agents.example."
 	agentTenant = "te08"
 )

@@ -214,6 +214,19 @@ func runWrite(c *client.Client, op string, args map[string]any) tea.Cmd {
 		ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
 		defer cancel()
 		env, err := c.Agents(ctx, op, args)
+		if op == "revoke" && client.RevokeMatchedNothing(env, err) {
+			// Both the plane's 404 NOT_FOUND and an older plane's ok row with status not_found
+			// mean nothing was revoked. The second used to open the "agent revoked" card.
+			sel, _ := args["agent"].(string)
+			if sel == "" {
+				sel = "that selector"
+			}
+			return writeResultMsg{op: op, env: env, nothingRevoked: true, err: &client.ProblemError{
+				Status: 404, Title: "NOT_FOUND",
+				Detail: "nothing was revoked: no agent of this account matches " + sel +
+					" (revoked already, or not this account's)",
+			}}
+		}
 		if err != nil {
 			return writeResultMsg{op: op, err: err}
 		}

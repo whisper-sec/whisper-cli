@@ -277,8 +277,17 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 	}
 	p, merr := mintForPick(c, o, nm, choices, true, gone)
 	if merr != nil {
+		if pendingName != "" {
+			// --name named an agent that does not exist and this key may not make it. The
+			// person named an agent, so a different one is never bound in its place, not even the
+			// key's own: that is the same refusal --create --name gives, plus what it could use.
+			return agentPick{identityGone: gone}, namedAgentCannotBeCreated(pendingName, choices, merr)
+		}
 		// An agent's own key may not register, and its listing is its own one identity: that is
-		// not someone else's agent, it is the only one this key can be.
+		// not someone else's agent, it is the only one this key can be. Only when nothing was
+		// named: a name no agent carries is created or refused here, never swapped for the key's
+		// own. Rungs 3 to 5 still prefer this host's project, saved agent or
+		// running session over creating one, and say so (unmatched).
 		if own, ok := keysOwnSoleAgent(c, choices, merr); ok {
 			if !g.quiet {
 				fmt.Fprintf(os.Stderr, "whisper: this key cannot create agents, and its only agent is its own, so using %s\n",
@@ -312,6 +321,40 @@ func keysOwnSoleAgent(c *client.Client, choices []agentChoice, mintErr error) (a
 		return agentPick{}, false
 	}
 	return agentPick{sel: ch.addr, name: ch.name, source: pickOwn}, true
+}
+
+// namedAgentCannotBeCreated is the answer when --name names no agent of the account and the
+// mint that would make it failed. A register refusal becomes the same usage error --create --name
+// gives (exit 2, nothing connected), led by the fact the person needs first: no agent has that
+// name. It then names the agents this key can use, so the fix is one paste. Any other mint
+// failure (a listing or transport fault) is returned as it was.
+func namedAgentCannotBeCreated(name string, choices []agentChoice, mintErr error) error {
+	var refused *registerRefusedError
+	if !errors.As(mintErr, &refused) {
+		return mintErr
+	}
+	msg := fmt.Sprintf("no agent is called %s, so --name %s would create it, and %s", name, name, refused.Error())
+	if len(choices) > 0 {
+		ordered := append([]agentChoice(nil), choices...)
+		sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].created > ordered[j].created })
+		shown := ordered
+		if len(shown) > staleAgentListCap {
+			shown = shown[:staleAgentListCap]
+		}
+		uses := make([]string, 0, len(shown))
+		for _, ch := range shown {
+			uses = append(uses, fmt.Sprintf("%s (--agent %s)", describeAgent(ch.name, ch.addr), firstNonBlank(ch.id, ch.addr, ch.name)))
+		}
+		lead := "The agent this key can use: "
+		if len(ordered) > 1 {
+			lead = "Agents this key can use, newest first: "
+		}
+		msg += ". " + lead + strings.Join(uses, ", ")
+		if rest := len(ordered) - len(shown); rest > 0 {
+			msg += fmt.Sprintf(", and %d more ('whisper list' shows them all)", rest)
+		}
+	}
+	return &registerRefusedError{usage: &usageError{msg: msg}}
 }
 
 // registerRefusedError is op:register refused for this key. It reads as the usage error it wraps.

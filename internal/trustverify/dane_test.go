@@ -14,7 +14,7 @@ import (
 
 const (
 	testFQDN = "aa.te.agents.example."
-	testAddr = "2a04:2a01:9:0:a4df:67f8:5ca4:792a"
+	testAddr = "2a04:2a01:9::e08"
 )
 
 func tlsaRR(digest [32]byte) *dns.TLSA {

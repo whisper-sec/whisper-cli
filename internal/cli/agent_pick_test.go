@@ -839,3 +839,121 @@ func TestConnectEnsureRefusesAConfigThatNamesNoAgentBeforeSpawningAnything(t *te
 		t.Fatalf("no daemon is spawned for a config that names no agent")
 	}
 }
+
+// An agent key that may not register ran `whisper run --name <unknown>` and was bound to
+// the key's own agent, with a note naming the one it used and never saying the named one did not
+// exist. An explicit name is honoured or refused, never swapped: the run is the usage error
+// --create --name gives (exit 2, nothing connected), and it names the agent the key can use.
+func TestRunNameNamingNoAgentOnAKeyThatCannotRegisterRefusesAndNeverSwaps(t *testing.T) {
+	own := agentChoice{name: "build-runner", addr: "2a04:2a01:9::77", id: "agent-a0000000000000077"}
+	refusal := `{"ok":false,"status":403,"error":"FORBIDDEN_SCOPE","detail":"Missing required scope: admin:dns"}`
+	for _, tc := range []struct {
+		name   string
+		others int
+		agents []agentChoice
+	}{
+		// the reported case: the key's own sole identity, the one the fallback used to bind
+		{"the key's own sole identity", 0, []agentChoice{own}},
+		{"several agents", 0, append([]agentChoice{own}, pickFleet...)},
+		{"the count is absent", -1, []agentChoice{own}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pickHarness(t)
+			p := &pickPlane{agents: tc.agents, otherHandles: tc.others, registerReply: refusal}
+			srv := p.serve(t)
+			for _, tier := range []string{"wireguard", "socks5"} {
+				stderr, err := runRoot(t, srv.URL, "run", "--name", "no-such-agent", "--agent-file",
+					filepath.Join(t.TempDir(), "a"), "--tier", tier, "--", "true")
+				if err == nil {
+					t.Fatalf("%s: --name naming no agent on a key that cannot create it is refused", tier)
+				}
+				if !isUsageError(err) {
+					t.Fatalf("%s: the refusal is a usage error (exit 2), got %T %v", tier, err, err)
+				}
+				msg := err.Error()
+				for _, want := range []string{"no agent is called no-such-agent", "cannot create an agent",
+					"nothing was connected", "--agent " + own.id} {
+					if !strings.Contains(msg, want) {
+						t.Fatalf("%s: the refusal says %q, got %q", tier, want, msg)
+					}
+				}
+				if strings.Contains(stderr, "so using") {
+					t.Fatalf("%s: no note about using a different agent: %s", tier, stderr)
+				}
+			}
+			if containsOp(p.ops(), "connect") || containsOp(p.ops(), "identity") {
+				t.Fatalf("nothing connected and no op:identity fallback: %v", p.ops())
+			}
+		})
+	}
+}
+
+// The refusal for a named agent reads as the --create --name refusal does, so the two
+// spellings of "I named an agent" agree.
+func TestRunNameAndCreateNameRefuseAlikeOnAKeyThatCannotRegister(t *testing.T) {
+	own := agentChoice{name: "build-runner", addr: "2a04:2a01:9::77", id: "agent-a0000000000000077"}
+	refusal := `{"ok":false,"status":403,"error":"FORBIDDEN_SCOPE","detail":"Missing required scope: admin:dns"}`
+	pickHarness(t)
+	p := &pickPlane{agents: []agentChoice{own}, registerReply: refusal}
+	srv := p.serve(t)
+	_, named := runRoot(t, srv.URL, "run", "--name", "unknown-agent", "--agent-file", filepath.Join(t.TempDir(), "a"), "--", "true")
+	_, created := runRoot(t, srv.URL, "run", "--create", "--name", "unknown-agent", "--agent-file", filepath.Join(t.TempDir(), "a"), "--", "true")
+	if named == nil || created == nil {
+		t.Fatalf("both refuse: --name %v, --create --name %v", named, created)
+	}
+	if !strings.Contains(named.Error(), created.Error()) {
+		t.Fatalf("--name carries the --create --name refusal word for word:\n--name: %s\n--create: %s", named, created)
+	}
+	if containsOp(p.ops(), "connect") {
+		t.Fatalf("nothing connected: %v", p.ops())
+	}
+}
+
+// The sole-identity fallback is still there for the case it was meant for, nothing named.
+func TestRunWithNothingNamedOnAnAgentKeyStillBindsItsOwnSoleIdentity(t *testing.T) {
+	pickHarness(t)
+	own := agentChoice{name: "build-runner", addr: "2a04:2a01:9::77"}
+	p := &pickPlane{agents: []agentChoice{own}, otherHandles: 0,
+		registerReply: `{"ok":false,"status":403,"error":"FORBIDDEN_SCOPE","detail":"Missing required scope: admin:dns"}`}
+	srv := p.serve(t)
+	if _, err := runRoot(t, srv.URL, "run", "--agent-file", filepath.Join(t.TempDir(), "a"), "--", "true"); err != nil {
+		t.Fatalf("nothing named: the key's own sole identity: %v", err)
+	}
+	if c := p.bodies("connect"); len(c) != 1 || !strings.Contains(c[0], "'"+own.addr+"'") {
+		t.Fatalf("binds its own /128: %v", c)
+	}
+}
+
+// A key that MAY register still creates the named agent, never the key's own.
+func TestRunNameNamingNoAgentOnAKeyThatMayRegisterCreatesIt(t *testing.T) {
+	pickHarness(t)
+	p := &pickPlane{agents: []agentChoice{{name: "build-runner", addr: "2a04:2a01:9::77"}}, otherHandles: 0}
+	srv := p.serve(t)
+	if _, err := runRoot(t, srv.URL, "run", "--name", "unknown-agent-b", "--agent-file", filepath.Join(t.TempDir(), "a"), "--", "true"); err != nil {
+		t.Fatalf("a key that may register makes the named agent: %v", err)
+	}
+	if c := p.bodies("connect"); len(c) != 1 || !strings.Contains(c[0], "'"+pickMinted+"'") {
+		t.Fatalf("binds the agent it made, not the key's own: %v", c)
+	}
+	mustNotTouch(t, p, "2a04:2a01:9::77")
+}
+
+func TestNamedAgentCannotBeCreatedPassesOtherFaultsThrough(t *testing.T) {
+	other := &client.ProblemError{Status: 503, Detail: "store unavailable"}
+	if got := namedAgentCannotBeCreated("x", nil, other); got != other {
+		t.Fatalf("a fault that is not a register refusal is returned as is, got %v", got)
+	}
+	refused := &registerRefusedError{usage: &usageError{msg: "this key cannot create an agent"}}
+	got := namedAgentCannotBeCreated("x", nil, refused)
+	if !isUsageError(got) || strings.Contains(got.Error(), "can use") {
+		t.Fatalf("no agents: the refusal names none, and stays a usage error: %v", got)
+	}
+	many := make([]agentChoice, 0, staleAgentListCap+3)
+	for i := 0; i < staleAgentListCap+3; i++ {
+		many = append(many, agentChoice{name: "n" + itoa(i), addr: "2a04:2a01:9::" + itoa(i+1), created: int64(i)})
+	}
+	got = namedAgentCannotBeCreated("x", many, refused)
+	if !strings.Contains(got.Error(), "and 3 more") || !strings.Contains(got.Error(), "newest first: n"+itoa(staleAgentListCap+2)) {
+		t.Fatalf("a long listing is capped, newest first: %v", got)
+	}
+}

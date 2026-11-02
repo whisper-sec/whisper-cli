@@ -78,8 +78,8 @@ func TestMCP_ToolsList(t *testing.T) {
 	if keylessRecipes == 0 {
 		t.Fatal("the catalog has no keyless recipes, so this test would pass on an empty tier")
 	}
-	if want := 2 + keylessRecipes; len(tools) != want {
-		t.Fatalf("expected %d keyless tools without a key (verify + rdap + %d public graph reads), got %d",
+	if want := 2 + keylessRecipes + 2; len(tools) != want {
+		t.Fatalf("expected %d keyless tools without a key (verify + rdap + %d public graph reads + read_docs + list_workflows), got %d",
 			want, keylessRecipes, len(tools))
 	}
 	names := map[string]bool{}
@@ -93,7 +93,7 @@ func TestMCP_ToolsList(t *testing.T) {
 			t.Fatalf("tool %v has no description (agent-unfriendly)", tm["name"])
 		}
 	}
-	for _, want := range []string{"whisper_verify", "whisper_rdap", "whisper_assess", "whisper_identify", "whisper_explain"} {
+	for _, want := range []string{"whisper_verify", "whisper_rdap", "whisper_assess", "whisper_identify", "whisper_explain", "read_docs", "list_workflows"} {
 		if !names[want] {
 			t.Fatalf("missing keyless tool %q (have %v)", want, names)
 		}

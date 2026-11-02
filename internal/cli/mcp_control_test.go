@@ -312,3 +312,46 @@ func TestMCP_EgressConfig_DefaultPortDeterministic(t *testing.T) {
 		t.Fatalf("default port must sit in the deterministic 20000-40000 window, got %q", socks)
 	}
 }
+
+// TestMCP_RevokeThatMatchedNothingIsAFinalToolError is the MCP half of the revoke-verdict fix. An older plane's
+// ok row with status not_found used to reach the model as {"ok":true,...}, a successful revoke;
+// the plane's 404 NOT_FOUND reached it as "that agent isn't in your account" with nothing to say
+// the answer is final. Both are now a tool error saying nothing was revoked and not to retry.
+func TestMCP_RevokeThatMatchedNothingIsAFinalToolError(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"the plane's NOT_FOUND", 404, `{"ok":false,"status":404,"result":null,"error":{"code":"NOT_FOUND",` +
+			`"message":"nothing was revoked: no agent of yours matches 'a1'","retryable":false}}`},
+		{"an older plane's not_found row", 200,
+			`{"ok":true,"status":200,"result":{"columns":["agent","status"],"rows":[["a1","not_found"]]}}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := problemServer(t, tc.status, tc.body)
+			defer srv.Close()
+			pinKeyState(t, "whisper_live_test", srv.URL)
+			text, isError := toolText(t, drive(t, callLine(1, "whisper_revoke", `{"agent":"a1"}`))[0])
+			if !isError {
+				t.Fatalf("a revoke that matched nothing must be a tool error; got %q", text)
+			}
+			var got map[string]any
+			if err := json.Unmarshal([]byte(text), &got); err != nil {
+				t.Fatalf("the answer must be readable JSON: %v (%q)", err, text)
+			}
+			if got["revoked"] != false || got["retryable"] != false || got["status"] != "not_found" {
+				t.Fatalf("revoked/retryable/status wrong: %v", got)
+			}
+			if msg, _ := got["message"].(string); !strings.Contains(msg, "nothing was revoked") || !strings.Contains(msg, "a1") {
+				t.Fatalf("the message must say nothing was revoked, naming the agent; got %q", msg)
+			}
+		})
+	}
+	srv := problemServer(t, 200, `{"ok":true,"status":200,"result":{"columns":["agent","status"],"rows":[["a1","revoked"]]}}`)
+	defer srv.Close()
+	pinKeyState(t, "whisper_live_test", srv.URL)
+	if text, isError := toolText(t, drive(t, callLine(1, "whisper_revoke", `{"agent":"a1"}`))[0]); isError {
+		t.Fatalf("a real revoke must still succeed; got %q", text)
+	}
+}

@@ -48,6 +48,9 @@ type writeResultMsg struct {
 	env     *client.Envelope
 	summary map[string]any // the first result row, column-keyed (for the result card)
 	err     error
+	// nothingRevoked marks an op:revoke that matched no agent of this account: err
+	// says so, and the fleet is refreshed because the row the operator picked is stale.
+	nothingRevoked bool
 }
 
 // toastMsg shows a transient status line (an error detail or a success note).

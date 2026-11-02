@@ -35,9 +35,9 @@ import (
 // `whisper graph`.
 //
 // Without a key the keyless tier is listed (graceful degradation, zero friction): the
-// verify/RDAP pair plus the public graph reads - whisper_assess, whisper_identify and
+// verify/RDAP pair, the public graph reads - whisper_assess, whisper_identify and
 // whisper_explain, which need no tenant and so are real value rather
-// than a stub. With a key the whole control + graph surface unlocks: auth is optional,
+// than a stub - and read_docs / list_workflows, which answer without a key. With a key the whole control + graph surface unlocks: auth is optional,
 // never demanded.
 //
 // The MCP server itself cannot HOLD egress open (it is a stdio child of the client), so
@@ -60,7 +60,9 @@ func newMCPCmd() *cobra.Command {
 			"  • whisper_rdap <ipv6>            - RDAP for a Whisper /128 (who operates it)\n" +
 			"  • whisper_assess <host|ip>       - threat posture: label, band, coverage, evidence\n" +
 			"  • whisper_identify <host|ip>     - the vendor and operator roles behind it\n" +
-			"  • whisper_explain <indicator>    - the threat-feed score, and exactly why\n\n" +
+			"  • whisper_explain <indicator>    - the threat-feed score, and exactly why\n" +
+			"  • read_docs                      - fetch the whisper.security docs on demand\n" +
+			"  • list_workflows                 - browse the gallery of ready-made investigations\n\n" +
 			"WITH YOUR API KEY (WHISPER_API_KEY in the client's env, or `whisper login`):\n" +
 			"  • whisper_register        - mint a named agent: name → routable IPv6 /128 identity\n" +
 			"  • whisper_list            - your agents (name, /128, DNS name, state)\n" +
@@ -72,8 +74,6 @@ func newMCPCmd() *cobra.Command {
 			"  • query                   - execute Cypher against WhisperGraph\n" +
 			"  • explain_indicator       - one-call threat verdict for an IP / host / ASN / CIDR\n" +
 			"  • explain_schema          - the label catalog, or one label's entity card\n" +
-			"  • read_docs               - fetch the whisper.security docs on demand\n" +
-			"  • list_workflows          - search the gallery of ready-made investigations\n" +
 			"  • run_workflow            - run a gallery workflow / recipe by slug\n" +
 			"  • text2cypher             - translate an English question into Cypher\n" +
 			"  • whisper_graph_query     - raw Cypher (the whisper.security graph)\n" +
@@ -194,7 +194,8 @@ func mcpClientMatrix() string {
 		"  Goose                  ~/.config/goose/config.yaml (YAML, key \"extensions\") - add a `whisper` extension running `whisper mcp`\n" +
 		"  Continue               ~/.continue/config.yaml (YAML list \"mcpServers\") - add a `whisper` entry running `whisper mcp`\n" +
 		"\nthen restart the client. Verify in-chat: ask it to run the `whisper_verify` tool.\n" +
-		"keyless verify/RDAP and the public graph reads (assess/identify/explain) work as-is;\n" +
+		"keyless verify/RDAP, the public graph reads (assess/identify/explain), read_docs and\n" +
+		"list_workflows work as-is;\n" +
 		"with WHISPER_API_KEY in the client's env (or after `whisper login`) the control tools -\n" +
 		"register/list/policy/logs/revoke/egress - and the full graph catalogue unlock too.\n"
 }
@@ -342,7 +343,7 @@ func mcpHasKey() bool {
 const mcpNoKeyErr = "this tool needs your Whisper API key - set WHISPER_API_KEY in the environment " +
 	"your MCP client uses to launch `whisper mcp` (or run `whisper login` once on this machine), " +
 	"then restart the client. The keyless tools work without a key: whisper_verify, whisper_rdap, " +
-	"and the public graph reads whisper_assess / whisper_identify / whisper_explain."
+	"the public graph reads whisper_assess / whisper_identify / whisper_explain, read_docs and list_workflows."
 
 // mcpTools is the tool catalogue: the keyless tier always, plus the key-gated control,
 // reference and graph tools when a credential resolves (two-tier).
@@ -381,8 +382,11 @@ func mcpTools() []map[string]any {
 	}
 	// No key: the public graph reads join verify/RDAP, so the keyless half of the
 	// surface answers real questions instead of only saying no. mcpGraphTools
-	// already contains these, which is why the two branches are exclusive.
-	return append(tools, mcpGraphKeylessTools()...)
+	// already contains these, which is why the two branches are exclusive. The
+	// reference tools that need no key (read_docs, list_workflows) are listed too:
+	// a tool that answers without a key is listed without one.
+	tools = append(tools, mcpGraphKeylessTools()...)
+	return append(tools, mcpReferenceKeylessTools()...)
 }
 
 // mcpReadResource handles resources/read: dispatch the URI to its reader, else a
@@ -598,6 +602,14 @@ func mcpToolRDAP(args json.RawMessage) mcpToolResult {
 // client and folds the reply into an MCP tool result: a clear tool error for a missing key /
 // transport fault / ok:false, else the result rows as column-keyed JSON records.
 func mcpAgents(op string, args map[string]any) mcpToolResult {
+	return mcpAgentsWith(op, args, nil)
+}
+
+// mcpAgentsWith is mcpAgents with a verdict hook: verdict sees the raw reply first and, when it
+// returns true, its result is the answer. op:revoke uses it to read "nothing was revoked" off
+// both the plane's NOT_FOUND and an older plane's ok row.
+func mcpAgentsWith(op string, args map[string]any,
+	verdict func(*client.Envelope, error) (mcpToolResult, bool)) mcpToolResult {
 	c, err := resolveClient(false, false)
 	if err != nil {
 		return mcpErr(err.Error())
@@ -608,6 +620,11 @@ func mcpAgents(op string, args map[string]any) mcpToolResult {
 	cx, cancel := ctx()
 	defer cancel()
 	env, err := c.Agents(cx, op, args)
+	if verdict != nil {
+		if res, ok := verdict(env, err); ok {
+			return res
+		}
+	}
 	if err != nil {
 		return mcpErr(err.Error())
 	}
@@ -736,7 +753,36 @@ func mcpToolRevoke(args json.RawMessage) mcpToolResult {
 	}
 	// The tools/call itself is the confirmation (the model + its human decided); op:revoke is
 	// the same full-teardown path `whisper kill --revoke` uses.
-	return mcpAgents("revoke", map[string]any{"agent": target})
+	return mcpAgentsWith("revoke", map[string]any{"agent": target}, func(env *client.Envelope, err error) (mcpToolResult, bool) {
+		if !client.RevokeMatchedNothing(env, err) {
+			return mcpToolResult{}, false
+		}
+		return mcpRevokeMatchedNothing(target), true
+	})
+}
+
+// mcpRevokeMatchedNothing is whisper_revoke's answer when no agent of this account matched: a
+// tool error, because nothing was revoked, in a shape a model can read without guessing. An
+// older plane said this as an ok row with status not_found, which reached the model as
+// {"ok":true,...} and read as a successful revoke; the current plane says it as a 404
+// NOT_FOUND, which reached it as "that agent isn't in your account" with nothing saying the
+// answer is final. It is final: the plane gives one answer for "revoked already" and
+// "not this account's", so retrying cannot change it.
+func mcpRevokeMatchedNothing(target string) mcpToolResult {
+	b, err := json.MarshalIndent(map[string]any{
+		"ok":        false,
+		"revoked":   false,
+		"status":    "not_found",
+		"retryable": false,
+		"message": fmt.Sprintf("nothing was revoked: no agent of this account matches %q. It was revoked "+
+			"already, or it is not this account's agent. This answer is final, so do not retry it; call "+
+			"whisper_list to see this account's agents, and pass the id (with or without the agent- "+
+			"prefix), the /128 address or the label exactly as it prints them.", target),
+	}, "", "  ")
+	if err != nil {
+		return mcpErr("nothing was revoked: no agent of this account matches " + target)
+	}
+	return mcpToolResult{Content: []mcpToolContent{{Type: "text", Text: string(b)}}, IsError: true}
 }
 
 // mcpToolEgressConfig hands out the READY-TO-USE egress config for an agent - the exact

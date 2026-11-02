@@ -19,8 +19,8 @@ you run `whisper` on a terminal with no subcommand. And it talks to the
 
 ## Use it from an AI assistant, with no account
 
-No API key and no install. Put this in your client's config and five tools appear, and all five
-answer with no key. Add a key, by env var or by `whisper login` once on the machine, and the same
+No API key and no install. Put this in your client's config and seven tools appear, and every one
+answers with no key. Add a key, by env var or by `whisper login` once on the machine, and the same
 server lists 45:
 
 ```json
@@ -37,7 +37,7 @@ server lists 45:
 Claude Desktop, Claude Code, Cursor, Windsurf, VS Code, Cline and Zed all take the same
 three lines. Already installed the CLI? `whisper mcp` is the identical server.
 
-The five, measured against the server with no key anywhere on the machine:
+The seven, measured against the server with no key anywhere on the machine:
 
 - `whisper_verify` - is this address or hostname a real agent, and whose? Checks the
   DANE pin against DNSSEC-signed DNS, from the IANA root.
@@ -45,6 +45,8 @@ The five, measured against the server with no key anywhere on the machine:
 - `whisper_assess` - a verdict on a domain, IP, ASN or file hash, with its evidence.
 - `whisper_identify` - what an indicator is: category, vendor, band.
 - `whisper_explain` - the scored explanation behind a verdict, with its sources.
+- `read_docs` - the whisper.security documentation, listed, searched or fetched page by page.
+- `list_workflows` - the gallery of ready-made investigations, and what each one takes.
 
 Add a key and the same server lists 45: the graph in full, plus registering agents, setting
 resolver policy, handing out egress configuration, reading per-agent activity and revoking an
@@ -60,17 +62,17 @@ Most clients take that URL and nothing else. Claude Code, for one:
 `claude mcp add --transport http whisper https://whisper.online/mcp`.
 
 Streamable HTTP. `initialize` and `tools/list` answer with no credential, so a client that takes
-a bare URL needs nothing else. It is a different server from the one above and it lists a
-different set: 17 tools with no key, every one of which works with no key, and 39 once you send
-your key as the `X-API-Key` header.
+a bare URL needs nothing else. The HTTP transport is a different server from the stdio one above
+and it lists a different set: 17 tools with no key, every one of which works with no key, and 41
+once you send your key as the `X-API-Key` header (the stdio server's keyed set is the 45 above).
 
 The keyless 17 are the identity checks and the graph: `whisper_verify`, `whisper_rdap`,
 `whisper_assess`, `whisper_identify`, `whisper_explain`, `whisper_walk`, `whisper_watch`,
 `whisper_variants`, `whisper_origins`, `whisper_history`, `whisper_asset`, `whisper_psl`,
 `whisper_threatintel`, `whisper_lookupTlsFingerprint`, `whisper_lookupTorRelay`,
 `whisper_topAsnsByPrefixCount`, and `whisper_signup`, which issues you an API key from an email
-address alone. The 22 a key adds are the provisioning and governance set, 21 of them
-`whisper_agents_*` and the 22nd `whisper_submit`, which writes a claim into the graph and so
+address alone. The 24 a key adds over HTTP are the provisioning and governance set, 23 of them
+`whisper_agents_*` and the 24th `whisper_submit`, which writes a claim into the graph and so
 needs to be attributable.
 
 `whisper_verify` and `whisper_rdap` check somebody else's agent. `whisper_agents_verify` in the
@@ -251,7 +253,7 @@ Run `whisper <command> --help` for details.
 ## Query the security graph
 
 The same [whisper.security](https://www.whisper.security) graph the Whisper resolver
-consults on every lookup - 7.5B nodes (hostnames, IPs, ASNs, certs, threat intel), 39.8B
+consults on every lookup - 6.9B nodes (hostnames, IPs, ASNs, certs, threat intel), 50.0B
 relationships - is a first-class CLI surface. `whisper query` runs raw parameterised
 Cypher; `whisper graph` runs a named recipe from the embedded catalog:
 

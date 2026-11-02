@@ -463,3 +463,56 @@ func TestInitWiresLaunch(t *testing.T) {
 	}
 	b.stopStream()
 }
+
+// TestRunWriteRevokeThatMatchedNothingIsNotARevoke is the TUI half of the revoke-verdict fix. The plane answers a
+// revoke that matched nothing with a 404 NOT_FOUND; an older plane answered it with an ok row
+// whose status is not_found, and the TUI opened its "agent revoked" card for that. Both are now
+// an error that says nothing was revoked, marked so the fleet is refreshed; a real revoke is not.
+func TestRunWriteRevokeThatMatchedNothingIsNotARevoke(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"the plane's NOT_FOUND", 404, `{"ok":false,"status":404,"result":null,"error":{"code":"NOT_FOUND",` +
+			`"message":"nothing was revoked: no agent of yours matches 'a1'","retryable":false}}`},
+		{"an older plane's not_found row", 200, deepentui_env(`"agent","status"`, `["a1","not_found"]`)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := deepentui_control(t, tc.status, tc.body)
+			m := runWrite(c, "revoke", map[string]any{"agent": "a1"})().(writeResultMsg)
+			if m.err == nil || !m.nothingRevoked {
+				t.Fatalf("a revoke that matched nothing must be an error marked nothingRevoked: %+v", m)
+			}
+			if got := friendlyErr(m.err); !strings.Contains(got, "nothing was revoked") || !strings.Contains(got, "a1") {
+				t.Fatalf("the toast must say nothing was revoked, naming the agent; got %q", got)
+			}
+			a := newTestApp(t, 100, 30)
+			if _, cmd := a.onWriteResult(m); cmd == nil || a.overlay == overlayResult {
+				t.Fatal("no revoked card, and the stale fleet is refreshed")
+			}
+		})
+	}
+	// Near misses keep the ordinary error path: no nothingRevoked, the form kept, nothing fired.
+	for _, nm := range []struct {
+		status int
+		body   string
+	}{
+		{404, `not here`},
+		{200, `{"ok":false,"status":404,"result":null,"error":{"code":"UNKNOWN_OP","message":"no such op"}}`},
+	} {
+		c, _ := deepentui_control(t, nm.status, nm.body)
+		m := runWrite(c, "revoke", map[string]any{"agent": "a1"})().(writeResultMsg)
+		if m.err == nil || m.nothingRevoked {
+			t.Fatalf("a near miss is a plain error, not nothing-revoked: %+v", m)
+		}
+		a := newTestApp(t, 100, 30)
+		if _, cmd := a.onWriteResult(m); cmd != nil {
+			t.Fatal("a plain error fires nothing")
+		}
+	}
+	c, _ := deepentui_control(t, 200, deepentui_env(`"agent","status"`, `["a1","revoked"]`))
+	if m := runWrite(c, "revoke", map[string]any{"agent": "a1"})().(writeResultMsg); m.err != nil || m.nothingRevoked {
+		t.Fatalf("a real revoke must still succeed: %+v", m)
+	}
+}

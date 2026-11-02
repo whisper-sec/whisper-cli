@@ -145,8 +145,11 @@ func TestWhoami_TenantIsNeverAnAgents(t *testing.T) {
 	if got.AgentTenants == nil || *got.AgentTenants != 3 {
 		t.Fatalf("agent_tenants = %v, want 3", got.AgentTenants)
 	}
-	if got.Agents != 3 {
-		t.Fatalf("agents = %d, want the count-mode total 3", got.Agents)
+	if got.Agents == nil || *got.Agents != 3 {
+		t.Fatalf("agents = %v, want the count-mode total 3", got.Agents)
+	}
+	if got.Error != "" {
+		t.Fatalf("a healthy pair of reads must carry no error; error=%q", got.Error)
 	}
 }
 
@@ -201,8 +204,9 @@ func TestWhoami_UnconfirmedTenantIsNotSubstituted(t *testing.T) {
 		cmd := newWhoamiCmd()
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
 		cmd.SetArgs([]string{"--agent-file", filepath.Join(t.TempDir(), "absent-agent")})
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("whoami must not fail when one cell is unknown: %v", err)
+		err := cmd.Execute()
+		if code, ok := exitCodeOf(err); !ok || code != 1 {
+			t.Fatalf("an incomplete --json answer must exit 1, never 0; err=%v", err)
 		}
 	})
 	var got whoamiView
@@ -212,8 +216,11 @@ func TestWhoami_UnconfirmedTenantIsNotSubstituted(t *testing.T) {
 	if got.Tenant != "" {
 		t.Fatalf("tenant = %q, want empty: nothing confirmed it", got.Tenant)
 	}
-	if got.Agents != 7 {
-		t.Fatalf("agents = %d, want 7: the half that answered still answers", got.Agents)
+	if got.Agents == nil || *got.Agents != 7 {
+		t.Fatalf("agents = %v, want 7: the half that answered still answers", got.Agents)
+	}
+	if !strings.HasPrefix(got.Error, "tenant: ") {
+		t.Fatalf("error must name the tenant read as the one that failed; error=%q", got.Error)
 	}
 	if got.AgentTenants != nil {
 		t.Fatalf("agent_tenants = %v, want null: the read that would have said it failed", got.AgentTenants)
@@ -247,8 +254,9 @@ func TestWhoami_FleetReadFailureKeepsTheTenantThatAnswered(t *testing.T) {
 		cmd := newWhoamiCmd()
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
 		cmd.SetArgs([]string{"--agent-file", filepath.Join(t.TempDir(), "absent-agent")})
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("whoami must not fail when one read is shed: %v", err)
+		err := cmd.Execute()
+		if code, ok := exitCodeOf(err); !ok || code != 1 {
+			t.Fatalf("an incomplete --json answer must exit 1, never 0; err=%v", err)
 		}
 	})
 	var got whoamiView
@@ -260,6 +268,13 @@ func TestWhoami_FleetReadFailureKeepsTheTenantThatAnswered(t *testing.T) {
 	}
 	if got.AgentTenants == nil || *got.AgentTenants != 0 {
 		t.Fatalf("agent_tenants = %v, want a measured 0", got.AgentTenants)
+	}
+	// The count that failed is ABSENT, never a measured 0.
+	if got.Agents != nil || strings.Contains(stdout, `"agents"`) {
+		t.Fatalf("a failed count must be absent from --json, not zeroed; stdout=%q", stdout)
+	}
+	if !strings.HasPrefix(got.Error, "agents: ") {
+		t.Fatalf("error must name the count as the read that failed; error=%q", got.Error)
 	}
 }
 
@@ -300,24 +315,25 @@ func whoamiTable(t *testing.T, controlURL string) (stdout, stderr string) {
 	})
 }
 
-func whoamiJSON(t *testing.T, controlURL string) (whoamiView, string) {
+// whoamiJSON runs whoami --json and returns the decoded object, the raw stdout and the
+// command's error, which is how the exit code reaches Execute.
+func whoamiJSON(t *testing.T, controlURL string) (whoamiView, string, error) {
 	t.Helper()
 	savedG := g
 	g = globalFlags{controlURL: controlURL, key: "whisper_live_test", timeout: 5 * time.Second, jsonOut: true}
 	defer func() { g = savedG }()
-	stdout, stderr := captureStd(t, func() {
+	var runErr error
+	stdout, _ := captureStd(t, func() {
 		cmd := newWhoamiCmd()
 		cmd.SilenceUsage, cmd.SilenceErrors = true, true
 		cmd.SetArgs([]string{"--agent-file", filepath.Join(t.TempDir(), "absent-agent")})
-		if err := cmd.Execute(); err != nil {
-			t.Fatalf("whoami must never fail an identity question: %v", err)
-		}
+		runErr = cmd.Execute()
 	})
 	var got whoamiView
 	if err := json.Unmarshal([]byte(stdout), &got); err != nil {
 		t.Fatalf("whoami --json did not emit an object: %v (%q)", err, stdout)
 	}
-	return got, stderr
+	return got, stdout, runErr
 }
 
 const selfRowOK = `{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":` +
@@ -373,8 +389,11 @@ func TestWhoami_ANonCountAgentTenantsIsNotAnAnswer(t *testing.T) {
 		row := `{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":` +
 			`[["activityTenants",{"tenant":"towner00000000000000000000000000","self":true,` +
 			`"agent_tenants":` + bad + `}]]}}`
-		got, _ := whoamiJSON(t, whoamiStub(t, row, 200,
+		got, _, err := whoamiJSON(t, whoamiStub(t, row, 200,
 			`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["count",{"count":3}]]}}`, 200))
+		if err != nil {
+			t.Fatalf("a row with a handle answered the tenant read; whoami must not fail: %v", err)
+		}
 		if got.AgentTenants != nil {
 			t.Fatalf("agent_tenants %s must read as unknown, got %d", bad, *got.AgentTenants)
 		}
@@ -391,13 +410,101 @@ func TestWhoami_TwoSelfRowsDecideNothing(t *testing.T) {
 	two := `{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[` +
 		`["activityTenants",{"tenant":"tstranger0000000000000000000000","self":true}],` +
 		`["activityTenants",{"tenant":"towner00000000000000000000000000","self":true}]]}}`
-	got, _ := whoamiJSON(t, whoamiStub(t, two, 200,
+	got, _, err := whoamiJSON(t, whoamiStub(t, two, 200,
 		`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["count",{"count":3}]]}}`, 200))
 	if got.Tenant != "" {
 		t.Fatalf("two self rows are not an answer; printed %q", got.Tenant)
 	}
-	if got.Agents != 3 {
-		t.Fatalf("and the fleet size, which was unambiguous, must survive; agents=%d", got.Agents)
+	if got.Agents == nil || *got.Agents != 3 {
+		t.Fatalf("and the fleet size, which was unambiguous, must survive; agents=%v", got.Agents)
+	}
+	// And the dash is SAID, not left as a quiet blank.
+	if code, ok := exitCodeOf(err); !ok || code != 1 || !strings.HasPrefix(got.Error, "tenant: ") {
+		t.Fatalf("an ambiguous tenant must be an error with exit 1; err=%v error=%q", err, got.Error)
+	}
+}
+
+// TestWhoami_ATimedOutSelfReadIsAnErrorNotAnEmptyFleet is the regression for a silent zero. One run of
+// `whoami --json` printed "agents": 0 with no tenant, nothing on stderr and exit 0, when the
+// control plane had not answered in time: a script recorded an empty fleet as a fact. With the
+// plane stubbed to hang past the read bound, the object must carry "error", must NOT carry
+// "agents" or "tenant", and the command must exit 1.
+func TestWhoami_ATimedOutSelfReadIsAnErrorNotAnEmptyFleet(t *testing.T) {
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+
+	savedG := g
+	g = globalFlags{controlURL: srv.URL, key: "whisper_live_test", timeout: 300 * time.Millisecond, jsonOut: true}
+	defer func() { g = savedG }()
+	var runErr error
+	stdout, _ := captureStd(t, func() {
+		cmd := newWhoamiCmd()
+		cmd.SilenceUsage, cmd.SilenceErrors = true, true
+		cmd.SetArgs([]string{"--agent-file", filepath.Join(t.TempDir(), "absent-agent")})
+		runErr = cmd.Execute()
+	})
+	var raw map[string]any
+	if err := json.Unmarshal([]byte(stdout), &raw); err != nil {
+		t.Fatalf("whoami --json must still emit an object: %v (%q)", err, stdout)
+	}
+	if _, has := raw["agents"]; has {
+		t.Fatalf("a count that was never read must be absent, never 0; stdout=%s", stdout)
+	}
+	if _, has := raw["tenant"]; has {
+		t.Fatalf("a tenant that was never read must be absent; stdout=%s", stdout)
+	}
+	msg, _ := raw["error"].(string)
+	if !strings.Contains(msg, "tenant: ") || !strings.Contains(msg, "agents: ") {
+		t.Fatalf("error must name BOTH reads that failed; error=%q", msg)
+	}
+	if code, ok := exitCodeOf(runErr); !ok || code != 1 {
+		t.Fatalf("an incomplete --json answer must exit 1; err=%v", runErr)
+	}
+	if raw["key_present"] != true {
+		t.Fatalf("what DID answer (the key) must still be reported; stdout=%s", stdout)
+	}
+}
+
+// TestWhoami_ATimedOutReadInTheTableSaysSoAndExitsZero: the human form keeps answering (exit 0,
+// the fields it has) but prints the error line rather than a table with quiet blanks.
+func TestWhoami_ATimedOutReadInTheTableSaysSoAndExitsZero(t *testing.T) {
+	stdout, stderr := whoamiTable(t, whoamiStub(t, `{"ok":false,"status":503}`, 503, `{"ok":false,"status":503}`, 503))
+	if !regexp.MustCompile(`(?m)^agents\s+-\s*$`).MatchString(stdout) {
+		t.Fatalf("an unread count is a dash in the table, never 0; stdout=%q", stdout)
+	}
+	if !strings.Contains(stderr, "whoami is incomplete") {
+		t.Fatalf("the table must say which reads failed; stderr=%q", stderr)
+	}
+}
+
+// TestWhoami_ASelfReadWithNoSelfRowIsAnError: a reply that answers but marks no row self is
+// the same silent "no tenant" shape a timed-out read produced, reached without a timeout. It is said.
+func TestWhoami_ASelfReadWithNoSelfRowIsAnError(t *testing.T) {
+	none := `{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[]}}`
+	got, _, err := whoamiJSON(t, whoamiStub(t, none, 200,
+		`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["count",{"count":3}]]}}`, 200))
+	if got.Tenant != "" || !strings.HasPrefix(got.Error, "tenant: ") {
+		t.Fatalf("no self row must be a named tenant error; tenant=%q error=%q", got.Tenant, got.Error)
+	}
+	if code, ok := exitCodeOf(err); !ok || code != 1 {
+		t.Fatalf("and exit 1; err=%v", err)
+	}
+}
+
+// TestWhoami_AnEmptyFleetIsAMeasuredZero: absence means "could not count", so a fleet that
+// really is empty must still print "agents": 0, never drop the field.
+func TestWhoami_AnEmptyFleetIsAMeasuredZero(t *testing.T) {
+	got, stdout, err := whoamiJSON(t, whoamiStub(t, selfRowOK, 200,
+		`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[["count",{"count":0}]]}}`, 200))
+	if err != nil || got.Agents == nil || *got.Agents != 0 || !strings.Contains(stdout, `"agents": 0`) {
+		t.Fatalf("an empty fleet is a measured 0; err=%v stdout=%s", err, stdout)
 	}
 }
 

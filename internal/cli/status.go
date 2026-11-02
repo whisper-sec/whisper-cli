@@ -183,6 +183,11 @@ type statusSession struct {
 	ReconnectingAt time.Time `json:"reconnecting_at,omitempty"`
 	// Serving is false for a holder between sessions: alive, but nothing answers its port.
 	Serving bool `json:"-"`
+	// Accept / AcceptScope are the ports this session opened on its /128 and who they admit,
+	// read from the holder's record so any shell sees them.
+	Accept      []acceptRecord `json:"accept,omitempty"`
+	AcceptScope string         `json:"accept_scope,omitempty"`
+	AcceptFrom  []string       `json:"accept_from,omitempty"`
 }
 
 // sessionUp reports whether a live session is carrying traffic as far as anyone can tell. A
@@ -298,6 +303,9 @@ func liveStatusSessions() []statusSession {
 			TunnelReason:   rec.TunnelReason,
 			ReconnectingAt: rec.ReconnectingAt,
 			Serving:        !rec.NoProxy,
+			Accept:         rec.Accept,
+			AcceptScope:    rec.AcceptScope,
+			AcceptFrom:     rec.AcceptFrom,
 		})
 	}
 	return out

@@ -6,16 +6,21 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/base64"
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
+	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/trustverify"
@@ -125,7 +130,7 @@ func newWhaleSSHCmd() *cobra.Command {
 	// uptime on db-01 the way `ssh db-01 uptime` does, rather than failing on an
 	// unrecognised flag.
 	cmd.Flags().SetInterspersed(false)
-	cmd.AddCommand(newWhaleSSHKnownHostsCmd())
+	cmd.AddCommand(newWhaleSSHKnownHostsCmd(), newWhaleSSHProxyCmd())
 	return cmd
 }
 
@@ -370,21 +375,31 @@ func dialWhaleSSH(cx context.Context, v whaleSSHVerification, user string, port 
 		args = append(args, "-p", strconv.Itoa(port))
 	}
 
+	// Both callbacks re-enter THIS binary. If it is ever installed under the name `whale` (an
+	// argv[0] shim contemplates and that does not exist today), the subcommand path is one word
+	// shorter, and getting that wrong would make OpenSSH run a command that cannot work.
+	self, err := os.Executable()
+	if err != nil || strings.TrimSpace(self) == "" {
+		self = "whisper"
+	}
+	sshVerb := "whale ssh"
+	if base := strings.TrimSuffix(strings.ToLower(filepath.Base(self)), ".exe"); base == "whale" {
+		sshVerb = "ssh"
+	}
+
+	// The connection itself goes through our ProxyCommand, which leaves from this host's /128
+	// when it holds a routed session and names the fix when the node is not accepting. A user
+	// who routes ssh themselves (-J, ProxyJump, ProxyCommand, on the command line or in their
+	// ssh config) keeps their route.
+	if wantSSHProxyCommand(sshPath, sshOptions, host) {
+		pc := fmt.Sprintf("%s %s proxy --name %s %%h %%p", sshArgQuote(sshTokenEscape(self)), sshVerb,
+			sshArgQuote(sshTokenEscape(firstNonBlank(v.Target, v.FQDN))))
+		args = append(args, "-o", "ProxyCommand="+pc)
+	}
+
 	var cleanup func()
 	if whale.SupportsKnownHostsCommand(sshVersionBanner(sshPath)) {
-		self, err := os.Executable()
-		if err != nil || strings.TrimSpace(self) == "" {
-			self = "whisper"
-		}
-		// The callback re-enters THIS binary. If it is ever installed under the name
-		// `whale` (an argv[0] shim contemplates and that does not exist today),
-		// the subcommand path is one word shorter, and getting that wrong would make
-		// OpenSSH run a command that cannot work.
-		verbs := "whale ssh known-hosts"
-		if base := strings.TrimSuffix(strings.ToLower(filepath.Base(self)), ".exe"); base == "whale" {
-			verbs = "ssh known-hosts"
-		}
-		khc := fmt.Sprintf("%s %s --fqdn %s", shellQuote(self), verbs, shellQuote(v.FQDN))
+		khc := fmt.Sprintf("%s %s known-hosts --fqdn %s", shellQuote(sshTokenEscape(self)), sshVerb, shellQuote(sshTokenEscape(v.FQDN)))
 		if v.Resolver != "" {
 			khc += " --resolver " + shellQuote(v.Resolver)
 		}
@@ -446,7 +461,15 @@ var sshVersionBanner = func(sshPath string) string {
 // pinnedKnownHostsFile is the fallback for OpenSSH older than 8.5: fetch the offered host
 // keys, prove one against the validated pins HERE, and write only that one.
 func pinnedKnownHostsFile(cx context.Context, v whaleSSHVerification, host string, port int) (string, whale.SSHFPPin, error) {
-	keys, err := scanHostKeys(cx, host, port)
+	// ssh-keyscan dials from this host's own address, which a fleet-only node does not answer,
+	// so when this host holds a routed session the key is fetched through it instead.
+	var keys []hostKey
+	var err error
+	if via, _ := whaleSSHVia(); via > 0 {
+		keys, err = scanHostKeysVia(cx, via, host, port, whale.HostKeyAlgorithmsFor(v.Pins))
+	} else {
+		keys, err = scanHostKeys(cx, host, port)
+	}
 	if err != nil {
 		return "", whale.SSHFPPin{}, &client.ProblemError{Status: 502, Title: "no host key",
 			Detail: fmt.Sprintf("could not fetch %s's host key to check it: %s", host, err.Error())}
@@ -579,3 +602,143 @@ func newWhaleSSHKnownHostsCmd() *cobra.Command {
 	cmd.Flags().StringVar(&resolver, "resolver", "", "resolver to walk the DNSSEC chain through")
 	return cmd
 }
+
+// sshOptionsRoute reports whether the user's own ssh options already say how to reach the
+// host, in which case our ProxyCommand stays out of the way: ssh takes the FIRST value of an
+// option, so ours, coming earlier, would silently replace theirs. Flags are case-sensitive in
+// ssh (-o is an option, -O a control command), so they are matched as typed.
+func sshOptionsRoute(opts []string) bool {
+	for i, o := range opts {
+		s := strings.TrimSpace(o)
+		if sshBundleHasJump(s) {
+			return true
+		}
+		switch {
+		case s == "-o" && i+1 < len(opts):
+			s = opts[i+1]
+		case strings.HasPrefix(s, "-o"):
+			s = s[2:]
+		default:
+			continue
+		}
+		k := strings.ToLower(strings.TrimSpace(s))
+		if strings.HasPrefix(k, "proxycommand") || strings.HasPrefix(k, "proxyjump") {
+			return true
+		}
+	}
+	return false
+}
+
+// sshArgFlags are the ssh(1) flags that take an argument. In a bundle such as -vJhost, the
+// first of them ends the flags: everything after it is its argument, so -lJane is a login name
+// and not a jump host.
+const sshArgFlags = "BbcDEeFIiJLlmOoPpQRSWw"
+
+// sshBundleHasJump reports whether one argument is a flag bundle containing -J.
+func sshBundleHasJump(s string) bool {
+	if len(s) < 2 || s[0] != '-' || s[1] == '-' {
+		return false
+	}
+	for _, c := range s[1:] {
+		if c == 'J' {
+			return true
+		}
+		if strings.ContainsRune(sshArgFlags, c) {
+			return false
+		}
+	}
+	return false
+}
+
+// sshConfigRoutes asks ssh itself whether its configuration (~/.ssh/config, -F, Include)
+// routes this destination already, by reading `ssh -G`, the effective configuration. A seam
+// so a test does not depend on the developer's own ssh config. A failed read is "no route",
+// which keeps the behaviour this command had before it routed anything.
+var sshConfigRoutes = func(sshPath string, sshOptions []string, dest string) bool {
+	args := append(append([]string{"-G"}, sshOptions...), dest)
+	out, err := exec.Command(sshPath, args...).Output()
+	if err != nil {
+		return false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if !ok {
+			continue
+		}
+		switch strings.ToLower(k) {
+		case "proxycommand", "proxyjump":
+			if !strings.EqualFold(strings.TrimSpace(v), "none") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// wantSSHProxyCommand decides whether this connection goes through our ProxyCommand. Not when
+// the user routes it; and on Windows only when a routed session needs it, because Win32-OpenSSH
+// does not run a ProxyCommand through a POSIX shell, so a direct dial there keeps the path it
+// always had rather than depend on quoting nobody here has run.
+func wantSSHProxyCommand(sshPath string, sshOptions []string, dest string) bool {
+	if sshOptionsRoute(sshOptions) || sshConfigRoutes(sshPath, sshOptions, dest) {
+		return false
+	}
+	if runtime.GOOS == "windows" {
+		port, _ := whaleSSHVia()
+		return port > 0
+	}
+	return true
+}
+
+// sshTokenEscape doubles every %, which ssh would otherwise expand as a token inside a
+// ProxyCommand or KnownHostsCommand.
+func sshTokenEscape(s string) string { return strings.ReplaceAll(s, "%", "%%") }
+
+// sshArgQuote quotes one argument of a ProxyCommand for the way the platform's ssh runs it:
+// through the user's POSIX shell, or on Windows straight to CreateProcess.
+func sshArgQuote(s string) string {
+	if runtime.GOOS == "windows" {
+		return `"` + strings.ReplaceAll(s, `"`, `\"`) + `"`
+	}
+	return shellQuote(s)
+}
+
+// scanHostKeysVia fetches the key the server offers through the local routed session, by
+// running an SSH key exchange just far enough to be shown the host key and then abandoning it.
+// Nothing is authenticated and nothing is trusted here: the caller checks the key against the
+// validated SSHFP exactly as it checks a scanned one. A seam for tests.
+var scanHostKeysVia = func(cx context.Context, viaPort int, host string, port int, algs string) ([]hostKey, error) {
+	sub, cancel := context.WithTimeout(cx, whaleSSHScanTimeout+2*time.Second)
+	defer cancel()
+	conn, err := socks5Connect(sub, viaPort, net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port)))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if dl, ok := sub.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+	}
+	var got []hostKey
+	cfg := &xssh.ClientConfig{
+		User: "whisper-keyscan",
+		HostKeyCallback: func(_ string, _ net.Addr, key xssh.PublicKey) error {
+			got = append(got, hostKey{keyType: key.Type(), base64Key: base64.StdEncoding.EncodeToString(key.Marshal())})
+			return errKeyCaptured
+		},
+		Timeout: whaleSSHScanTimeout,
+	}
+	if strings.TrimSpace(algs) != "" {
+		cfg.HostKeyAlgorithms = strings.Split(algs, ",")
+	}
+	_, _, _, herr := xssh.NewClientConn(conn, net.JoinHostPort(host, strconv.Itoa(port)), cfg)
+	if len(got) > 0 {
+		return got, nil
+	}
+	if herr == nil {
+		herr = errors.New("the server offered no host key")
+	}
+	return nil, herr
+}
+
+// errKeyCaptured ends the key exchange once the host key has been seen.
+var errKeyCaptured = errors.New("host key captured")

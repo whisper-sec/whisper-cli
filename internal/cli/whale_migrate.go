@@ -743,14 +743,23 @@ func runMigrateRollback(c *client.Client, p *whale.Plan, planPath string, undoab
 		if err == nil {
 			err = envelopeError(env)
 		}
+		// An undo revoke the plane answers with NOT_FOUND has nothing left to undo: an earlier
+		// rollback reached it and lost its reply, or it was revoked from another surface. Counted
+		// as rolled back, so re-running a rollback converges as its own advice promises.
+		alreadyGone := err != nil && r.Undo.Op == "revoke" && isRevokeMatchedNothing(err)
 		for i := range p.Receipts {
 			if p.Receipts[i].Seq != r.Seq {
 				continue
 			}
-			if err != nil {
+			switch {
+			case alreadyGone:
+				p.Receipts[i].RolledBackAt = time.Now().UTC().Format(time.RFC3339)
+				p.Receipts[i].Detail = "already gone: the account no longer had this agent to revoke"
+				done++
+			case err != nil:
 				p.Receipts[i].Detail = "rollback failed: " + friendly(err)
 				failed++
-			} else {
+			default:
 				p.Receipts[i].RolledBackAt = time.Now().UTC().Format(time.RFC3339)
 				done++
 			}

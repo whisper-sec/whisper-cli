@@ -525,6 +525,9 @@ type fleetGate struct {
 	members map[netip.Addr]bool
 	extra   []netip.Prefix
 	self    netip.Addr
+	// onRefresh, if set, runs after every successful refresh, so a holder of open connections
+	// can ask the new fleet about them (`connect --accept` closes the ones it no longer admits).
+	onRefresh func()
 }
 
 // newFleetGate reads the fleet once, up front. For a fleet-scoped serve that read MUST
@@ -567,7 +570,11 @@ func (g *fleetGate) refresh(cx context.Context, c *client.Client) error {
 	}
 	g.mu.Lock()
 	g.members = next
+	hook := g.onRefresh
 	g.mu.Unlock()
+	if hook != nil {
+		hook()
+	}
 	return nil
 }
 

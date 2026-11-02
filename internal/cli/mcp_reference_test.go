@@ -63,8 +63,9 @@ func TestMCP_Initialize_DeclaresResourcesAndPrompts(t *testing.T) {
 	}
 }
 
-// TestMCP_ReferenceToolsGatedByKey: the reference cypher tools are advertised only WITH a
-// key (the keyless tier stays exactly verify/rdap).
+// TestMCP_ReferenceToolsGatedByKey: the keyed reference cypher tools are advertised only
+// WITH a key. read_docs and list_workflows answer without one, so they are listed without
+// one (mcp_keyless_parity_test.go holds the two sets equal).
 func TestMCP_ReferenceToolsGatedByKey(t *testing.T) {
 	pinKeyState(t, "", "")
 	r := drive(t, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)
@@ -72,7 +73,7 @@ func TestMCP_ReferenceToolsGatedByKey(t *testing.T) {
 	tools, _ := res["tools"].([]any)
 	for _, ti := range tools {
 		name, _ := ti.(map[string]any)["name"].(string)
-		for _, banned := range []string{"query", "explain_indicator", "read_docs", "list_workflows", "run_workflow", "text2cypher"} {
+		for _, banned := range []string{"query", "explain_indicator", "explain_schema", "run_workflow", "text2cypher"} {
 			if name == banned {
 				t.Fatalf("reference tool %q must not list without a key", banned)
 			}

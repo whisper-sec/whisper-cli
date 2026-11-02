@@ -35,7 +35,11 @@ import (
 // we then recover the real version from the embedded build info (the init below), so a
 // go-installed CLI reports its module version, not this literal. A plain in-repo `go build` (build
 // info version "(devel)") keeps the fallback. One version for the whole product.
-const versionFallback = "0.115.0"
+//
+// In a release's source tree the fallback is that release, so a plain build of a release tag
+// reports it, and a tag whose source reports any other version names source that was never
+// released under it.
+const versionFallback = "0.242.0"
 
 var Version = versionFallback
 

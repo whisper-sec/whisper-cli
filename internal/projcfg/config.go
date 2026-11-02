@@ -58,6 +58,24 @@ type Config struct {
 	Enforce  *EnforceConfig  `json:"enforce,omitempty"`
 	Response *ResponseConfig `json:"response,omitempty"`
 	Respond  *RespondConfig  `json:"respond,omitempty"`
+
+	// Accept is the inbound TCP the connection opens on its own /128: `whisper
+	// service install --accept 22` writes it, and the supervised daemon reads it on every
+	// start, so the accepted ports survive a reboot. nil (the default) opens nothing.
+	Accept *AcceptConfig `json:"accept,omitempty"`
+}
+
+// AcceptConfig is the durable form of `whisper connect --accept`.
+type AcceptConfig struct {
+	// Ports are the accept rules as they were typed: "22", or "2222=127.0.0.1:22".
+	Ports []string `json:"ports"`
+	// From are extra source addresses or prefixes admitted beyond the fleet.
+	From []string `json:"from,omitempty"`
+	// Public admits every caller, not only the fleet. It is honoured only together with
+	// PublicConsentedAt, the moment someone said yes to it, so a hand edit that flips the
+	// boolean alone does not open a port to the internet.
+	Public            bool   `json:"public,omitempty"`
+	PublicConsentedAt string `json:"public_consented_at,omitempty"`
 }
 
 // Paths bundles the resolved absolute paths for one project root, so callers never re-derive
