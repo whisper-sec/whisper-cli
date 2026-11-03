@@ -30,15 +30,18 @@ import (
 //
 //  1. --agent names an agent: use it.
 //  2. --create makes a new agent called --name. --name alone uses the agent of that name; naming
-//     none, it is the name rung 6 gives the agent it creates. The same two flags mean the same on
-//     bare `whisper` (decideFlagSelection), which has no rungs 3 to 5 and so creates it.
+//     none, it is the name rung 7 gives the agent it creates. The same two flags mean the same on
+//     bare `whisper` (decideFlagSelection), which has no rungs 3 to 6 and so creates it.
 //  3. The project's .whisper/config, when the command reads one (run, claude).
 //  4. This host's saved agent (~/.config/whisper/agent, or --agent-file).
 //  5. A `whisper connect` already running on this host, proved to egress as its /128 (run).
-//  6. Otherwise a NEW agent for this host. An existing agent of the account is never picked for
+//  6. The one agent of the account whose published identity key is a key this host holds
+//    : a host that kept its key but lost its saved agent file gets its own agent back,
+//     and nothing else. Only a published pin counts, never a key file alone.
+//  7. Otherwise a NEW agent for this host. An existing agent of the account is never picked for
 //     a person who did not name it: on the WireGuard tier that would replace its peer.
 //
-// Rungs 5 and 6 say which agent was used or created, by name, and the success line of every
+// Rungs 5 to 7 say which agent was used or created, by name, and the success line of every
 // connect names the agent it bound, so nothing is chosen silently.
 
 // pickSource is where the agent a command binds came from.
@@ -52,6 +55,11 @@ const (
 	pickSession pickSource = "session" // a proved `whisper connect` already running on this host
 	pickCreated pickSource = "created" // made by this command
 	pickOwn     pickSource = "own"     // the key's own sole identity (keysOwnSoleAgent)
+	// pickProjectUnvouched: a project's .whisper/config this user's `whisper init` did not write
+	// (project_trust.go). It selects its agent, but it is not the person's choice until they say
+	// so, and projectGate keeps it off the WireGuard tier until then.
+	pickProjectUnvouched pickSource = "project-unvouched"
+	pickHeldKey          pickSource = "key" // pinned to an identity key this host holds (heldKeyAgent)
 )
 
 // explicit reports whether the person named this agent on the command line or in the project's
@@ -71,13 +79,13 @@ type agentPickOpts struct {
 	email     string // --email (connect), the created agent's contact
 	// useProject: read the project's .whisper/config at rung 3 (run and claude do).
 	useProject bool
-	// defaultNames names an agent created at rung 6 when --name was not given: the first is the
+	// defaultNames names an agent created at rung 7 when --name was not given: the first is the
 	// name it gets, and an agent already carrying any of them is not adopted (it is refused). nil
 	// keeps the mandatory-name rule: a terminal prompts, a script is told to pass --name.
 	defaultNames func() []string
 	// hostSession is rung 5; nil skips it. A session it returns is used as is, with no op:connect.
 	hostSession func() (*egressSession, error)
-	// noCreate: this command never creates on its own (ip, whale serve, the enforced run). Rung 6
+	// noCreate: this command never creates on its own (ip, whale serve, the enforced run). Rung 7
 	// becomes a refusal naming the fix; --create and --name still create when given.
 	noCreate bool
 	// nameless: the command takes no --name (ip, whale serve), so its refusal does not offer one.
@@ -87,6 +95,10 @@ type agentPickOpts struct {
 	noSave bool
 	// command is how messages name the command ("whisper run").
 	command string
+	// trustFile is where this user's vouched-for projects are recorded ("" = the default file
+	// beside the saved agent file). The enforced run, which runs as root, points it at the
+	// invoking user's file.
+	trustFile string
 }
 
 // agentPick is the decision. sel is what op:connect understands (a /128 or an id); it is empty
@@ -95,8 +107,12 @@ type agentPick struct {
 	sel         string
 	name        string
 	source      pickSource
-	projectTier string         // rung 3: the project's pinned tier
-	session     *egressSession // rung 5
+	projectTier string // rung 3: the project's pinned tier
+	// projectRoot and projectAgent: rung 3's project directory and the agent its config names, kept
+	// so projectGate can name the file and remember a yes.
+	projectRoot  string
+	projectAgent string
+	session      *egressSession // rung 5
 	// identityGone: the saved agent file named an agent the account no longer has, and the
 	// account had none left. connect's refusal record reports it when the create cannot run.
 	identityGone bool
@@ -132,8 +148,8 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 	}
 
 	// 2. --create / --name.
-	var listed []agentChoice // the listing rung 2 read, reused by rung 6
-	pendingName := ""        // --name naming no agent: the name rung 6 creates
+	var listed []agentChoice // the listing rung 2 read, reused by rungs 6 and 7
+	pendingName := ""        // --name naming no agent: the name rung 7 creates
 	unmatched := func(p agentPick) agentPick {
 		if pendingName != "" && !g.quiet {
 			fmt.Fprintf(os.Stderr, "whisper: no agent is called %s, so using %s; pass --create --name %s to make it\n",
@@ -167,7 +183,7 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 			}
 			return mintForPick(c, o, nm, choices, false, false)
 		}
-		// --name alone, naming no agent: it is the name an agent created at rung 6 gets. A saved
+		// --name alone, naming no agent: it is the name an agent created at rung 7 gets. A saved
 		// agent or a project still wins, as it always has (an installer that passes --name on every
 		// run must not mint a second identity beside the host's saved one), and says so.
 		listed, pendingName = choices, d.name
@@ -176,7 +192,7 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 	// 3. The project's .whisper/config. It applies only when no --agent-file was given either,
 	// so a file override still means "this file", as it always has.
 	if o.useProject && strings.TrimSpace(o.agentFile) == "" {
-		_, cfg, derr := discoverProjectConfig()
+		root, cfg, derr := discoverProjectConfig()
 		switch {
 		case derr == nil:
 			if v := strings.TrimSpace(cfg.Agent); v != "" {
@@ -186,9 +202,15 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 				if err != nil {
 					return agentPick{}, err
 				}
-				p := agentPick{sel: sel, name: agentNameFor(v, sel), source: pickProject, projectTier: cfg.Tier}
-				if saved := client.ReadAgentFile(o.agentFile); saved != "" && (sameIP(saved, sel) || saved == sel) {
+				p := agentPick{sel: sel, name: agentNameFor(v, sel), source: pickProject, projectTier: cfg.Tier,
+					projectRoot: root, projectAgent: v}
+				switch saved := client.ReadAgentFile(o.agentFile); {
+				case saved != "" && (sameIP(saved, sel) || saved == sel):
 					p.source = pickFile // the project names this host's own saved agent: not a takeover
+				case !projectTrusted(o.trustFile, root, v):
+					// Nothing outside the project says this user wrote it: a cloned repository can
+					// ship one. Its tier pin came from the same file, so it is not honoured.
+					p.source, p.projectTier = pickProjectUnvouched, ""
 				}
 				return unmatched(p), nil
 			}
@@ -214,7 +236,7 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 			// The success line names it ("Connected as <name>"), so a saved agent is never silent.
 			return unmatched(agentPick{sel: sel, name: savedName, source: pickFile}), nil
 		}
-		gone = true // proven gone, and the account has no agents left: rung 6 makes one
+		gone = true // proven gone, and the account has no agents left: rung 7 makes one
 	}
 
 	// 5. A connect already running on this host.
@@ -233,7 +255,6 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 		}
 	}
 
-	// 6. A new agent for this host.
 	choices := listed
 	if choices == nil {
 		var err error
@@ -241,6 +262,15 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 			return agentPick{identityGone: gone}, err
 		}
 	}
+
+	// 6. The agent pinned to an identity key this host holds.
+	if p, ok, err := heldKeyAgent(c, o, choices); err != nil {
+		return agentPick{identityGone: gone}, err
+	} else if ok {
+		return unmatched(p), nil
+	}
+
+	// 7. A new agent for this host.
 	if o.noCreate && pendingName == "" {
 		return agentPick{identityGone: gone}, nothingNamedRefusal(cmdName, choices, !o.nameless)
 	}
@@ -286,7 +316,7 @@ func pickAgent(c *client.Client, o agentPickOpts) (agentPick, error) {
 		// An agent's own key may not register, and its listing is its own one identity: that is
 		// not someone else's agent, it is the only one this key can be. Only when nothing was
 		// named: a name no agent carries is created or refused here, never swapped for the key's
-		// own. Rungs 3 to 5 still prefer this host's project, saved agent or
+		// own. Rungs 3 to 6 still prefer this host's project, saved agent, key or
 		// running session over creating one, and say so (unmatched).
 		if own, ok := keysOwnSoleAgent(c, choices, merr); ok {
 			if !g.quiet {
@@ -412,7 +442,9 @@ func decideFlagSelection(create bool, name string, choices []agentChoice) (selDe
 	name = strings.TrimSpace(name)
 	if looksLikeV6(name) {
 		// An address selects; it never names a new agent.
-		if ch, ok := choiceNamed(choices, name); ok && !create {
+		if ch, ok, err := selectAgent(choices, name); err != nil && !create {
+			return selDecision{}, err
+		} else if ok && !create {
 			return selDecision{kind: selExisting, choice: ch}, nil
 		}
 		return selDecision{}, usageErr("--name %s is an address, and an agent's name cannot be one: "+
@@ -427,7 +459,10 @@ func decideFlagSelection(create bool, name string, choices []agentChoice) (selDe
 		}
 		return selDecision{kind: selCreate, name: name}, nil
 	case name != "":
-		if ch, ok := choiceNamed(choices, name); ok {
+		// Two agents answering to the name is refused, never settled by the listing's order.
+		if ch, ok, err := selectAgent(choices, name); err != nil {
+			return selDecision{}, err
+		} else if ok {
 			return selDecision{kind: selExisting, choice: ch}, nil
 		}
 		return selDecision{kind: selCreate, name: name}, nil
@@ -435,9 +470,14 @@ func decideFlagSelection(create bool, name string, choices []agentChoice) (selDe
 	return selDecision{kind: selNone}, nil
 }
 
-// choiceNamed finds the agent a name selects: its label, its id or its address, by the one
-// matcher every selector shares.
+// choiceNamed reports whether any agent answers to name (its label, its id or its address), and
+// returns the one selectAgent picks. It is for "is this name taken" and display: two agents
+// answering to it still means taken, and then the returned choice is the first of them. Anything
+// that BINDS the agent it found uses selectAgent, which refuses that tie.
 func choiceNamed(choices []agentChoice, name string) (agentChoice, bool) {
+	if ch, ok, err := selectAgent(choices, name); err == nil && ok {
+		return ch, true
+	}
 	for _, ch := range choices {
 		if choiceMatchesSelector(ch, name) {
 			return ch, true
@@ -468,6 +508,11 @@ func mintForPick(c *client.Client, o agentPickOpts, name string, choices []agent
 	}
 	sel := firstNonBlank(created.addr, created.id, created.name)
 	p := agentPick{sel: sel, name: firstNonBlank(created.name, name), source: pickCreated}
+	if created.born {
+		// its first routed connect publishes this host's key, and only for an agent this call minted:
+		// an op:identity that handed back an identity the key already held is not a birth
+		markNewborn(created.addr)
+	}
 	saved := false
 	// Saved when this host had no agent, or its saved one was proven gone: a stale file left in
 	// place would be refused by the very next command.
@@ -535,6 +580,7 @@ func mintAgent(c *client.Client, name, email string, accountHasAgents bool) (age
 		name: firstNonBlank(field(recs[0], "label"), name),
 		addr: field(recs[0], "address", "addr128"),
 		id:   field(recs[0], "agent", "id"),
+		born: true, // op:register always mints a new agent
 	}
 	if ch.addr == "" && ch.id == "" {
 		return agentChoice{}, &client.ProblemError{Status: 502, Detail: fmt.Sprintf("op:register returned no address for %q, so nothing was connected", name)}

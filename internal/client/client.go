@@ -153,8 +153,12 @@ func (c *Client) Agents(ctx context.Context, op string, args map[string]any) (*E
 			return nil, err
 		}
 	}
-	query := BuildAgentsQuery(op, args)
-	return c.Query(ctx, query)
+	env, err := c.Query(ctx, BuildAgentsQuery(op, args))
+	if err == nil && env.wantsHostedProof(op, args) {
+		// the tenant requires node-key enrolment and the signer added the proof: send it once more
+		return c.Query(ctx, BuildAgentsQuery(op, args))
+	}
+	return env, err
 }
 
 // EnforcedHolder and EnforcedHolders are the enforce package's local, non-blocking lookups, as vars so a

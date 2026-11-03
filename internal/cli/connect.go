@@ -45,9 +45,12 @@ func newConnectCmd() *cobra.Command {
 			"Which identity it binds: --agent <name|id|/128> pins a specific one; --create\n" +
 			"--name <name> makes a new one; --name <name> alone uses the agent of that name.\n" +
 			"Else the agent saved for this host in ~/.config/whisper/agent (written when you\n" +
-			"pick or create one). With none of those it creates a NEW agent for this host and\n" +
-			"saves it: it never picks one of your account's existing agents for you, because\n" +
-			"on the WireGuard tier that would replace the peer another host holds for it.\n" +
+			"pick or create one). With no saved agent, the one agent whose published identity\n" +
+			"key is a key this host holds is this host's own, and is used and saved again. With\n" +
+			"none of those it creates a NEW agent for this host and saves it, and on the routed\n" +
+			"tier it publishes this host's identity key. It never picks another of your\n" +
+			"account's agents for you, because on the WireGuard tier that would replace the\n" +
+			"peer another host holds for it.\n" +
 			"A saved agent your account no longer has is refused, naming your agents.\n\n" +
 			"Every agent has a human name, so a create asks for --name (a terminal prompts;\n" +
 			"headless --name is required). connect never mints an unnamed agent.\n\n" +
@@ -326,10 +329,10 @@ func resolveAgentSelector(flagAgent, agentFile string) string {
 // client-side. A /128 (has a colon, per looksLikeV6) passes straight through with no
 // extra round-trip: the common persisted-default/--agent <addr> paths pay nothing.
 // Anything else (an id or a display name like "scout") is checked against the
-// account's agents (op:list): an EXACT id/label/address match passes through unchanged
-// (so an id keeps working exactly as before), and a CASE-INSENSITIVE label match
-// resolves to that agent's /128 - so `--agent scout` and `--agent Scout` both work, the
-// same way `whisper list` displays it. No match at all is a clear, actionable error
+// account's agents (op:list) by selectAgent and resolves to that agent's /128: an exact
+// id/label/address match first, else a CASE-INSENSITIVE one, so `--agent scout` and
+// `--agent Scout` both work, the same way `whisper list` displays it, and a selector two
+// agents answer to is refused with both named. No match at all is a clear, actionable error
 // naming the real candidates, never the control plane's opaque "not found".
 func resolveConnectAgent(c *client.Client, cx context.Context, sel string) (string, error) {
 	sel = strings.TrimSpace(sel)
@@ -340,24 +343,19 @@ func resolveConnectAgent(c *client.Client, cx context.Context, sel string) (stri
 	if err != nil {
 		return "", err
 	}
+	// The shared selector: an exact label, id or /128 wins over a case-folded one, and two agents
+	// answering at the same strength is refused rather than settled by row order. Prefer
+	// the /128 for the returned selector.
+	if ch, ok, aerr := selectAgent(choices, sel); aerr != nil {
+		return "", aerr
+	} else if ok {
+		return firstNonBlank(ch.addr, ch.id, ch.name), nil
+	}
 	var candidates []string
-	var ciMatch *agentChoice
-	for i := range choices {
-		ch := &choices[i]
-		// The shared matcher, which accepts the LABEL, the AGENT id and the ADDRESS -
-		// every column `whisper list` prints. Prefer the /128 for the returned selector.
-		if choiceMatchesSelector(*ch, sel) {
-			return firstNonBlank(ch.addr, ch.name), nil
-		}
+	for _, ch := range choices {
 		if ch.name != "" {
-			if ciMatch == nil && strings.EqualFold(ch.name, sel) {
-				ciMatch = ch
-			}
 			candidates = append(candidates, ch.name)
 		}
-	}
-	if ciMatch != nil {
-		return firstNonBlank(ciMatch.addr, ciMatch.name), nil
 	}
 	if len(candidates) == 0 {
 		return "", &client.ProblemError{Status: 404,

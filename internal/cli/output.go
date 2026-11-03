@@ -334,6 +334,11 @@ func mapProblem(pe *client.ProblemError) string {
 		if isIdentityKeyRefusal(pe) {
 			return identityKeyRefusalLine(pe)
 		}
+		// A tenant that requires node-key enrolment asking for a signature has accepted the
+		// key too; its own sentence says what to sign with, or to upgrade a CLI that cannot.
+		if isSignatureRequired(pe) {
+			return ""
+		}
 		return "your key was not accepted - run: whisper login"
 	case 404:
 		// Not every 404 is an agent lookup: a local "no .whisper/config here" or
@@ -352,6 +357,12 @@ func mapProblem(pe *client.ProblemError) string {
 		if pe.Type == localActionable404 {
 			return ""
 		}
+		// A reversal with nothing on record (no disconnect or revoke of that agent to undo) is a 404
+		// about the AUDIT TRAIL, not the agent. The agent may be right there in the account, so the account
+		// nudge would be untrue; the service's sentence says what to do instead (connect it, or mint anew).
+		if isNothingToReverse(pe) {
+			return ""
+		}
 		if problemMentionsAgent(pe) {
 			return "that agent isn't in your account - run `whisper list` to see your agents"
 		}
@@ -359,6 +370,12 @@ func mapProblem(pe *client.ProblemError) string {
 	case 503:
 		if pe.Type == "EGRESS_DISABLED" || strings.Contains(strings.ToLower(pe.Error()), "egress") {
 			return "egress isn't enabled for this agent yet - try again shortly or contact support"
+		}
+		// An identity pin that could not be published says what was pinned (nothing, or the key
+		// without its records yet) and that a retry is the remedy. Its own sentence is better than a
+		// generic "busy", so it passes through. A refusal that repeats is a 409 with its own detail.
+		if isPinPublishRetry(pe) {
+			return ""
 		}
 		return "Whisper is busy right now - please try again in a moment"
 	}
@@ -368,12 +385,39 @@ func mapProblem(pe *client.ProblemError) string {
 	return ""
 }
 
+// isNothingToReverse reports the service's 404 NOTHING_TO_REVERSE: a reverse:true on op:disconnect or
+// op:revoke that found nothing on record to undo.
+func isNothingToReverse(pe *client.ProblemError) bool {
+	return pe.Type == "NOTHING_TO_REVERSE" || pe.Title == "NOTHING_TO_REVERSE"
+}
+
+// isPinPublishRetry reports the service's retryable identity-pin answers, PIN_PUBLISH_FAILED and
+// PIN_PUBLISH_INCOMPLETE, for an account key and an agent key alike.
+func isPinPublishRetry(pe *client.ProblemError) bool {
+	for _, code := range []string{pe.Type, pe.Title} {
+		if code == "PIN_PUBLISH_FAILED" || code == "PIN_PUBLISH_INCOMPLETE" {
+			return true
+		}
+	}
+	return false
+}
+
 // isIdentityKeyRefusal reports the server's IDENTITY_SIGNATURE_INVALID: the connect was signed by an
 // identity key other than the one pinned for the address.
 func isIdentityKeyRefusal(pe *client.ProblemError) bool {
 	s := strings.ToLower(pe.Title + " " + pe.Type + " " + pe.Error())
 	return strings.Contains(s, "identity_signature_invalid") ||
 		strings.Contains(s, "identity_signature does not verify")
+}
+
+// isSignatureRequired reports the server's IDENTITY_SIGNATURE_REQUIRED, by its code.
+func isSignatureRequired(pe *client.ProblemError) bool {
+	for _, code := range []string{pe.Title, pe.Type} {
+		if strings.EqualFold(strings.TrimSpace(code), "IDENTITY_SIGNATURE_REQUIRED") {
+			return true
+		}
+	}
+	return false
 }
 
 // pinnedForAddr pulls the /128 out of the server's detail ("... pinned for <addr>. ..."), or "".

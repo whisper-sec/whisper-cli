@@ -381,8 +381,8 @@ func newCreateCmd() *cobra.Command {
 				return perr
 			}
 			choice := identityChoice(env, finalName)
-			prevName, reused := pre[choice.addr]
-			reused = reused && choice.addr != ""
+			prevName := pre[choice.addr]
+			reused, _ := identityOutcome(env, pre, choice.addr)
 			// The reuse note is stderr CHROME: printed on the human and --json paths
 			// (stdout stays machine-clean), suppressed under --quiet (no chrome).
 			if reused && !g.quiet {
@@ -542,11 +542,34 @@ func createAgentWithContact(c *client.Client, name, email string) (agentChoice, 
 		return agentChoice{}, perr
 	}
 	choice := identityChoice(env, strings.TrimSpace(name))
-	if prev, ok := pre[choice.addr]; ok && choice.addr != "" {
+	reused, born := identityOutcome(env, pre, choice.addr)
+	if reused {
 		fmt.Fprintf(os.Stderr, "whisper: reusing existing agent %s - %s\n",
-			firstNonBlank(prev, choice.name), choice.addr)
+			firstNonBlank(pre[choice.addr], choice.name), choice.addr)
 	}
+	choice.born = born
 	return choice, nil
+}
+
+// identityOutcome reads what an op:identity answer did with the /128 it names: reused (the key
+// already held it) or born (this call minted it). A service that sends `created` says so positively, and
+// that wins. An older one sends nothing, and then the snapshot taken before the call decides: seen there
+// is a reuse, absent from a snapshot that answered is a birth. A snapshot that could not be taken proves
+// neither, so it is no birth: a birth is what lets the next routed connect publish this host's key, and
+// re-pinning an identity another host already serves is the one mistake that must not follow from a guess.
+func identityOutcome(env *client.Envelope, pre map[string]string, addr string) (reused, born bool) {
+	if addr == "" {
+		return false, false
+	}
+	if env != nil && env.Result != nil {
+		if recs := env.Result.Records(); len(recs) > 0 {
+			if b, ok := recs[0]["created"].(bool); ok {
+				return !b, b
+			}
+		}
+	}
+	_, seen := pre[addr]
+	return seen, pre != nil && !seen
 }
 
 // preCreateIdentityAddrs snapshots the caller's EXISTING identity /128s (address ->

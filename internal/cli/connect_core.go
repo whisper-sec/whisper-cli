@@ -157,6 +157,19 @@ func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]a
 	}
 	keys := &connectKeys{wg: wgKey, identity: idKey}
 	env, err := connectWithSelfHeal(cx, c, args, idKey, tier)
+	if err != nil && birthAttempt(args, idKey) {
+		// The birth pin is a bonus, never a condition: a box that will not publish the key now (a
+		// store that is not connected, a fence, a policy) still connects the agent, which then
+		// keeps its Whisper-derived key exactly as an agent created without one does.
+		if _, isProblem := client.AsProblem(err); isProblem {
+			debugf("tier %s: the box did not publish this host's key for the new agent (%v); connecting without it", tier, err)
+			declineNewborn(agentArg(args), idKey)
+			delete(args, "identity_public_key")
+			delete(args, "adopt_identity_key")
+			keys.identity = nil
+			env, err = connectWithSelfHeal(cx, c, args, nil, tier)
+		}
+	}
 	if err != nil {
 		return nil, nil, err
 	}
@@ -390,6 +403,14 @@ var prepareIdentityKey = func(tier string, args map[string]any, handle string) (
 	}
 	if isAddr {
 		if lerr != nil {
+			if kp := newbornKey(addr.String()); kp != nil {
+				// An agent this command just created: no other host holds it, so this host's key is
+				// its birth pin, asked for by name. On success settleIdentity stores the key under the
+				// /128; if the box refuses the adopt, connectTierEnvelope connects without it.
+				args["identity_public_key"] = kp.MarshalSPKIBase64()
+				args["adopt_identity_key"] = true
+				return kp, nil
+			}
 			// The normal state for a hosted identity addressed by its /128, so a diagnostic, not a note.
 			debugf("no identity key for %s on this host; its published TLSA/SSHFP/OPENPGPKEY are unchanged. "+
 				"To publish this host's key, run `whisper connect --adopt-key`.", addr)
@@ -479,6 +500,13 @@ func settleIdentity(args map[string]any, res *client.Result, keys *connectKeys) 
 	}
 	adopt, _ := args["adopt_identity_key"].(bool)
 	notAdopted := keyNotAdopted(note)
+	birth := adopt && newbornKeyFor(args) == keys.identity
+	if birth {
+		// The new agent's own key at birth, which the person did not have to ask for: the adopt
+		// sentence and its advice about a stolen API key belong to replacing a key, not to this.
+		forgetNewborn(agentArg(args))
+		adopt = false
+	}
 	if n := strings.TrimSpace(note); n != "" && (adopt || notAdopted) {
 		if notAdopted && !strings.Contains(strings.ToLower(n), "owner") {
 			// The service names the API argument; this is the CLI's spelling of it.

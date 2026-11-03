@@ -71,11 +71,13 @@ func newRunCmd() *cobra.Command {
 			"variables and dials an address directly still leaves from that /128, or is refused.\n\n" +
 			"Which agent: --agent <name|id|/128>, or --create --name <name> for a new one, or\n" +
 			"--name <name> for the agent of that name. Else the project's .whisper/config, then\n" +
-			"this host's saved agent, then a `whisper connect` already running here. With none\n" +
-			"of those it creates an agent named after this host, says so, and saves it for the\n" +
-			"next run (--enforce never creates one unless named). It never picks one of your\n" +
-			"account's existing agents for you. In CI or a container, pass --name so every run\n" +
-			"reuses one agent.",
+			"this host's saved agent, then a `whisper connect` already running here, then the\n" +
+			"one agent whose published identity key is a key this host holds. With none of\n" +
+			"those it creates an agent named after this host, says so, and saves it for the\n" +
+			"next run (--enforce never creates one unless named); on the routed tier a created\n" +
+			"agent publishes this host's identity key. It never picks one of your account's\n" +
+			"other agents for you. In CI or a container, pass --name so every run reuses one\n" +
+			"agent.",
 		Args:               cobra.MinimumNArgs(1),
 		DisableFlagParsing: false,
 		RunE: func(cmd *cobra.Command, args []string) error {
@@ -201,7 +203,8 @@ func acquireRunSession(c *client.Client, agent, agentFile, tier string) (*egress
 	// The one selection rule (agent_pick.go). --agent, then --create/--name, then the
 	// project's config (the keystone of `whisper init python`, so `whisper run python` egresses
 	// from the /128 init set up), then this host's saved agent, then a `whisper connect` already
-	// running here, and otherwise a new agent named after this host. It used to end in "no
+	// running here, then the agent pinned to an identity key this host holds, and otherwise
+	// a new agent named after this host. It used to end in "no
 	// selector", which let the control plane pick an existing agent of the account, a different one
 	// per tier, and on the WireGuard tier replace its peer.
 	opts := agentPickOpts{
@@ -224,6 +227,15 @@ func acquireRunSession(c *client.Client, agent, agentFile, tier string) (*egress
 	if pick.session != nil {
 		noteTierIfDifferent(pick.session, selTier)
 		return pick.session, nil
+	}
+	// A project config this user never vouched for keeps off the WireGuard tier unless the person
+	// says so: a cloned repository can name any agent of the account.
+	if pick.source == pickProjectUnvouched {
+		t, gerr := projectGate(&pick, selTier, stdGuidedIO(), isInteractive(), true, opts.trustFile, "whisper run")
+		if gerr != nil {
+			return nil, gerr
+		}
+		selTier = t
 	}
 	// The project's pinned tier applies only when no --tier was given. An explicit flag, --tier
 	// auto included, is the person's choice for this run and wins over the pin.

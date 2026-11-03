@@ -23,8 +23,11 @@
 package testenv
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -119,7 +122,88 @@ func ProcessHome() (cleanup func(), err error) {
 	for k, v := range homeFamily(home) {
 		_ = os.Setenv(k, v)
 	}
+	// The XDG base directories are spelled out under the scratch home rather than left empty, so
+	// the guard can see them there and a reader that does not fall back to $HOME still lands inside.
+	_ = os.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	_ = os.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	_ = os.Setenv("XDG_STATE_HOME", filepath.Join(home, ".local", "state"))
+	if err := RequireScratchHome(home); err != nil {
+		_ = os.RemoveAll(home)
+		return func() {}, err
+	}
+	processHome = home
 	return func() { _ = os.RemoveAll(home) }, nil
+}
+
+// processHome is the scratch home ProcessHome made for this process ("" when none).
+var processHome string
+
+// ScratchHome is the scratch home this test process runs in, or "" when its TestMain never
+// made one. A package's own test asserts it is set, so a suite that lost its TestMain fails
+// instead of running against the real home.
+func ScratchHome() string { return processHome }
+
+// RequireScratchHome reports, as an error naming the variable, any per-user location this process
+// would resolve outside home: HOME, USERPROFILE, APPDATA, LOCALAPPDATA and the XDG base directories
+// when set, and what os.UserHomeDir and os.UserConfigDir actually return. An empty XDG variable is
+// fine (it falls back under HOME, which is checked); anything set must be inside home.
+func RequireScratchHome(home string) error {
+	if home == "" {
+		return fmt.Errorf("testenv: no scratch home")
+	}
+	inside := func(p string) bool {
+		if p == "" {
+			return false
+		}
+		rel, err := filepath.Rel(home, p)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+	}
+	// An ordered list, not a map: a variable set outside the home also moves what os.UserConfigDir()
+	// resolves to, and the refusal must name the VARIABLE (the cause) every time, never whichever of
+	// the two a map's random iteration order happened to reach first.
+	type loc struct{ name, path string }
+	var check []loc
+	homeSet := false
+	for _, k := range []string{"HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"} {
+		if v := os.Getenv(k); v != "" {
+			check = append(check, loc{"$" + k, v})
+			if k == "HOME" {
+				homeSet = true
+			}
+		}
+	}
+	if !homeSet && runtime.GOOS != "windows" {
+		return fmt.Errorf("testenv: HOME is not set, so the user's home is not the scratch home %s", home)
+	}
+	if h, err := os.UserHomeDir(); err == nil {
+		check = append(check, loc{"os.UserHomeDir()", h})
+	}
+	if c, err := os.UserConfigDir(); err == nil {
+		check = append(check, loc{"os.UserConfigDir()", c})
+	}
+	for _, l := range check {
+		if !inside(l.path) {
+			return fmt.Errorf("testenv: %s is %s, outside the scratch home %s; refusing to run tests that could write a real home", l.name, l.path, home)
+		}
+	}
+	return nil
+}
+
+// Main is a package's whole TestMain: before runs first (a package's own seams), then the
+// process gets a scratch home and the guard proves every per-user location is inside it, then
+// the tests run. A home it cannot set up or prove is a loud failure (exit 1), never a run
+// against the developer's real files.
+func Main(m *testing.M, before ...func()) int {
+	for _, f := range before {
+		f()
+	}
+	cleanup, err := ProcessHome()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "TestMain: refusing to run:", err)
+		return 1
+	}
+	defer cleanup()
+	return m.Run()
 }
 
 // toolchainDirs is where the Go caches live under the CURRENT home, spelled out so that moving

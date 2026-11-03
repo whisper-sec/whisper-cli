@@ -18,21 +18,46 @@ import (
 // folded into ONE verdict so a caller need not stitch four protocols together itself.
 //
 // DANE (the DNSSEC-anchored TLSA) is THE trust anchor for an agent cert - not a public
-// CA - so DaneOK is the load-bearing field: it is true only when a strong DANE-EE pin is
-// published AND (where the server could cross-check) the served leaf satisfies it.
+// CA - so DaneOK is the load-bearing field: it is true only when the leaf the agent's /128
+// actually serves on :443 matches a published DANE-EE (3 1 1) pin. DaneState says how that
+// check ended and DaneReason why it did not pass; both are newer than DaneOK, so an older
+// server leaves them empty and a reader must not depend on them.
 type VerifyVerdict struct {
 	IsWhisperAgent bool   `json:"is_whisper_agent"`
 	FQDN           string `json:"fqdn"`
 	Operator       string `json:"operator"`
 	Tenant         string `json:"tenant"`
 	DaneOK         bool   `json:"dane_ok"`
-	JwsOK          bool   `json:"jws_ok"`
-	VerifiedAt     int64  `json:"verified_at"`
-	Detail         string `json:"detail"`
+	// DaneState is how the DANE leg ended: "verified", "mismatch", "unreachable",
+	// "unchecked" or "no_pin" today. Kept as the server's string, so a state added later
+	// still reaches the reader instead of being dropped. "" from a server that predates it.
+	DaneState LooseString `json:"dane_state"`
+	// DaneReason is the server's one sentence on why the DANE leg did not pass ("" when it
+	// passed, or from a server that predates it).
+	DaneReason LooseString `json:"dane_reason"`
+	JwsOK      bool        `json:"jws_ok"`
+	VerifiedAt int64       `json:"verified_at"`
+	Detail     string      `json:"detail"`
 	// Evidence is the verbatim evidence object the server returned (address, ptr, the
 	// dane sub-object, rdap/identity_doc URLs, …). Kept raw so no field is ever lost and
 	// the JSON form is byte-faithful (Postel: we surface exactly what the server said).
 	Evidence json.RawMessage `json:"evidence"`
+}
+
+// LooseString is a string field read liberally: a JSON string is kept as sent, and any other
+// value (null, a number, an object) reads as "" instead of failing the whole verdict. The
+// verdict's newer fields use it, so one odd value from a server can never turn an answer the
+// CLI could have shown into "a non-JSON body".
+type LooseString string
+
+// UnmarshalJSON keeps a JSON string and reads anything else as empty. It never fails.
+func (s *LooseString) UnmarshalJSON(b []byte) error {
+	var v string
+	if json.Unmarshal(b, &v) != nil {
+		v = ""
+	}
+	*s = LooseString(v)
+	return nil
 }
 
 // VerifyIdentity asks the public, KEYLESS verify-identity endpoint whether addr is a real

@@ -70,6 +70,10 @@ type agentChoice struct {
 	// output could never be matched and came back as "that agent isn't in your account".
 	id     string
 	domain string
+	// born is true only for an agent this process just minted: op:register, or an op:identity that
+	// answered created:true (or, from a service too old to say, one the listing before the call did not hold).
+	// It is what lets the first routed connect publish this host's key as the agent's birth pin.
+	born bool
 	// created is the agent's creation epoch from op:list (0 when the row has none), so a
 	// listing can be shown newest first, the order `whisper list` prints.
 	created int64
@@ -262,34 +266,78 @@ func guidedZero(c *client.Client, opts guidedOptions, gio guidedIO) error {
 	return connectAndReport(opts, gio, choice)
 }
 
-// guidedOne handles the 1-agent branch: a quick yes/no confirm (Enter = yes). Headless or
-// with --quiet we just use it (the obvious zero-friction default). A "no" on a TTY drops
-// to the create path so the user is never stuck.
+// guidedOne handles the 1-agent branch: a quick yes/no confirm (Enter = yes). A "no" on a
+// TTY drops to the create path so the user is never stuck. Headless, nobody is there to say
+// yes, so the only agent is used only when it is provably this host's or this key's own
+// (headlessOneAgent).
 func guidedOne(opts guidedOptions, gio guidedIO, only agentChoice) error {
-	if opts.tty {
-		fmt.Fprintf(gio.err, "Use %s? [Y/n] ", only.name)
-		ans, _ := gio.in.ReadString('\n')
-		if isNo(ans) {
-			// They declined the only agent: offer to make a new one.
-			name, err := requireName(opts, gio)
-			if err != nil {
-				return err
-			}
-			if _, terr := decideFlagSelection(true, name, []agentChoice{only}); terr != nil {
-				return terr
-			}
-			c, cerr := resolveClient(true, false)
-			if cerr != nil {
-				return cerr
-			}
-			choice, cerr := mintAgent(c, name, "", true) // the account has an agent: mint, never op:identity's reuse
-			if cerr != nil {
-				return cerr
-			}
-			return connectAndReport(opts, gio, choice)
+	if !opts.tty {
+		return headlessOneAgent(opts, gio, only)
+	}
+	fmt.Fprintf(gio.err, "Use %s? [Y/n] ", only.name)
+	ans, _ := gio.in.ReadString('\n')
+	if isNo(ans) {
+		// They declined the only agent: offer to make a new one.
+		name, err := requireName(opts, gio)
+		if err != nil {
+			return err
 		}
+		if _, terr := decideFlagSelection(true, name, []agentChoice{only}); terr != nil {
+			return terr
+		}
+		c, cerr := resolveClient(true, false)
+		if cerr != nil {
+			return cerr
+		}
+		choice, cerr := mintAgent(c, name, "", true) // the account has an agent: mint, never op:identity's reuse
+		if cerr != nil {
+			return cerr
+		}
+		return connectAndReport(opts, gio, choice)
 	}
 	return connectAndReport(opts, gio, only)
+}
+
+// headlessOneAgent is bare `whisper` with nobody at a keyboard and exactly one agent in the
+// account. It used to bind that agent unasked. On a shared account it may be another
+// host's, so it is used only when one of two facts says it is not:
+//
+//   - this host's saved agent file names it, or
+//   - the control plane says every agent of this key files under the key's own handle
+//     (agent_tenants 0, the proof keysOwnSoleAgent rests on): an agent key and its one /128,
+//     or an owner key and its own identity.
+//
+// Anything unproven, a failed read included, is a usage error that names the agent and the
+// one flag that uses it, so the fix is a paste and nothing is connected behind anyone's back.
+func headlessOneAgent(opts guidedOptions, gio guidedIO, only agentChoice) error {
+	if saved := client.ReadAgentFile(opts.agentFile); saved != "" && choiceMatchesSelector(only, saved) {
+		return connectAndReport(opts, gio, only)
+	}
+	sel := firstNonBlank(only.id, only.addr, only.name)
+	why := ""
+	if only.addr != "" {
+		c, err := resolveClient(true, false)
+		if err != nil {
+			return err
+		}
+		cx, cancel := ctx()
+		_, others, terr := callerTenant(cx, c)
+		cancel()
+		switch {
+		case terr == nil && others != nil && *others == 0:
+			if !opts.quiet {
+				fmt.Fprintf(gio.err, "whisper: no agent was named, and your only agent is this key's own, so using %s\n",
+					describeAgent(only.name, only.addr))
+			}
+			return connectAndReport(opts, gio, only)
+		case terr != nil:
+			why = fmt.Sprintf(" (whether it is this key's own could not be read: %s)", friendly(terr))
+		}
+	}
+	return usageErr("your account has one agent, %s, and none is saved for this host, so whisper did not use it for you: "+
+		"it may be another host's%s. Use it with --agent %s (keep it for this host with 'whisper use %s'), "+
+		"or make a new one with --create --name {name}",
+		describeAgent(only.name, only.addr), why, sel, sel)
 }
 
 // guidedMany handles the N-agent branch: a numbered pick-or-create menu. The Bubble Tea
@@ -505,13 +553,14 @@ func requireName(opts guidedOptions, gio guidedIO) (string, error) {
 
 // --- selection helpers ------------------------------------------------------------
 
-// pickBySelector matches a --agent value against the fleet by name or /128. A miss is a
-// clean not-found error (confined to the caller's tenant), never an opaque later failure.
+// pickBySelector matches a --agent value against the fleet through the shared selector (label,
+// id or /128; exact before case-folded; a tie refused). A miss is a clean not-found error
+// (confined to the caller's tenant), never an opaque later failure.
 func pickBySelector(choices []agentChoice, sel string) (agentChoice, error) {
-	for _, ch := range choices {
-		if ch.name == sel || ch.addr == sel {
-			return ch, nil
-		}
+	if ch, ok, err := selectAgent(choices, sel); err != nil {
+		return agentChoice{}, err
+	} else if ok {
+		return ch, nil
 	}
 	return agentChoice{}, &client.ProblemError{Status: 404,
 		Detail: fmt.Sprintf("agent %q not found in your account", sel)}

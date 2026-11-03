@@ -396,11 +396,11 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 	if err != nil {
 		// The REP byte below cannot carry WHY, so keep the reason where a caller can read it.
 		p.noteDialFailure(err)
-		p.notifyDial(conn.RemoteAddr(), target, true)
+		p.notifyDial(conn.RemoteAddr(), nil, target, true)
 		socks5Reply(conn, 0x05) // connection refused (a generic, non-leaky failure)
 		return
 	}
-	p.notifyDial(conn.RemoteAddr(), target, false)
+	p.notifyDial(conn.RemoteAddr(), up.LocalAddr(), target, false)
 	defer up.Close()
 
 	// Success. Reply with a CONCRETE bind addr 0.0.0.0:0 (ATYP=IPv4) - NOT the DOMAIN
@@ -479,11 +479,11 @@ func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader)
 		// The 502 below is bodiless (a proxy must not put a page in a CONNECT reply), so the
 		// reason goes into the record instead of being lost with it.
 		p.noteDialFailure(err)
-		p.notifyDial(conn.RemoteAddr(), target, true)
+		p.notifyDial(conn.RemoteAddr(), nil, target, true)
 		_, _ = io.WriteString(conn, "HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
-	p.notifyDial(conn.RemoteAddr(), target, false)
+	p.notifyDial(conn.RemoteAddr(), up.LocalAddr(), target, false)
 	defer up.Close()
 	if _, err := io.WriteString(conn, "HTTP/1.1 200 Connection Established\r\n\r\n"); err != nil {
 		return
@@ -663,12 +663,15 @@ func halfClose(c net.Conn) {
 
 // DialObserver observes each upstream dial the front-end performs on behalf of an
 // accepted local client: the CLIENT's loopback address (its ephemeral 127.0.0.1:<port>
-// side - enough to attribute the flow to a local process), the target exactly as the
-// client requested it, and denied=true when the upstream dial failed/was refused. It
+// side - enough to attribute the flow to a local process), the LOCAL address of the
+// upstream leg this proxy opened for it (nil when the dial failed, or when the dialer's
+// conn cannot say), the target exactly as the client requested it, and denied=true when
+// the upstream dial failed/was refused. The upstream leg's source port is the one the
+// egress records for the connection, so it ties the client to that exact leg. It
 // runs inline on the per-connection goroutine, so it MUST be fast and MUST NOT block;
 // and it MUST NOT log the target (it can name a sensitive destination) - the process
 // graph folds it into bounded memory only.
-type DialObserver func(clientAddr net.Addr, target string, denied bool)
+type DialObserver func(clientAddr, upstreamLocal net.Addr, target string, denied bool)
 
 // SetDialObserver installs (or replaces; nil clears) the proxy's dial observer. Safe
 // to call at any time, including while the proxy is serving - observation is telemetry
@@ -708,9 +711,9 @@ func (p *Proxy) LastDialFailure() (string, time.Time) {
 
 // notifyDial invokes the observer when one is installed. A nil observer is the
 // common (un-tapped) case and costs one atomic load.
-func (p *Proxy) notifyDial(client net.Addr, target string, denied bool) {
+func (p *Proxy) notifyDial(client, upstreamLocal net.Addr, target string, denied bool) {
 	if f := p.dialObs.Load(); f != nil {
-		(*f)(client, target, denied)
+		(*f)(client, upstreamLocal, target, denied)
 	}
 }
 

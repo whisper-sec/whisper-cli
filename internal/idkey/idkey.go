@@ -14,10 +14,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -62,6 +64,61 @@ func GenerateKeypair() (*Keypair, error) {
 // self-signed leaf's own public key encodes to.
 func (k *Keypair) MarshalSPKIBase64() string {
 	return base64.StdEncoding.EncodeToString(k.spkiDER)
+}
+
+// PinDigest is the lowercase hex SHA-256 of the key's DER SubjectPublicKeyInfo: the association
+// data of the DANE-EE (3 1 1) TLSA an identity publishes once this key is its pin, and the digest
+// the control plane names a pin by.
+func (k *Keypair) PinDigest() string {
+	sum := sha256.Sum256(k.spkiDER)
+	return hex.EncodeToString(sum[:])
+}
+
+// Held is the identity keys persisted under one address: the address, and every file that names
+// it, the canonical spelling (PathFor of the address) first. One /128 may have more than one file
+// when it was stored under differently spelt handles.
+type Held struct {
+	Addr  netip.Addr
+	Paths []string
+}
+
+// HeldAddresses lists the keys this context has persisted under an IPv6 address, one entry per
+// address, in a stable order. A file is named for the handle it was stored under (PathFor), so only
+// names that parse back to an IPv6 address count; a name, "default", a temporary link file or
+// anything unreadable as an address is skipped. It reads names only: whether a file holds a key,
+// and whether that key is anyone's published pin, is for the caller to establish. A missing
+// directory is an empty list, never an error.
+func HeldAddresses() []Held {
+	dir := identityDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	index := map[netip.Addr]int{}
+	var out []Held
+	for _, e := range entries {
+		name := e.Name()
+		if !e.Type().IsRegular() || !strings.HasSuffix(name, ".pem") {
+			continue
+		}
+		a, perr := netip.ParseAddr(strings.ReplaceAll(strings.TrimSuffix(name, ".pem"), "_", ":"))
+		if perr != nil || !a.Is6() || a.Is4In6() || a.Zone() != "" {
+			continue
+		}
+		path := filepath.Join(dir, name)
+		i, seen := index[a]
+		if !seen {
+			index[a] = len(out)
+			out = append(out, Held{Addr: a, Paths: []string{path}})
+			continue
+		}
+		if path == PathFor(a.String()) {
+			out[i].Paths = append([]string{path}, out[i].Paths...)
+		} else {
+			out[i].Paths = append(out[i].Paths, path)
+		}
+	}
+	return out
 }
 
 // identityDir resolves ~/.config/whisper/identity (a package var so tests point it at a temp dir).
@@ -184,6 +241,30 @@ func Link(handle string, kp *Keypair) error {
 			}
 			return ErrLinkedElsewhere
 		}
+		return err
+	}
+	return nil
+}
+
+// Unlink removes the file stored under handle, but only while it still holds kp: it undoes a Link
+// whose key turned out not to be wanted, and never removes a key someone else stored meanwhile.
+// A file that is already gone is success.
+func Unlink(handle string, kp *Keypair) error {
+	if kp == nil {
+		return errors.New("idkey: no key to unlink")
+	}
+	path := PathFor(handle)
+	cur, err := load(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return err
+	}
+	if cur.MarshalSPKIBase64() != kp.MarshalSPKIBase64() {
+		return ErrLinkedElsewhere
+	}
+	if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

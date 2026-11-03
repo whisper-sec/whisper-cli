@@ -47,9 +47,13 @@ type pickPlane struct {
 	calls         []recordedCall
 	agents        []agentChoice
 	registerReply string
+	// identityReply, when set, is the op:identity answer (with or without `created`).
+	identityReply string
 	// otherHandles is agent_tenants in the caller's own activityTenants row: how many handles
 	// other than the key's own its agents file under. -1 leaves the field out.
 	otherHandles int
+	// connectHook, when set, answers an op:connect first: ok false falls through to the default.
+	connectHook func(body string) (status int, reply string, ok bool)
 }
 
 var connectAgentRE = regexp.MustCompile(`agent:'([^']*)'`)
@@ -77,9 +81,20 @@ func (p *pickPlane) serve(t *testing.T) *httptest.Server {
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["agent","address","label","api_key","fqdn"],"rows":[["ag_2165","` +
 				pickMinted + `","` + label + `","whisper_live_shownonce","x.agents.whisper.online."]]}}`))
 		case "identity":
+			if p.identityReply != "" {
+				_, _ = w.Write([]byte(p.identityReply))
+				return
+			}
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["label","address","fqdn"],"rows":[["own","` +
 				pickOwnAddr + `","own.agents.whisper.online."]]}}`))
 		case "connect":
+			if p.connectHook != nil {
+				if status, reply, ok := p.connectHook(body); ok {
+					w.WriteHeader(status)
+					_, _ = w.Write([]byte(reply))
+					return
+				}
+			}
 			addr := "2a04:2a01:9::bad" // a connect that named nobody: the control plane would pick
 			if m := connectAgentRE.FindStringSubmatch(body); m != nil {
 				addr = m[1]

@@ -600,6 +600,11 @@ func initBackbone(opts initOptions) (projcfg.Paths, projcfg.Config, error) {
 	if err := projcfg.Save(p, cfg); err != nil {
 		return projcfg.Paths{}, projcfg.Config{}, err
 	}
+	// Vouch for it outside the project, so `whisper run` here treats its agent as this user's
+	// choice. Not fatal: without the record a run asks before binding it routed.
+	if err := recordProjectTrust("", p.Root, agentSel); err != nil && !g.quiet {
+		fmt.Fprintf(os.Stderr, "whisper: could not record this project as yours (%v); `whisper run` here will use socks5 unless you pass --agent\n", err)
+	}
 	return p, cfg, nil
 }
 

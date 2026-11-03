@@ -181,6 +181,64 @@ func choiceMatchesSelector(ch agentChoice, sel string) bool {
 	return sameIP(ch.addr, sel)
 }
 
+// selectAgent finds the ONE agent sel names, for every surface that turns a selector into an
+// agent. Membership checks may keep using choiceMatchesSelector; anything that then binds
+// the agent it found goes through here, because "the first row that matches" let the server's row
+// order decide: an agent labelled "Scout" listed before one labelled "scout" won `--agent scout`,
+// and a label equal to another agent's id took that agent's place.
+//
+// An exact match wins: the label or id as typed, or the same /128. Only when nothing matches
+// exactly does a case-folded label or id count. Two different agents matching at the same strength
+// is refused with both named, never settled by order. ok is false when nothing matches at all.
+func selectAgent(choices []agentChoice, sel string) (ch agentChoice, ok bool, err error) {
+	sel = strings.TrimSpace(sel)
+	if sel == "" {
+		return agentChoice{}, false, nil
+	}
+	var exact, folded []agentChoice
+	for _, c := range choices {
+		switch {
+		case c.name == sel || c.id == sel || c.addr == sel || sameIP(c.addr, sel):
+			exact = appendDistinctAgent(exact, c)
+		case choiceMatchesSelector(c, sel):
+			folded = appendDistinctAgent(folded, c)
+		}
+	}
+	for _, set := range [][]agentChoice{exact, folded} {
+		switch len(set) {
+		case 0:
+			continue
+		case 1:
+			return set[0], true, nil
+		default:
+			return agentChoice{}, true, ambiguousSelector(sel, set)
+		}
+	}
+	return agentChoice{}, false, nil
+}
+
+// appendDistinctAgent adds c unless the set already holds the same agent: a listing that carries
+// one agent twice (by /128, else by id) is not two agents answering to one name.
+func appendDistinctAgent(set []agentChoice, c agentChoice) []agentChoice {
+	for _, have := range set {
+		if (c.addr != "" && sameIP(have.addr, c.addr)) || (c.addr == "" && have.addr == "" && c.id != "" && have.id == c.id) {
+			return set
+		}
+	}
+	return append(set, c)
+}
+
+// ambiguousSelector is the refusal for a selector two or more agents answer to. It names each by
+// the one string that cannot collide, its /128 (else its id), so the fix is a paste.
+func ambiguousSelector(sel string, set []agentChoice) error {
+	names := make([]string, 0, len(set))
+	for _, c := range set {
+		names = append(names, fmt.Sprintf("%s (--agent %s)", describeAgent(c.name, c.addr), firstNonBlank(c.addr, c.id, c.name)))
+	}
+	return usageErr("%s names %d of your agents, so none was picked: %s. Pass the one you mean by its address or id",
+		sel, len(set), strings.Join(names, ", "))
+}
+
 // accountAgents reports whether sel (a /128, id, or label) matches one of the
 // caller's agents per op:list, and returns the listing so a refusal can name
 // them. Conservative on doubt: a listing that cannot be fetched reports known,

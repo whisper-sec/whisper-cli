@@ -229,6 +229,10 @@ func TestGuidedRefusesOnAListingThatDidNotAnswer(t *testing.T) {
 		gio, _, errb, restore := guidedHarness(t, "", "", "")
 		t.Cleanup(restore)
 		seen := answeringAccount(t, []agentChoice{{name: "solo", addr: savedAddr}})
+		// Headless, the only agent is used when it is this host's saved one.
+		if err := client.SaveAgent("", savedAddr); err != nil {
+			t.Fatal(err)
+		}
 		if err := runGuided(guidedOptions{tty: false}, gio); err != nil || !strings.Contains(errb.String(), "solo") {
 			t.Fatalf("the only agent is used, got %v: %s", err, errb.String())
 		}

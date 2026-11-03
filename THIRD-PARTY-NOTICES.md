@@ -84,10 +84,10 @@ release actually ships rather than what anyone remembered to add.
 | `github.com/spf13/cobra` | v1.10.2 | Apache-2.0 |
 | `github.com/spf13/pflag` | v1.0.10 | BSD-3-Clause |
 | `github.com/xo/terminfo` | v0.0.0-20220910002029-abceb7e1c41e | MIT |
-| `golang.org/x/crypto` | v0.57.0 | BSD-3-Clause |
-| `golang.org/x/net` | v0.60.0 | BSD-3-Clause |
-| `golang.org/x/sys` | v0.48.0 | BSD-3-Clause |
-| `golang.org/x/text` | v0.42.0 | BSD-3-Clause |
+| `golang.org/x/crypto` | v0.58.1-0.20261009181718-2f1f834330b2 | BSD-3-Clause |
+| `golang.org/x/net` | v0.62.0 | BSD-3-Clause |
+| `golang.org/x/sys` | v0.49.0 | BSD-3-Clause |
+| `golang.org/x/text` | v0.43.0 | BSD-3-Clause |
 | `golang.org/x/time` | v0.7.0 | BSD-3-Clause |
 | `golang.zx2c4.com/wireguard` | v0.0.0-20260522210424-ecfc5a8d5446 | MIT |
 | `gopkg.in/yaml.v3` | v3.0.1 | Apache-2.0 AND MIT |

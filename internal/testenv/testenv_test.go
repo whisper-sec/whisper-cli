@@ -107,3 +107,38 @@ func TestEachHelperIsIndependentOfTheLast(t *testing.T) {
 		t.Fatalf("the second call must win, got %q want %q", got, b)
 	}
 }
+
+// RequireScratchHome passes when every per-user location is inside the home, and names the first
+// variable or resolved directory that is not.
+func TestRequireScratchHome(t *testing.T) {
+	home := HermeticHome(t)
+	if err := RequireScratchHome(home); err != nil {
+		t.Fatalf("a hermetic home must pass: %v", err)
+	}
+	outside := t.TempDir()
+	for _, k := range []string{"XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "XDG_DATA_HOME"} {
+		t.Run(k, func(t *testing.T) {
+			t.Setenv(k, filepath.Join(outside, "x"))
+			err := RequireScratchHome(home)
+			if err == nil || !strings.Contains(err.Error(), k) {
+				t.Fatalf("%s outside the home must be refused, got %v", k, err)
+			}
+		})
+	}
+	t.Run("HOME", func(t *testing.T) {
+		t.Setenv("HOME", outside)
+		t.Setenv("USERPROFILE", home)
+		if err := RequireScratchHome(home); err == nil {
+			t.Fatal("HOME outside the scratch home must be refused")
+		}
+	})
+	t.Run("a sibling with the same prefix", func(t *testing.T) {
+		t.Setenv("XDG_CONFIG_HOME", home+"-evil")
+		if err := RequireScratchHome(home); err == nil {
+			t.Fatal("a directory that only shares the prefix is outside")
+		}
+	})
+	if err := RequireScratchHome(""); err == nil {
+		t.Fatal("no home must be refused")
+	}
+}

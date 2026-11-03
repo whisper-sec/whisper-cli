@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -34,8 +35,11 @@ func newVerifyCmd() *cobra.Command {
 			"verdict: is it a real Whisper agent, whose, and how strongly did it verify.\n\n" +
 			"Trust is anchored by DANE - the DNSSEC-signed _443._tcp.<fqdn> TLSA record pins the\n" +
 			"agent's exact certificate, so NO public CA and NO pre-installed trust anchor is needed.\n" +
-			"dane_ok is true only when a strong DANE-EE (3 1 1) pin is published AND the cert the box\n" +
-			"serves satisfies it. This command is KEYLESS (the verify surface is public).\n\n" +
+			"dane_ok is true only when the certificate the agent's address actually serves on :443\n" +
+			"matches a published DANE-EE (3 1 1) pin. dane_state says how that check ended (verified,\n" +
+			"mismatch, unreachable, unchecked, no_pin) and dane_reason why it did not pass; unreachable\n" +
+			"and unchecked mean nobody could look, not that the agent is fake. This command is KEYLESS\n" +
+			"(the verify surface is public).\n\n" +
 			"  --trustless   prove the identity INDEPENDENTLY, trusting NO Whisper API. Validates the\n" +
 			"                DNSSEC chain from the IANA root IN-PROCESS (TLSA + AAAA + PTR), matches the\n" +
 			"                served DANE-EE cert against the DNSSEC pin, and verifies the transparency\n" +
@@ -154,7 +158,14 @@ func notVerifiedReason(v *client.VerifyVerdict, target string) string {
 		return fmt.Sprintf("%s is not a verified Whisper agent", target)
 	}
 	if !v.DaneOK {
-		return fmt.Sprintf("%s is a Whisper agent but DANE did not fully verify", trimDot(v.FQDN))
+		msg := fmt.Sprintf("%s is a Whisper agent but DANE did not fully verify", trimDot(v.FQDN))
+		if st := daneState(v); st != "" {
+			msg += " (" + st + ")"
+		}
+		if r := oneLine(string(v.DaneReason)); r != "" {
+			msg += ": " + r
+		}
+		return msg
 	}
 	return fmt.Sprintf("%s did not fully verify", target)
 }
@@ -178,13 +189,27 @@ func renderVerdict(v *client.VerifyVerdict, target string) {
 		{"fqdn", trimDot(v.FQDN)},
 		{"operator", orDash(v.Operator)},
 		{"dane_ok", yesNo(v.DaneOK)},
-		{"jws_ok", yesNo(v.JwsOK)},
 	}
+	// dane_state and dane_reason come from servers that grade the leaf the address serves; an
+	// older server sends neither, and the table then reads exactly as it always did.
+	if st := daneState(v); st != "" {
+		rows = append(rows, []string{"dane_state", st})
+	}
+	if r := oneLine(string(v.DaneReason)); r != "" && !v.DaneOK {
+		rows = append(rows, []string{"dane_reason", r})
+	}
+	rows = append(rows, []string{"jws_ok", yesNo(v.JwsOK)})
 	if sha := evidenceDaneSha(v.Evidence); sha != "" {
 		rows = append(rows, []string{"dane_tlsa_sha256", sha})
 	}
 	if m := evidenceServedMatches(v.Evidence); m != "" {
 		rows = append(rows, []string{"served_leaf_matches", m})
+	}
+	if leaf := evidenceServedLeaf(v.Evidence); leaf.spki != "" {
+		rows = append(rows, []string{"served_leaf_sha256", leaf.spki})
+		if leaf.subject != "" {
+			rows = append(rows, []string{"served_leaf_subject", leaf.subject})
+		}
 	}
 	printTable([]string{"FIELD", "VALUE"}, rows)
 	// Print the green success line ONLY on the fully-verified (exit 0) path; the not-fully-verified
@@ -218,6 +243,46 @@ func evidenceServedMatches(raw json.RawMessage) string {
 		return ""
 	}
 	return yesNo(*ev.Dane.ServedLeafMatches)
+}
+
+// daneState is the server's dane_state, trimmed and lower-cased so " Mismatch " still reads as
+// the state it names. A state this CLI does not know is shown as sent: it is the server's word,
+// and dropping it would hide the one fact a newer server added. "" from an older server.
+func daneState(v *client.VerifyVerdict) string {
+	return strings.ToLower(oneLine(string(v.DaneState)))
+}
+
+// servedLeaf is evidence.dane.served_leaf, the certificate the agent's address actually served.
+type servedLeaf struct{ spki, subject string }
+
+// evidenceServedLeaf reads evidence.dane.served_leaf. Liberal: an absent, null or odd-shaped
+// field (an older server, or one that observed no leaf) is the zero value, never an error, and a
+// non-string spki_sha256 or subject is simply not shown.
+func evidenceServedLeaf(raw json.RawMessage) servedLeaf {
+	var ev struct {
+		Dane *struct {
+			ServedLeaf json.RawMessage `json:"served_leaf"`
+		} `json:"dane"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &ev) != nil || ev.Dane == nil || len(ev.Dane.ServedLeaf) == 0 {
+		return servedLeaf{}
+	}
+	var leaf struct {
+		Spki    client.LooseString `json:"spki_sha256"`
+		Subject client.LooseString `json:"subject"`
+	}
+	if json.Unmarshal(ev.Dane.ServedLeaf, &leaf) != nil {
+		return servedLeaf{}
+	}
+	return servedLeaf{spki: oneLine(string(leaf.Spki)), subject: oneLine(string(leaf.Subject))}
+}
+
+// oneLine collapses a server string onto one trimmed line, so a reason or subject carrying a
+// newline or a control character cannot break the table or the exit line.
+func oneLine(s string) string {
+	return strings.Join(strings.FieldsFunc(s, func(r rune) bool {
+		return r == ' ' || r == '\t' || r == '\n' || r == '\r' || unicode.IsControl(r)
+	}), " ")
 }
 
 func yesNo(b bool) string {

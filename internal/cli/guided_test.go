@@ -144,24 +144,8 @@ func TestGuided_ZeroAgents_HeadlessNoNameErrors(t *testing.T) {
 	}
 }
 
-func TestGuided_OneAgent_HeadlessUsesIt(t *testing.T) {
-	srv := guidedTestServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:1::1"}}, nil)
-	defer srv.Close()
-	af := filepath.Join(t.TempDir(), "agent")
-	gio, _, errb, restore := guidedHarness(t, srv.URL, af, "")
-	defer restore()
-	g.key = "whisper_live_test"
-
-	if err := runGuided(guidedOptions{tty: false, agentFile: af}, gio); err != nil {
-		t.Fatalf("1-agent headless errored: %v", err)
-	}
-	if !strings.Contains(errb.String(), "solo") {
-		t.Fatalf("expected the only agent to be selected, stderr=%q", errb.String())
-	}
-	if got := client.ReadAgentFile(af); got != "2a04:2a01:1::1" {
-		t.Fatalf("expected the agent persisted, got %q", got)
-	}
-}
+// The headless one-agent branch is covered in agent_select_nobody_chose_test.go: the saved agent
+// or the key's own is used, anything unproven is refused.
 
 func TestGuided_OneAgent_TTYConfirmYes(t *testing.T) {
 	srv := guidedTestServer(t, []agentChoice{{name: "solo", addr: "2a04:2a01:1::1"}}, nil)

@@ -169,9 +169,15 @@ func runEnforced(agent, agentFile, tier, flagUser, name string, childArgs []stri
 	pick, err := pickAgent(c, agentPickOpts{
 		agent: agent, agentFile: agentFile, create: g.create, name: g.name,
 		useProject: true, noCreate: true, noSave: true, command: "whisper run --enforce",
+		trustFile: invokerFile(target, defaultProjectTrustFile(), projectTrustLeaf),
 	})
 	if err != nil {
 		return err
+	}
+	// An enforced run is always WireGuard, so a project config the invoking user never vouched
+	// for is asked about on a terminal and refused in a script. Root remembers nothing.
+	if _, gerr := projectGate(&pick, tierWireGuard, stdGuidedIO(), isInteractive(), false, "", "whisper run --enforce"); gerr != nil {
+		return gerr
 	}
 	sel := pick.sel
 	if note := peerReplacementNote(pick, tierWireGuard); note != "" && !g.quiet {

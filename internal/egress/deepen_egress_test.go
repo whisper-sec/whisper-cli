@@ -67,9 +67,10 @@ func (d *deepenegress_recordingDialer) seen() []string {
 
 // deepenegress_obsRec is one observed dial: who asked, for what, denied?
 type deepenegress_obsRec struct {
-	client string
-	target string
-	denied bool
+	client   string
+	upstream string
+	target   string
+	denied   bool
 }
 
 // deepenegress_obsRecorder is a race-safe DialObserver sink.
@@ -78,14 +79,17 @@ type deepenegress_obsRecorder struct {
 	recs []deepenegress_obsRec
 }
 
-func (r *deepenegress_obsRecorder) observe(client net.Addr, target string, denied bool) {
+func (r *deepenegress_obsRecorder) observe(client, upstream net.Addr, target string, denied bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	addr := ""
+	addr, up := "", ""
 	if client != nil {
 		addr = client.String()
 	}
-	r.recs = append(r.recs, deepenegress_obsRec{client: addr, target: target, denied: denied})
+	if upstream != nil {
+		up = upstream.String()
+	}
+	r.recs = append(r.recs, deepenegress_obsRec{client: addr, upstream: up, target: target, denied: denied})
 }
 
 func (r *deepenegress_obsRecorder) snapshot() []deepenegress_obsRec {
@@ -420,6 +424,14 @@ func TestDeepenEgress_DialObserver(t *testing.T) {
 	}
 	if recs[1].target != "deny.example:80" || !recs[1].denied {
 		t.Fatalf("second observation = %+v, want deny.example:80 denied=true", recs[1])
+	}
+	// The successful dial names its upstream leg's local address (the echo backend
+	// conn's own side, a real port); a failed dial has no leg and names none.
+	if _, port, err := net.SplitHostPort(recs[0].upstream); err != nil || port == "0" {
+		t.Fatalf("successful dial's upstream leg = %q, want a host:port with a real port", recs[0].upstream)
+	}
+	if recs[1].upstream != "" {
+		t.Fatalf("denied dial's upstream leg = %q, want none", recs[1].upstream)
 	}
 	for _, r := range recs {
 		host, _, err := net.SplitHostPort(r.client)
