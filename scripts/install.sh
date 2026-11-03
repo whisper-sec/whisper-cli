@@ -15,7 +15,8 @@
 #
 # To remove it again: curl -fsSL https://get.whisper.online/uninstall | sh
 #
-# Its job is SMALL and it does exactly three things, then hands off to the binary:
+# Its job is SMALL and it does exactly three things, then hands off to the binary
+# (plus the fleet auto-bind below, only for a captured run with an injected key):
 #   1. get the right `whisper` binary onto disk, sha256-VERIFIED (and PGP-checked
 #      against the pinned AS219419 release key when gpg is present; "the PGP layer"
 #      below says what each level proves), atomically;
@@ -928,10 +929,10 @@ if autobind_wanted; then
   fleet_autobind || true
 fi
 
-# Host sensor - OPT-IN ONLY, never default-on. The bare one-liner mints
-# identity + resolver and NOTHING more; observing a host is an explicit choice,
-# never a side effect of minting a /128, so this is deliberately NOT inferred
-# from WHISPER_AUTOBIND or the fleet shape. Set WHISPER_SENSOR=1 (or yes/true/on)
+# Host sensor - OPT-IN ONLY, never default-on. The bare one-liner never installs
+# it: at most the fleet auto-bind above mints identity + resolver. Observing a
+# host is an explicit choice, never a side effect of minting a /128, so this is
+# deliberately NOT inferred from WHISPER_AUTOBIND or the fleet shape. Set WHISPER_SENSOR=1 (or yes/true/on)
 # to ALSO install + enable + start the separate whisper-sensor service via the
 # binary's own installer. Fail-soft: a sensor failure warns with the one command
 # to run later and NEVER fails the install.

@@ -1,0 +1,1714 @@
+{
+ "_comment": "Live replies from https://graph.whisper.online/api/query, keyless, to the explore deck's own queries for the focus 142.250.154.100: the pages captured 2026-10-30T06:34:41Z, the edges summary 2026-10-30T06:48:44Z. The IP is the END of every RESOLVES_TO and NAMESERVER_FOR edge it has and the START of its BELONGS_TO edges, so the deck must show the first two inbound and the third outbound. The test answers only the exact query text recorded here, so a change to exCypherEdges or the pager needs a recapture: POST {\"query\": <the new text>, \"parameters\": {\"v\": \"142.250.154.100\"}} to the URL above and store the reply beside the query.",
+ "focus": "142.250.154.100",
+ "edges": {
+  "query": "CALL { MATCH (n {name:$v})-[r]->(m) RETURN type(r) AS et, true AS outb, m UNION ALL MATCH (n {name:$v})<-[r]-(m) RETURN type(r) AS et, false AS outb, m } WITH et, outb, m RETURN et, outb, count(m) AS total, collect([labels(m), coalesce(m.name, m.asn, m.address, m.email, m.value), coalesce(m.verdictLevel, m.threatLevel)])[0..8] AS sample ORDER BY total DESC, et, outb DESC",
+  "reply": {
+   "columns": [
+    "et",
+    "outb",
+    "total",
+    "sample"
+   ],
+   "rows": [
+    {
+     "et": "RESOLVES_TO",
+     "outb": false,
+     "total": 549,
+     "sample": [
+      [
+       [
+        "HOSTNAME"
+       ],
+       "ampcid.google.ac",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "ampcid.google.ae",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "ampcid.google.af",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "ampcid.google.ag",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "images.google.com.ai",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "cloudproxy.app",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "ampcid.google.com.ar",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "ampcid.google.at",
+       "NONE"
+      ]
+     ]
+    },
+    {
+     "et": "NAMESERVER_FOR",
+     "outb": false,
+     "total": 13,
+     "sample": [
+      [
+       [
+        "HOSTNAME"
+       ],
+       "a.root-servers.net",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "b.root-servers.net",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "c.root-servers.net",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "d.root-servers.net",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "e.root-servers.net",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "f.root-servers.net",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "g.root-servers.net",
+       "NONE"
+      ],
+      [
+       [
+        "HOSTNAME"
+       ],
+       "h.root-servers.net",
+       "NONE"
+      ]
+     ]
+    },
+    {
+     "et": "BELONGS_TO",
+     "outb": true,
+     "total": 2,
+     "sample": [
+      [
+       [
+        "REGISTERED_PREFIX"
+       ],
+       "142.250.0.0/15",
+       "LOW"
+      ],
+      [
+       [
+        "PREFIX"
+       ],
+       "142.250.154.0/24",
+       "LOW"
+      ]
+     ]
+    },
+    {
+     "et": "ANNOUNCED_BY",
+     "outb": true,
+     "total": 1,
+     "sample": [
+      [
+       [
+        "ANNOUNCED_PREFIX"
+       ],
+       "142.250.154.0/24",
+       "LOW"
+      ]
+     ]
+    },
+    {
+     "et": "CHILD_OF",
+     "outb": true,
+     "total": 1,
+     "sample": [
+      [
+       [
+        "HOSTNAME"
+       ],
+       "250.154.100",
+       "NONE"
+      ]
+     ]
+    },
+    {
+     "et": "HAS_COUNTRY",
+     "outb": true,
+     "total": 1,
+     "sample": [
+      [
+       [
+        "COUNTRY"
+       ],
+       "US",
+       null
+      ]
+     ]
+    },
+    {
+     "et": "LOCATED_IN",
+     "outb": true,
+     "total": 1,
+     "sample": [
+      [
+       [
+        "CITY"
+       ],
+       "Mountain View, US",
+       null
+      ]
+     ]
+    }
+   ],
+   "statistics": {
+    "rowCount": 7,
+    "executionTimeMs": 40
+   },
+   "cacheProvenance": {
+    "queryCacheTier": "miss",
+    "admittedToCache": true,
+    "physicalDeltaGenerationBeforeCompute": 209,
+    "listedInFallbackConsumed": false,
+    "listedInFallbackDegraded": false,
+    "liveReadThrough": false,
+    "datasets": {
+     "rpki-vrp": "6bcde1d310c9",
+     "rpki-validity": "a2933b891397",
+     "moas-conflicts": "5127c4e589b6",
+     "bgp-announced": "unknown:unpinnable"
+    }
+   }
+  }
+ },
+ "inbound_page": {
+  "edge": "RESOLVES_TO",
+  "query": "MATCH (n {name:$v})<-[r:RESOLVES_TO]-(m) RETURN labels(m) AS lbls, coalesce(m.name, m.asn, m.address, m.email, m.value) AS value, coalesce(m.verdictLevel, m.threatLevel) AS level ORDER BY value SKIP 0 LIMIT 200",
+  "reply": {
+   "columns": [
+    "lbls",
+    "value",
+    "level"
+   ],
+   "rows": [
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "6zy9yqe1ew.com",
+     "level": "HIGH"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "_dc-mx.95fdc6d43e1b.regolithmedia.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "a.g.page",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "a3j3.app.goo.gl",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "abbie-steph-hair-studio.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "aboutme.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "accounts.doubleclick.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "acomanda.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adaptv.pixel.invitemedia.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "admeld.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adorableshihtzupuppiesforsale.business.site",
+     "level": "HIGH"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ads.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ads.youtube.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adscale.pixel.invitemedia.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adsense.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adsensecustomsearchads.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adsenseformobileapps.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adssettings.google.co.uk",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adwords-community.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "adxpoint.xyz",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "affordable-frenchies.business.site",
+     "level": "HIGH"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "agraria-santboiana.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "akamai.invitemedia.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "alobama.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "amazonika-restaurant.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "amboard.app.goo.gl",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.ac",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.ae",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.af",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.ag",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.at",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.ba",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.bs",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.cc",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.cg",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.ch",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.co.in",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.co.jp",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.co.ma",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.co.uk",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.co.za",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.ar",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.au",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.br",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.co",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.hk",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.ph",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.pk",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.sa",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.tw",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.com.vn",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.cv",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.cz",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.de",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.dz",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.es",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.gg",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.gm",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.gp",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.gr",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.hn",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.hu",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.im",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.in",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.is",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.jo",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.la",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.lk",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.lt",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.ma",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.me",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.mg",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.mk",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.pl",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.pt",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.ru",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.se",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.sg",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.si",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.sk",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.st",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.tg",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.tw",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.vg",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampcid.google.vu",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ampproject.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "amps.app.goo.gl",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "analaw-food-peru.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "analytics.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "analytics.google.dev",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "android.clients.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "android.l.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "api.appcloudbox.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "app-analytics-services-att.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "app-analytics-services.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "app-measurement.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "app-support-call-now-pp-s.business.site",
+     "level": "HIGH"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "app.goo.gl",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "appengine.google.com",
+     "level": "HIGH"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "appjet.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "apps.webservicehost.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "appspot.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "apture.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "armazem-colonia-forneria-pizzaria.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "artron-graphic-designer.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "asapguttersllc.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "associacao-beneficente-uniao-do.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "associacao-pizzarias-unidas-do-brasil.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "astral-beach-food.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "atlantic-medical-center-doral.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "atlanticabuziospousada.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "awmzone1.pro",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "azbluecoolingheatingllc.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "balea-hostel-hostel.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bar-9-de-julio.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bar-do-nei-point-do-bode.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "baskino.one",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "batatachef.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bazel.build",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "beatthatquote.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "beckylawrence.bandpage.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bejinfor.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bikandi-etxea.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "billing.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bizantino-gelato-artesanal.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "blog.meebo.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bnfinix.bandpage.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bonfinx.bandpage.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "books.googe.ch",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "books.google.com.co",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "brisas-de-mar-duplex.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bt-in-f100.1e100.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "buchungs-stars.web.dev",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "business.meebo.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "bxfilm.one",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "ca.lijit.pixel.invitemedia.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "caesarspizza.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "cafe-de-quintano.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "cafe-modern.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "carroceriascrumar.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "casadoareinho.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "casatorrero-lapedriza.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "cdn.download.sweetpacks.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "centro-comercial-varadero.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "centro-de-convenciones-de-concordia.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "cervejariaimperial.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "channelintelligence.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "charlestonroadregistry.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "chat.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "chocolats.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "chrome.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "chromecast.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "churreria-camu.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "churros-la-bombilla.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clickserve.dartsearch.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clickserve.eu.dartsearch.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clickserve.uk.dartsearch.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clickserve.us2.dartsearch.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clients4.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clients6.google.at",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clients6.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clients6.igoogle.cz",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clientservices.googleapis.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clinica-amer.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clinica-cardiologica-garrido.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "cloud.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "cloudproxy.app",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "clubpacheco.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "cn-content.ampproject.org",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "codetheroad.developers.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "coffee-marsa.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "comuna13.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "consent.google.mg",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "console.cloud.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "consultorio-dr-german-pace.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "contacts.itnetworking.info",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "conversion-pixel.invitemedia.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "coova.org",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "coplace-coworking-pelotas.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "corretoradesegurosbh.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "crashlyticsreports-pa.googleapis.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "crowdsource.google.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "crr.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "csaiworks.com",
+     "level": "HIGH"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "cse.google.lt",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "d.meet",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "dachshund-puppies-available-for-sale.business.site",
+     "level": "HIGH"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "dashfleet.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "data-vocabulary.org",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "dataliberation.org",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "de.advertisercommunity.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "del-huerto-hortalizas-tienda-y.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "delizium.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "dfp.doubleclick.net",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "dial.meet",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "diosacafe.negocio.site",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "discordsearch.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "divide.com",
+     "level": "NONE"
+    },
+    {
+     "lbls": [
+      "HOSTNAME"
+     ],
+     "value": "divinapizzaoficial.negocio.site",
+     "level": "NONE"
+    }
+   ],
+   "statistics": {
+    "rowCount": 200,
+    "executionTimeMs": 8
+   },
+   "cacheProvenance": {
+    "queryCacheTier": "miss",
+    "admittedToCache": true,
+    "physicalDeltaGenerationBeforeCompute": 148,
+    "listedInFallbackConsumed": false,
+    "listedInFallbackDegraded": false,
+    "liveReadThrough": false,
+    "datasets": {
+     "rpki-vrp": "6bcde1d310c9",
+     "rpki-validity": "a2933b891397",
+     "moas-conflicts": "5127c4e589b6",
+     "bgp-announced": "unknown:unpinnable"
+    }
+   }
+  }
+ },
+ "outbound_page": {
+  "edge": "BELONGS_TO",
+  "query": "MATCH (n {name:$v})-[r:BELONGS_TO]->(m) RETURN labels(m) AS lbls, coalesce(m.name, m.asn, m.address, m.email, m.value) AS value, coalesce(m.verdictLevel, m.threatLevel) AS level ORDER BY value SKIP 0 LIMIT 200",
+  "reply": {
+   "columns": [
+    "lbls",
+    "value",
+    "level"
+   ],
+   "rows": [
+    {
+     "lbls": [
+      "REGISTERED_PREFIX"
+     ],
+     "value": "142.250.0.0/15",
+     "level": "LOW"
+    },
+    {
+     "lbls": [
+      "PREFIX"
+     ],
+     "value": "142.250.154.0/24",
+     "level": "LOW"
+    }
+   ],
+   "statistics": {
+    "rowCount": 2,
+    "executionTimeMs": 0
+   },
+   "cacheProvenance": {
+    "queryCacheTier": "miss",
+    "admittedToCache": true,
+    "physicalDeltaGenerationBeforeCompute": 148,
+    "listedInFallbackConsumed": false,
+    "listedInFallbackDegraded": false,
+    "liveReadThrough": false,
+    "datasets": {
+     "rpki-vrp": "6bcde1d310c9",
+     "rpki-validity": "a2933b891397",
+     "moas-conflicts": "5127c4e589b6",
+     "bgp-announced": "unknown:unpinnable"
+    }
+   }
+  }
+ }
+}

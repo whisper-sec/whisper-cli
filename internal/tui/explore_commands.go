@@ -33,12 +33,22 @@ const exCypherFocus = "MATCH (n {name:$v}) RETURN labels(n) AS labels, propertie
 // exCypherEdges is pathfinder's one-round-trip bounded neighbourhood: every edge type
 // off the focus with its TRUE total AND a small sample, in a single call. The sample
 // carries [labels, canonical value, threat level] so the neighbour list lands banded.
-const exCypherEdges = "MATCH (n {name:$v})-[r]-(m) " +
-	"WITH type(r) AS et, startNode(r) = n AS outb, m " +
+//
+// The direction comes from the PATTERN: one directed arm per way, never startNode(r).
+// The graph has changed what startNode(r) means on an inbound hop (it was the walk's
+// start on some plans, it is now the edge's stored start), and its servers upgrade one
+// at a time. The arrow in a directed arm means the same thing on every server. A
+// self-loop matches both arms, so it shows once each way, which is what it is. Ties
+// on the total break by type, then outbound first, so the deck's order is stable.
+const exCypherEdges = "CALL { " +
+	"MATCH (n {name:$v})-[r]->(m) RETURN type(r) AS et, true AS outb, m " +
+	"UNION ALL " +
+	"MATCH (n {name:$v})<-[r]-(m) RETURN type(r) AS et, false AS outb, m } " +
+	"WITH et, outb, m " +
 	"RETURN et, outb, count(m) AS total, " +
 	"collect([labels(m), coalesce(m.name, m.asn, m.address, m.email, m.value), " +
 	"coalesce(m.verdictLevel, m.threatLevel)])[0..8] AS sample " +
-	"ORDER BY total DESC"
+	"ORDER BY total DESC, et, outb DESC"
 
 // neighborPage is the SKIP/LIMIT page size for x (expand the fan-out).
 const neighborPage = 200
@@ -93,11 +103,13 @@ func exLoadNeighbors(c *client.Client, value string, edge edgeGroup, off, token 
 				Detail: "edge type " + et + " is not a plain relationship name; not paging it"}}
 		}
 	}
-	dirClause := "startNode(r) = n"
+	// The direction is the pattern's arrow, as in exCypherEdges: the same rows from every
+	// server, and one direction walked instead of both walked and half filtered away.
+	hop := "-[r:" + et + "]->"
 	if edge.Dir < 0 {
-		dirClause = "startNode(r) <> n"
+		hop = "<-[r:" + et + "]-"
 	}
-	cypher := "MATCH (n {name:$v})-[r:" + et + "]-(m) WHERE " + dirClause + " " +
+	cypher := "MATCH (n {name:$v})" + hop + "(m) " +
 		"RETURN labels(m) AS lbls, coalesce(m.name, m.asn, m.address, m.email, m.value) AS value, " +
 		"coalesce(m.verdictLevel, m.threatLevel) AS level " +
 		"ORDER BY value SKIP " + itoa(maxInt(off, 0)) + " LIMIT " + itoa(neighborPage)

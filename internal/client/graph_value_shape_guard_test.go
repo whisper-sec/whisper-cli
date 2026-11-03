@@ -18,10 +18,12 @@ import (
 // a relationship is {sourceId,targetId,edgeType} next to an aggregate and {type,...} as a plain
 // RETURN today, {type,startNodeId,endNodeId,...} after; a path's nodes are id strings today and node maps after. On
 // 2026-10-23 nothing in the CLI asks for or reads such a value (every relationship in our Cypher is reached through
-// type(r), startNode(r) or a property, and `whisper query` and the MCP tools pass replies through), so there is no
+// type(r), count(r) or a property, and `whisper query` and the MCP tools pass replies through), so there is no
 // reader to write. This keeps it so until a first consumer arrives, and tells it what to do: read the value through
-// ONE shared reader that accepts every shape, never at the call site. A line carrying "graph-value-guard: <reason>" is
-// a reviewed waiver; there are none today. Each rule is proven on a planted offender.
+// ONE shared reader that accepts every shape, never at the call site. The same release changed what startNode(r) and
+// endNode(r) report on an inbound hop (the walk's start before, the stored start after), so a direction is read from
+// the arrow in the pattern, never from those two; the explore deck did, until 2026-10-30. A line carrying
+// "graph-value-guard: <reason>" is a reviewed waiver; there are none today. Each rule is proven on a planted offender.
 
 const graphValueWaiver = "graph-value-guard:"
 
@@ -32,6 +34,7 @@ var (
 	// case-insensitively): `StartNodeID string`, `SourceId int64`.
 	gvField        = regexp.MustCompile(`(?m)^\s*([A-Z]\w*)\s+[\w\[\]*.]+(\s|$)`)
 	gvFieldNames   = []string{"sourceid", "targetid", "edgetype", "startnodeid", "endnodeid"}
+	gvDirectionFn  = regexp.MustCompile(`(?i)\b(startNode|endNode)\s*\(`)
 	gvPathFn       = regexp.MustCompile(`(?i)\b(relationships|nodes|shortestPath|allShortestPaths)\s*\(`)
 	gvPathBinding  = regexp.MustCompile(`(?i)(?:\bMATCH|,)\s*([A-Za-z_]\w*)\s*=\s*\(`)
 	gvRelVar       = regexp.MustCompile(`-\s*\[\s*([A-Za-z_]\w*)\s*[:\]*{|]`)
@@ -47,6 +50,10 @@ var (
 
 // gvCypherOffence says why a Cypher text asks the graph for a relationship or path VALUE, or "".
 func gvCypherOffence(cy string) string {
+	if m := gvDirectionFn.FindStringSubmatch(cy); m != nil {
+		return "reads a direction from " + m[1] + "(...), which the graph reports differently on an inbound hop " +
+			"from one server version to the next; put the direction in the pattern's arrow"
+	}
 	if m := gvPathFn.FindStringSubmatch(cy); m != nil {
 		return "asks the graph for " + m[1] + "(...)"
 	}
@@ -298,6 +305,8 @@ func TestGraphValueGuardFiresOnEachPlantedShape(t *testing.T) {
 		"head.go":   "package x\nconst q = \"MATCH (a)-[r]->(b) RETURN head(collect(r)) AS h\"\n",
 		"comp.go":   "package x\nconst q = \"MATCH (a) RETURN [(a)-[r]->(b) | r] AS rs\"\n",
 		"second.go": "package x\nconst q = \"MATCH (a), p = (a)-[:R]->(b) RETURN a\"\n",
+		"dir.go":    "package x\nconst q = `MATCH (n {name:$v})-[r]-(m) WITH type(r) AS et, startNode(r) = n AS outb, m RETURN et, outb, count(m) AS total`\n",
+		"end.go":    "package x\nconst q = \"MATCH (a)<-[r:R]-(b) RETURN endNode(r).name AS e\"\n",
 	}
 	for name, src := range planted {
 		var hits []string
@@ -311,7 +320,7 @@ func TestGraphValueGuardFiresOnEachPlantedShape(t *testing.T) {
 		}
 	}
 	fine := "package x\n" +
-		"const a = `MATCH (n {name:$v})-[r]-(m) WITH type(r) AS et, startNode(r) = n AS outb, m RETURN et, outb, count(m) AS total`\n" +
+		"const a = `CALL { MATCH (n {name:$v})-[r]->(m) RETURN type(r) AS et, true AS outb, m UNION ALL MATCH (n {name:$v})<-[r]-(m) RETURN type(r) AS et, false AS outb, m } WITH et, outb, m RETURN et, outb, count(m) AS total`\n" +
 		"const b = \"MATCH (n)-[r:RESOLVES_TO]->(ip) RETURN labels(ip) AS lbls, r.lastSeen AS lastSeen\"\n" +
 		"func nodes() []string { return nil }\n" +
 		"var edgeType string\n" +
