@@ -1,0 +1,616 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 viaGraph B.V. (Whisper Security)
+
+package cli
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/netip"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"time"
+
+	"github.com/spf13/cobra"
+
+	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/trustverify"
+	"github.com/whisper-sec/whisper-cli/internal/whale"
+)
+
+// whale_ssh_authz.go is the target half of `whisper whale ssh`: the command sshd runs
+// as its AuthorizedKeysCommand, so a fleet agent logs in with its own identity key and no
+// authorized_keys entry, and the snippet that wires it in.
+//
+// `whale ssh` proves the HOST to the caller from the node's SSHFP. This proves the CALLER to
+// the host the same way: the address the connection came from (recovered through `whale
+// caller` when it arrived through `connect --accept`), its validated PTR into this fleet's
+// zone, the AAAA back, an active whisper-id1, and the offered key against the agent's own
+// validated SSHFP. whale/sshauthz.go holds the decision; this file feeds it what sshd hands
+// over, logs the verdict where an auditor looks, and prints the key line or nothing.
+
+// sshAuthzBudget bounds one decision. sshd waits on the command inside LoginGraceTime, and a
+// slow resolver must turn into a denial, never into a login that hangs.
+const sshAuthzBudget = 15 * time.Second
+
+// sshAuthzSnippetPath is where `install --write` puts the snippet: a drop-in, so the
+// operator's own sshd_config is never edited.
+const sshAuthzSnippetPath = "/etc/ssh/sshd_config.d/50-whisper-ssh-authz.conf"
+
+// Seams, so the tests can stand in for the network, the host and the log.
+var (
+	sshAuthzLookup = func(resolver string) whale.AuthzLookup {
+		return whale.ValidatorLookup{V: trustverify.NewValidator(trustverify.NewNetResolver(strings.TrimSpace(resolver)),
+			trustverify.IANARootAnchors(), time.Now())}
+	}
+	sshAuthzIsLocal    = isLocalAddr
+	sshAuthzLog        = logSSHAuthz
+	sshAuthzEUID       = os.Geteuid
+	sshAuthzExecutable = os.Executable
+	// sshAuthzSshdTest proves sshd accepts the configuration (-t) and returns the effective
+	// configuration it would run with (-T), so install can check its lines are the ones in force.
+	sshAuthzSshdTest = func(config string) (string, error) {
+		if out, err := exec.Command("sshd", "-t", "-f", config).CombinedOutput(); err != nil {
+			return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+		}
+		out, err := exec.Command("sshd", "-T", "-f", config).CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("sshd -T: %v: %s", err, strings.TrimSpace(string(out)))
+		}
+		return string(out), nil
+	}
+)
+
+func newWhaleSSHAuthzCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "ssh-authz",
+		Short: "Let your fleet's agents log in here with their own key, proven from DNSSEC",
+		Long: "The target half of `whisper whale ssh`. sshd runs `ssh-authz check` as its\n" +
+			"AuthorizedKeysCommand. It admits a key only when the connection came from an\n" +
+			"active agent of your fleet and the key is that agent's own, both proven from the\n" +
+			"IANA DNSSEC root in this process:\n\n" +
+			"  - the caller's address has a validated PTR to a name in your fleet's zone,\n" +
+			"    and that name's validated AAAA points back at it;\n" +
+			"  - the name's whisper-id1 TXT says status=active, so a revoked agent stops;\n" +
+			"  - the offered key matches the name's SSHFP (its TLSA 3 1 1 pin only with --allow-tlsa).\n\n" +
+			"Anything less, including a lookup that times out or an unsigned answer, prints\n" +
+			"nothing and sshd says \"Permission denied\". sshd reads authorized_keys before it\n" +
+			"runs the command, so keys you added by hand keep working. root is never admitted\n" +
+			"unless you name it with --user root. Every decision goes to the auth log.\n\n" +
+			"  install   print the sshd_config snippet, or write it with --write (as root)\n" +
+			"  check     the AuthorizedKeysCommand itself",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error { return cmd.Help() },
+	}
+	cmd.AddCommand(newWhaleSSHAuthzCheckCmd(), newWhaleSSHAuthzInstallCmd())
+	return cmd
+}
+
+// sshAuthzFlags are the policy flags check and install share, so the snippet install writes
+// is exactly what check reads.
+type sshAuthzFlags struct {
+	fleet    string
+	allow    []string
+	users    []string
+	resolver string
+	tlsa     bool
+}
+
+func (f *sshAuthzFlags) bind(cmd *cobra.Command) {
+	cmd.Flags().StringVar(&f.fleet, "fleet", "", "your fleet: its tenant (t...), its zone, or one of its node names (install finds it when omitted)")
+	cmd.Flags().StringSliceVar(&f.allow, "allow", nil, "admit only these agents: a full name or its first label (repeatable; default every active agent of the fleet)")
+	cmd.Flags().StringSliceVar(&f.users, "user", nil, "the local accounts fleet agents may log in as (repeatable; default any account except root and uid 0)")
+	cmd.Flags().StringVar(&f.resolver, "resolver", "", "resolver to walk the DNSSEC chain through (default: the system resolvers, then public ones)")
+	cmd.Flags().BoolVar(&f.tlsa, "allow-tlsa", false, "also accept the agent's TLSA 3 1 1 pin when no SSHFP admits the key (it pins the TLS service's key, so whoever holds that can log in too)")
+}
+
+func (f *sshAuthzFlags) policy() (whale.AuthzPolicy, error) {
+	zone, tenant, err := whale.NormalizeFleet(f.fleet)
+	if err != nil {
+		return whale.AuthzPolicy{}, fmt.Errorf("--fleet: %v", err)
+	}
+	return whale.AuthzPolicy{Fleet: zone, Tenant: tenant, Allow: nonBlank(f.allow), Users: nonBlank(f.users), AllowTLSA: f.tlsa}, nil
+}
+
+func newWhaleSSHAuthzCheckCmd() *cobra.Command {
+	var f sshAuthzFlags
+	var from string
+	cmd := &cobra.Command{
+		Use:   "check <user> <key-type> <base64-key> <%C...>",
+		Short: "sshd's AuthorizedKeysCommand: print the key line to admit, or nothing",
+		Long: "Run by sshd as `whisper whale ssh-authz check --fleet <fleet> -- %u %t %k %C`.\n" +
+			"Prints exactly one authorized_keys line when the key belongs to an active agent of\n" +
+			"the fleet that the connection really came from, and nothing otherwise. A denial\n" +
+			"exits 0 with no output, so sshd simply moves on; the reason goes to the auth log.\n\n" +
+			"--from <address> asks the same question about a caller you name, as a dry run: the\n" +
+			"verdict is printed to stderr and no key line is ever printed.",
+		Args: cobra.MinimumNArgs(3),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			pol, err := f.policy()
+			if err != nil {
+				sshAuthzLog(false, "refused: "+err.Error())
+				return usageErr("%v. Write the fleet into the snippet: `whisper whale ssh-authz install` prints it", err)
+			}
+			req := whale.AuthzRequest{User: args[0], KeyType: args[1], Key: args[2]}
+			// %u is chosen by whoever connects, and it is the first argument, so without a
+			// -- in front of it a login named --fleet=... would be read as a flag and move the
+			// trust root. The -- is therefore required, not advised, and a login name that
+			// still looks like a flag is refused outright.
+			if cmd.ArgsLenAtDash() != 0 {
+				sshAuthzLog(false, sshAuthzLogLine(whale.AuthzRequest{}, whale.AuthzDecision{Reason: "refused: put -- before " +
+					"%u %t %k %C in the AuthorizedKeysCommand, so nothing sshd substitutes can be read as a flag " +
+					"(`whisper whale ssh-authz install` prints the line)"}, ""))
+				return usageErr("put -- before the user, key type, key and connection: " +
+					"`whisper whale ssh-authz check --fleet <fleet> -- %%u %%t %%k %%C`")
+			}
+			if strings.HasPrefix(req.User, "-") {
+				sshAuthzLog(false, sshAuthzLogLine(req, whale.AuthzDecision{Reason: "a login name that starts with - is refused"}, ""))
+				return nil
+			}
+			dry := strings.TrimSpace(from) != ""
+			via := ""
+			if dry {
+				a, perr := netip.ParseAddr(strings.Trim(strings.TrimSpace(from), "[]"))
+				if perr != nil {
+					return usageErr("--from %q is not an address", from)
+				}
+				req.Source, via = a, "dry-run"
+			} else {
+				req.Source, via, err = sshAuthzSource(args[3:])
+				if err != nil {
+					d := whale.AuthzDecision{Reason: err.Error()}
+					sshAuthzLog(false, sshAuthzLogLine(req, d, via))
+					return nil
+				}
+			}
+			cx, cancel := context.WithTimeout(context.Background(), sshAuthzBudget)
+			defer cancel()
+			d := whale.Authorize(cx, sshAuthzLookup(f.resolver), pol, req)
+			if dry {
+				verdict := "DENY"
+				if d.Admit {
+					verdict = "ADMIT"
+				}
+				fmt.Fprintf(os.Stderr, "%s %s\n", verdict, sshAuthzLogLine(req, d, via))
+				return nil
+			}
+			sshAuthzLog(d.Admit, sshAuthzLogLine(req, d, via))
+			if d.Admit {
+				fmt.Fprintln(os.Stdout, d.Line)
+			}
+			return nil
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().StringVar(&from, "from", "", "dry run: decide for this caller address and print the verdict, never a key line")
+	// Flags end at the first argument: with the required --, nothing after it is a flag.
+	cmd.Flags().SetInterspersed(false)
+	return cmd
+}
+
+// sshAuthzLogLine is the one line every decision leaves behind.
+func sshAuthzLogLine(req whale.AuthzRequest, d whale.AuthzDecision, via string) string {
+	parts := []string{"user=" + logToken(req.User)}
+	if req.Source.IsValid() {
+		parts = append(parts, "from="+req.Source.String())
+	}
+	if via != "" {
+		parts = append(parts, "source="+logToken(via))
+	}
+	if d.Name != "" {
+		parts = append(parts, "agent="+d.Name)
+	}
+	if d.Fingerprint != "" {
+		parts = append(parts, "key="+d.Fingerprint)
+	}
+	if d.Via != "" {
+		parts = append(parts, "proof="+d.Via)
+	}
+	return scrubLogLine(strings.Join(parts, " ") + ": " + d.Reason)
+}
+
+// scrubLogLine keeps a log line one line of printable text, whatever bytes a key or a name
+// carried into the reason.
+func scrubLogLine(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		return r
+	}, s)
+}
+
+// logToken keeps a value sshd passed through on one line and short, because %u is chosen by
+// whoever is connecting.
+func logToken(s string) string {
+	s = strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f || r == ' ' {
+			return '_'
+		}
+		return r
+	}, s)
+	if len(s) > 64 {
+		s = s[:64] + "..."
+	}
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// sshAuthzSource recovers the caller's address from what sshd passed as %C, and says how.
+//
+// An accepted connection (`whisper connect --accept`) reaches sshd from loopback, and the
+// holder's record gives back the /128 it really came from. Anything else that reached sshd
+// from loopback came from this host, which is not a fleet member, so it is refused. Otherwise
+// the caller is the half of %C that is not one of this host's own addresses: sshd_config(5)
+// documents %C client first and OpenSSH 9.9 was measured expanding it server first, so the
+// order is never assumed.
+func sshAuthzSource(conn []string) (netip.Addr, string, error) {
+	if len(conn) == 0 {
+		return netip.Addr{}, "", errors.New("sshd passed no connection (%C), so the caller is unknown: " +
+			"the snippet must end with %u %t %k %C")
+	}
+	q, err := parseCallerQuery(conn)
+	if err != nil {
+		return netip.Addr{}, "", fmt.Errorf("the connection %q does not parse: %v", strings.Join(conn, " "), err)
+	}
+	if rec, ok := lookupAcceptCaller(q); ok {
+		a, perr := netip.ParseAddr(rec.Caller)
+		if perr != nil {
+			return netip.Addr{}, "accept", fmt.Errorf("the accept record names %q, which is not an address", rec.Caller)
+		}
+		return a.Unmap(), "accept", nil
+	}
+	cands := []netip.Addr{q.client.Addr().Unmap()}
+	if q.either {
+		cands = append(cands, q.server.Addr().Unmap())
+	}
+	var remote []netip.Addr
+	for _, a := range cands {
+		// A connection with a loopback end was made on this host. Through an accept the
+		// record above answers for it; with no record it is a local user, whatever address
+		// that user bound the other end to, so it is refused rather than half-read.
+		if a.IsLoopback() || a.IsUnspecified() {
+			return netip.Addr{}, "sshd", errors.New("the connection came from this host itself and not through an " +
+				"accepted port, so it is not a fleet member")
+		}
+		if !sshAuthzIsLocal(a) {
+			remote = append(remote, a)
+		}
+	}
+	switch {
+	case len(remote) == 1:
+		return remote[0], "sshd", nil
+	case len(remote) == 0:
+		return netip.Addr{}, "sshd", errors.New("the connection came from this host itself and not through an " +
+			"accepted port, so it is not a fleet member")
+	default:
+		if remote[0] == remote[1] {
+			return remote[0], "sshd", nil
+		}
+		return netip.Addr{}, "sshd", fmt.Errorf("neither %s nor %s is an address of this host, so which end is the "+
+			"caller cannot be told; refusing rather than guessing", remote[0], remote[1])
+	}
+}
+
+// isLocalAddr reports whether this host holds a: on an interface, or through a local route
+// (AnyIP), which the interface list does not show but a bind to port 0 does.
+func isLocalAddr(a netip.Addr) bool {
+	if addrs, err := net.InterfaceAddrs(); err == nil {
+		for _, ia := range addrs {
+			if p, perr := netip.ParsePrefix(ia.String()); perr == nil && p.Addr().Unmap().WithZone("") == a {
+				return true
+			}
+		}
+	}
+	l, err := net.Listen("tcp", netip.AddrPortFrom(a, 0).String())
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
+}
+
+// --- install ------------------------------------------------------------------------
+
+func newWhaleSSHAuthzInstallCmd() *cobra.Command {
+	var f sshAuthzFlags
+	var write bool
+	var path, cmdUser string
+	cmd := &cobra.Command{
+		Use:   "install",
+		Short: "Print the sshd_config snippet that wires ssh-authz in, or write it with --write",
+		Long: "Prints the two sshd_config lines that make sshd ask `ssh-authz check` about a key\n" +
+			"it does not already know. With --write (as root) it writes them to\n" +
+			sshAuthzSnippetPath + ", checks the result with `sshd -t`, and takes\n" +
+			"the file back out if sshd rejects it. It never reloads sshd; it prints the one\n" +
+			"command that does.\n\n" +
+			"The fleet is this node's own, found from its validated name, unless --fleet names\n" +
+			"it. sshd only runs a command that root owns and nobody else can write, along its\n" +
+			"whole path, so install refuses a binary that would be ignored and says where to put it.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if strings.TrimSpace(f.fleet) == "" {
+				fleet, err := sshAuthzOwnFleet()
+				if err != nil {
+					return &client.ProblemError{Status: 400, Title: "cannot tell which fleet this node is in", Detail: err.Error() +
+						". Name it: `whisper whale ssh-authz install --fleet <tenant>` (the t... label in your node's name, which `whisper whale status` shows)"}
+				}
+				f.fleet = fleet
+			}
+			pol, err := f.policy()
+			if err != nil {
+				return usageErr("%v", err)
+			}
+			// The snippet names the path as invoked (a stable /usr/local/bin link survives an
+			// upgrade that moves its target); sshd checks the resolved file, and so does this.
+			bin, err := sshAuthzExecutable()
+			if err != nil || bin == "" {
+				return fmt.Errorf("cannot find this binary's own path to write into the snippet: %v", err)
+			}
+			real := bin
+			if r, rerr := filepath.EvalSymlinks(bin); rerr == nil {
+				real = r
+			}
+			if err := checkSnippetValues(bin, f, cmdUser); err != nil {
+				return usageErr("%v", err)
+			}
+			snippet := sshAuthzSnippet(bin, pol, f, cmdUser)
+			if !write {
+				fmt.Fprint(os.Stdout, snippet)
+				if why := commandPathUnsafe(real); why != "" {
+					whaleNote("sshd will ignore this command as it stands: %s", why)
+				}
+				whaleNote("write it with: sudo whisper whale ssh-authz install --write")
+				return nil
+			}
+			if sshAuthzEUID() != 0 {
+				// A plain error, not a 403: the renderer reads 401/403 as a rejected API key, and
+				// this has nothing to do with a key.
+				return fmt.Errorf("writing sshd's configuration needs root: --write puts the snippet in %s, which only "+
+					"root may change. Run it with sudo, or drop --write to print the snippet and place it yourself", path)
+			}
+			if why := commandPathUnsafe(real); why != "" {
+				return &client.ProblemError{Status: 409, Title: "sshd would ignore this command",
+					Detail: why + ". Install the binary somewhere root owns, such as /usr/local/bin, and run this again from there."}
+			}
+			return writeSSHAuthzSnippet(os.Stdout, path, snippet, sshAuthzCommandLine(bin, pol, f), orNobody(cmdUser))
+		},
+	}
+	f.bind(cmd)
+	cmd.Flags().BoolVar(&write, "write", false, "write the snippet into sshd's configuration (needs root)")
+	cmd.Flags().StringVar(&path, "path", sshAuthzSnippetPath, "where --write puts the snippet")
+	cmd.Flags().StringVar(&cmdUser, "command-user", "nobody", "the unprivileged account sshd runs the check as (AuthorizedKeysCommandUser)")
+	return cmd
+}
+
+// sshAuthzCommandLine is the AuthorizedKeysCommand. Only what the operator chose is written,
+// so the command line in the file is the policy, readable at a glance.
+func sshAuthzCommandLine(bin string, pol whale.AuthzPolicy, f sshAuthzFlags) string {
+	args := []string{bin, "whale", "ssh-authz", "check", "--fleet", strings.TrimSuffix(pol.Fleet, ".")}
+	for _, a := range pol.Allow {
+		args = append(args, "--allow", a)
+	}
+	for _, u := range pol.Users {
+		args = append(args, "--user", u)
+	}
+	if r := strings.TrimSpace(f.resolver); r != "" {
+		args = append(args, "--resolver", r)
+	}
+	if f.tlsa {
+		args = append(args, "--allow-tlsa")
+	}
+	// -- ends the flags before anything sshd substitutes; check refuses a line without it.
+	return strings.Join(append(args, "--", "%u", "%t", "%k", "%C"), " ")
+}
+
+func orNobody(u string) string {
+	if strings.TrimSpace(u) == "" {
+		return "nobody"
+	}
+	return strings.TrimSpace(u)
+}
+
+// snippetValue is what may go into the drop-in unquoted: sshd splits on whitespace and
+// expands %-tokens, so `--user %u` would admit every account and a newline would add lines.
+func snippetValue(v string) bool {
+	if v == "" {
+		return false
+	}
+	for _, r := range v {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("._-:@+/[]", r):
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func checkSnippetValues(bin string, f sshAuthzFlags, cmdUser string) error {
+	check := func(what, v string) error {
+		if !snippetValue(v) {
+			return fmt.Errorf("%s %q cannot go into sshd_config as it is: use letters, digits and . _ - : @ + / only "+
+				"(no spaces, quotes or %%)", what, v)
+		}
+		return nil
+	}
+	if err := check("the binary path", bin); err != nil {
+		return err
+	}
+	for _, a := range nonBlank(f.allow) {
+		if err := check("--allow", a); err != nil {
+			return err
+		}
+	}
+	for _, u := range nonBlank(f.users) {
+		if err := check("--user", u); err != nil {
+			return err
+		}
+	}
+	if r := strings.TrimSpace(f.resolver); r != "" {
+		if err := check("--resolver", r); err != nil {
+			return err
+		}
+	}
+	return check("--command-user", orNobody(cmdUser))
+}
+
+// sshAuthzSnippet renders the drop-in around the command line.
+func sshAuthzSnippet(bin string, pol whale.AuthzPolicy, f sshAuthzFlags, cmdUser string) string {
+	cmdUser = orNobody(cmdUser)
+	return "# Written by `whisper whale ssh-authz install`. Lets the active agents of your Whisper fleet\n" +
+		"# log in with their own identity key, proven from the IANA DNSSEC root. sshd still reads\n" +
+		"# authorized_keys first. Remove this file and reload sshd to turn it off.\n" +
+		"AuthorizedKeysCommand " + sshAuthzCommandLine(bin, pol, f) + "\n" +
+		"AuthorizedKeysCommandUser " + cmdUser + "\n"
+}
+
+// writeSSHAuthzSnippet writes the drop-in, proves sshd accepts the whole configuration with it
+// AND runs with its two lines (sshd takes the first value it reads, so an earlier drop-in or
+// a line above the Include would silently win), and takes it back out when either fails.
+func writeSSHAuthzSnippet(w io.Writer, path, snippet, command, cmdUser string) error {
+	dir := filepath.Dir(path)
+	main := filepath.Join(filepath.Dir(dir), "sshd_config")
+	if b, err := os.ReadFile(main); err == nil && !includesDropIns(string(b), dir) {
+		return &client.ProblemError{Status: 409, Title: "sshd does not read " + dir,
+			Detail: main + " has no `Include " + dir + "/*.conf` line, so a file there would be ignored. Add that line " +
+				"near the top of " + main + " (sshd takes the first value it reads), or paste the snippet " +
+				"`whisper whale ssh-authz install` prints into it yourself."}
+	}
+	prev, prevErr := os.ReadFile(path)
+	prevMode := os.FileMode(0o644)
+	if fi, err := os.Stat(path); err == nil {
+		prevMode = fi.Mode().Perm()
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return fmt.Errorf("cannot create %s: %w", dir, err)
+	}
+	if err := writeFileAtomic(path, []byte(snippet), 0o644); err != nil {
+		return fmt.Errorf("cannot write %s: %w", path, err)
+	}
+	rollback := func() {
+		if prevErr == nil { // put back what was there before, byte for byte and mode for mode
+			_ = writeFileAtomic(path, prev, prevMode)
+		} else {
+			_ = os.Remove(path)
+		}
+	}
+	effective, err := sshAuthzSshdTest(main)
+	if err != nil {
+		rollback()
+		return &client.ProblemError{Status: 422, Title: "sshd rejected the configuration, so nothing was changed",
+			Detail: "sshd rejected the configuration with the snippet in it, so the snippet was taken back out " +
+				"and nothing was changed: " + err.Error()}
+	}
+	if why := effectiveMismatch(effective, command, cmdUser); why != "" {
+		rollback()
+		return &client.ProblemError{Status: 409, Title: "sshd would not use the snippet, so nothing was changed",
+			Detail: why + ". sshd takes the first value it reads: remove the earlier AuthorizedKeysCommand, or " +
+				"give this file a name that sorts before it, and run this again. The snippet was taken back out."}
+	}
+	fmt.Fprintf(w, "wrote %s; sshd -t accepts it and sshd -T runs with it\n", path)
+	fmt.Fprintf(w, "  reload sshd to start using it: %s\n", sshReloadCommand())
+	fmt.Fprintf(w, "  try it from a fleet node:      whisper whale ssh {user}@{this-node}\n")
+	return nil
+}
+
+// effectiveMismatch compares sshd -T's view with the two lines we wrote. sshd prints keywords
+// in lower case and the command with its arguments as written.
+func effectiveMismatch(effective, command, cmdUser string) string {
+	got := map[string]string{}
+	for _, line := range strings.Split(effective, "\n") {
+		k, v, ok := strings.Cut(strings.TrimSpace(line), " ")
+		if ok {
+			got[strings.ToLower(k)] = strings.TrimSpace(v)
+		}
+	}
+	if c := got["authorizedkeyscommand"]; c != command {
+		return fmt.Sprintf("sshd -T runs AuthorizedKeysCommand %q, not this one", orVal(c, "none"))
+	}
+	if u := got["authorizedkeyscommanduser"]; u != cmdUser {
+		return fmt.Sprintf("sshd -T runs it as %q, not %q", orVal(u, "nobody set"), cmdUser)
+	}
+	return ""
+}
+
+// includesDropIns reports whether sshd_config pulls in dir. Liberal: any Include naming the
+// directory counts, with or without a glob.
+func includesDropIns(cfg, dir string) bool {
+	for _, line := range strings.Split(cfg, "\n") {
+		f := strings.Fields(line)
+		if len(f) < 2 || !strings.EqualFold(f[0], "Include") {
+			continue
+		}
+		for _, p := range f[1:] {
+			if strings.HasPrefix(p, dir+"/") || p == dir || strings.HasPrefix(p, filepath.Base(dir)+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sshReloadCommand() string {
+	if runtime.GOOS == "darwin" {
+		return "sudo launchctl kickstart -k system/com.openssh.sshd"
+	}
+	return "sudo systemctl reload ssh || sudo systemctl reload sshd"
+}
+
+// commandPathUnsafe says why sshd would refuse to run bin: its AuthorizedKeysCommand and
+// every directory above it must be owned by root and writable by nobody else. "" when it is
+// fine, or when the platform does not say who owns a file.
+func commandPathUnsafe(bin string) string {
+	for p := bin; ; p = filepath.Dir(p) {
+		fi, err := os.Stat(p)
+		if err != nil {
+			return fmt.Sprintf("cannot read %s (%v)", p, err)
+		}
+		uid, ok := fileOwnerUID(fi)
+		if ok && uid != 0 {
+			return fmt.Sprintf("%s is not owned by root", p)
+		}
+		// sshd's own check (safe_path) makes no exception for a sticky directory such as /tmp.
+		if fi.Mode().Perm()&0o022 != 0 {
+			return fmt.Sprintf("%s can be written by accounts other than its owner", p)
+		}
+		if parent := filepath.Dir(p); parent == p {
+			return ""
+		}
+	}
+}
+
+// sshAuthzOwnFleet finds this node's fleet from its own validated name.
+func sshAuthzOwnFleet() (string, error) {
+	cx, cancel := ctx()
+	defer cancel()
+	self := whaleSelfAddress(cx, "")
+	if self == "" {
+		if b, ok := client.ReadBoundFile(""); ok {
+			self = b.Addr.String()
+		}
+	}
+	a, err := netip.ParseAddr(self)
+	if err != nil {
+		return "", errors.New("this host has no Whisper address it can name")
+	}
+	val := trustverify.NewValidator(trustverify.NewNetResolver(""), trustverify.IANARootAnchors(), time.Now())
+	name, note := validatedPTR(cx, val, a)
+	if name == "" {
+		return "", fmt.Errorf("the name of %s could not be proven (%s)", a, note)
+	}
+	parent := parentOfFqdn(name)
+	if parent == "" {
+		return "", fmt.Errorf("%s has no parent zone to call a fleet", name)
+	}
+	return parent, nil
+}

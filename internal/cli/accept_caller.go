@@ -61,7 +61,10 @@ type acceptCallerRecord struct {
 func acceptCallerDirs() []string {
 	var out []string
 	for _, d := range []string{machineSessionsDirFn(), sessionsDirFn()} {
-		if strings.TrimSpace(d) != "" {
+		// A relative directory is what the per-login registry resolves to with no HOME, as
+		// under sshd's AuthorizedKeysCommandUser: it would be read against whatever the
+		// working directory happens to be, so it is skipped rather than trusted.
+		if strings.TrimSpace(d) != "" && filepath.IsAbs(d) {
 			out = append(out, filepath.Join(d, acceptCallersDir))
 		}
 	}
