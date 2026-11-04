@@ -5,6 +5,9 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -155,8 +158,15 @@ func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]a
 	if err != nil {
 		return nil, nil, err
 	}
-	keys := &connectKeys{wg: wgKey, identity: idKey}
-	env, err := connectWithSelfHeal(cx, c, args, idKey, tier)
+	plan, err := planAdopt(cx, c, args, idKey, sel) // --adopt-key on a held identity: the owner's signed recovery
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := storeAdoptedKey(sel, idKey); err != nil {
+		return nil, nil, err
+	}
+	keys := newConnectKeys(wgKey, idKey, args)
+	env, err := connectWithSelfHeal(cx, c, args, keys, tier)
 	if err != nil && birthAttempt(args, idKey) {
 		// The birth pin is a bonus, never a condition: a box that will not publish the key now (a
 		// store that is not connected, a fence, a policy) still connects the agent, which then
@@ -166,22 +176,55 @@ func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]a
 			declineNewborn(agentArg(args), idKey)
 			delete(args, "identity_public_key")
 			delete(args, "adopt_identity_key")
+			stripBirthArgs(args) // the signed birth names the key that is no longer sent
 			keys.identity = nil
-			env, err = connectWithSelfHeal(cx, c, args, nil, tier)
+			env, err = connectWithSelfHeal(cx, c, args, keys, tier)
 		}
 	}
 	if err != nil {
-		return nil, nil, err
+		if env, err = resignHostedAdopt(cx, c, args, keys, plan, tier, err); err != nil {
+			return nil, nil, adoptRefusal(err, plan)
+		}
+	}
+	if env, err = settleAdopt(cx, c, args, keys, env, plan, tier); err != nil {
+		return nil, nil, adoptRefusal(err, plan)
 	}
 	settleIdentity(args, env.Result, keys)
+	settleChain(cx, c, env.Result, keys)
 	return env, keys, nil
+}
+
+// storeAdoptedKey stores a key --adopt-key minted under the handle it was minted for, unless the
+// plan already kept it as a pending recovery, before the connect that names it is sent. A key that
+// cannot be stored is never sent: an adopt publishes it, and a published key this host does not
+// keep would be one nobody holds.
+func storeAdoptedKey(handle string, kp *idkey.Keypair) error {
+	if !kp.Unstored() {
+		return nil
+	}
+	h := strings.TrimSpace(handle)
+	switch err := idkey.Link(h, kp); {
+	case err == nil:
+		return nil
+	case errors.Is(err, idkey.ErrLinkedElsewhere):
+		return &client.ProblemError{Status: 409, Title: "IDENTITY_KEY_STORE_CHANGED", Detail: "another key was " +
+			"stored for " + firstNonBlank(h, "this agent") + " on this host while --adopt-key was preparing one; " +
+			"nothing was sent. Run `whisper connect --adopt-key` again, and it adopts the key stored now"}
+	default:
+		return &client.ProblemError{Status: 500, Title: "IDENTITY_KEY_NOT_STORED", Detail: "the identity key " +
+			"--adopt-key minted could not be stored on this host (" + err.Error() + "), so it was not sent"}
+	}
 }
 
 // connectWithSelfHeal sends one op:connect and answers the one refusal a client can honestly
 // answer for itself. A first connect and a held session's renewal both come through here, so a
 // renewal heals exactly as a connect does.
-func connectWithSelfHeal(cx context.Context, c *client.Client, args map[string]any, idKey *idkey.Keypair, tier string) (*client.Envelope, error) {
-	env, err := opConnect(cx, c, args)
+func connectWithSelfHeal(cx context.Context, c *client.Client, args map[string]any, keys *connectKeys, tier string) (*client.Envelope, error) {
+	var idKey *idkey.Keypair
+	if keys != nil {
+		idKey = keys.identity
+	}
+	env, err := connectOnce(cx, c, args)
 	if err != nil {
 		return nil, err
 	}
@@ -205,17 +248,26 @@ func connectWithSelfHeal(cx context.Context, c *client.Client, args map[string]a
 		// insisting it already knows. Exactly once, and only for that reason. This gives away
 		// nothing the server was enforcing: whether a birth-pin is acceptable for an address is
 		// the SERVER's decision and it is unchanged - we are answering the question it asked.
-		if idKey != nil && serverHoldsNoPin(perr) && retryAsBirthPin(args, idKey) {
+		switch {
+		case idKey != nil && serverHoldsNoPin(perr) && retryAsBirthPin(args, idKey):
 			debugf("tier %s: the box holds no pin for this address, re-sending the key as a first enrolment", tier)
-			env, err = opConnect(cx, c, args)
-			if err != nil {
-				return nil, err
+		case keyEventRefusal(perr) && !signedAdopt(args) && stripBirthArgs(args):
+			// A service that read the signed birth as a move on an identity it already holds: the
+			// connect goes on as it did before key events, and the chain takes the migration path.
+			// A signed adopt is the user's recovery, never sent again unsigned behind their back.
+			debugf("tier %s: the signed birth was refused (%v); connecting without it", tier, perr)
+		default:
+			if env2, ok := healWithSuccessor(cx, c, args, keys, perr); ok {
+				return env2, nil
 			}
-			if perr2 := envelopeError(env); perr2 != nil {
-				return nil, perr2
-			}
-		} else {
 			return nil, perr
+		}
+		env, err = connectOnce(cx, c, args)
+		if err != nil {
+			return nil, err
+		}
+		if perr2 := envelopeError(env); perr2 != nil {
+			return nil, perr2
 		}
 	}
 	return env, nil
@@ -387,14 +439,23 @@ var prepareIdentityKey = func(tier string, args map[string]any, handle string) (
 	if adopt {
 		kp := held
 		if lerr != nil {
-			if identityNoMint() {
-				return nil, &client.ProblemError{Status: 400, Detail: "this host holds no identity key for " +
-					firstNonBlank(h, "this agent") + " to adopt, and a key is never minted as root; run " +
-					"`whisper connect --adopt-key` as the user who runs the agent"}
-			}
-			var err error
-			if kp, err = idkey.LoadOrGenerate(h); err != nil {
-				return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key - please try again"}
+			if rk := idkey.PendingRecovery(h); rk != nil {
+				// an earlier --adopt-key's recovery still kept on this host: the same key again, so a
+				// later run finishes or re-sends that recovery and never starts a second one
+				kp = rk
+			} else {
+				if identityNoMint() {
+					return nil, &client.ProblemError{Status: 400, Detail: "this host holds no identity key for " +
+						firstNonBlank(h, "this agent") + " to adopt, and a key is never minted as root; run " +
+						"`whisper connect --adopt-key` as the user who runs the agent"}
+				}
+				// Minted, not stored yet: on a held identity the key is a recovery, kept apart from
+				// the handle until it takes effect (planAdopt); anything else stores it under the
+				// handle before the connect is sent (storeAdoptedKey).
+				var err error
+				if kp, err = idkey.Mint(); err != nil {
+					return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key - please try again"}
+				}
 			}
 		}
 		args["identity_public_key"] = kp.MarshalSPKIBase64()
@@ -431,6 +492,15 @@ var prepareIdentityKey = func(tier string, args map[string]any, handle string) (
 		if identityNoMint() {
 			return nil, nil // a birth then gets the derived key, and nothing is minted as root
 		}
+		if idkey.PendingRecovery(h) != nil {
+			// an --adopt-key recovery of this agent is pending on this host: the identity exists, and
+			// the handle is the kept key's once it takes effect, so nothing is minted for it meanwhile
+			// and nothing is offered, as for an address this host holds no key for
+			identityNote("whisper: a recovery of %s is kept on this host, so this connect offers no key for it; "+
+				"`whisper connect --adopt-key` finishes it once in effect, `whisper identity cancel %s` withdraws it",
+				h, h)
+			return nil, nil
+		}
 		var err error
 		if kp, err = idkey.LoadOrGenerate(h); err != nil {
 			return nil, &client.ProblemError{Status: 500, Detail: "couldn't prepare an identity key - please try again"}
@@ -438,6 +508,9 @@ var prepareIdentityKey = func(tier string, args map[string]any, handle string) (
 	}
 	// The server hashes EXACTLY this base64 DER, verbatim - never a private key, never re-encoded.
 	args["identity_public_key"] = kp.MarshalSPKIBase64()
+	if !identityNoMint() {
+		birthArgs(args, kp, time.Now()) // a birth commits to the next key; a reconnect reads it as unchanged
+	}
 	return kp, nil
 }
 
@@ -467,10 +540,9 @@ var identityNote = func(format string, a ...any) {
 }
 
 // notAdoptedMarker is the fragment the service's "kept the hosted key" notes carry, for an
-// account key and for an agent key alike. The service pins it with a contract test, because this
-// client reads its absence, after a connect that sent our key, as "our key is the published pin".
-// A machine-readable pin digest in the connect answer is the follow-up that replaces this
-// sentence match, and also lets a signed reconnect tell a published key from a device binding.
+// account key and for an agent key alike. The service pins it with a contract test. The connect
+// answer now names the published pin itself (identity_pin), which is what this client reads; the
+// sentence is the fallback for a service that predates that column.
 const notAdoptedMarker = "was not adopted"
 
 // keyNotAdopted reports whether a connect answer's note says the key it carried was kept only as
@@ -479,18 +551,75 @@ func keyNotAdopted(note string) bool {
 	return strings.Contains(strings.ToLower(note), notAdoptedMarker)
 }
 
+// pinDigestOf is the lowercase hex SHA-256 of a key's DER SPKI: its TLSA 3 1 1 data, the form the
+// connect answer's identity_pin carries. "" when the key does not encode.
+func pinDigestOf(kp *idkey.Keypair) string {
+	der, err := base64.StdEncoding.DecodeString(kp.MarshalSPKIBase64())
+	if err != nil || len(der) == 0 {
+		return ""
+	}
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
+}
+
+// pinAnswer is what a connect answer's identity_pin says about a key.
+type pinAnswer int
+
+const (
+	pinAbsent  pinAnswer = iota // no such column: an older service, the note's sentence decides
+	pinUnknown                  // the column is empty: the service cannot vouch any pin is served now
+	pinMine                     // the zone serves this key
+	pinOther                    // the zone serves another key
+)
+
+// publishedPinIs reads the connect answer's identity_pin against kp.
+func publishedPinIs(res *client.Result, kp *idkey.Keypair) pinAnswer {
+	if res == nil || kp == nil {
+		return pinAbsent
+	}
+	has := false
+	for _, c := range res.Columns {
+		if c == "identity_pin" {
+			has = true
+			break
+		}
+	}
+	recs := res.Records()
+	if !has || len(recs) == 0 {
+		return pinAbsent
+	}
+	pin := strings.ToLower(strings.TrimSpace(field(recs[0], "identity_pin")))
+	if pin == "" || pin == "null" {
+		return pinUnknown
+	}
+	if own := pinDigestOf(kp); own != "" && own == pin {
+		return pinMine
+	}
+	return pinOther
+}
+
 // settleIdentity records, after a successful routed connect, what the answer says about the key
-// the connect carried. A key that was SENT and not reported as kept-only-as-binding is the
-// published pin: it is linked under the /128 the answer names, so every later handle form for the
-// agent (the address, a name, or no selector) reaches the same key. A key reported as not adopted
-// is a device binding only: this session serves no self-signed leaf with it and nothing is linked.
-// A signed connect sent no key and leaves both as they were.
+// the connect carried. A key that was SENT and is the published pin is linked under the /128 the
+// answer names, so every later handle form for the agent (the address, a name, or no selector)
+// reaches the same key. A key that is not the published pin is a device binding only: this session
+// serves no self-signed leaf with it and nothing is linked. Whether it is the pin is read from the
+// answer's identity_pin; a service without that column is read by its note's sentence. A
+// signed connect sent no key and links nothing, but the pin still says whether its key is the
+// published one, so a binding key on a signed reconnect serves no leaf either.
 func settleIdentity(args map[string]any, res *client.Result, keys *connectKeys) {
 	if keys == nil || keys.identity == nil || res == nil {
 		return
 	}
+	pin := publishedPinIs(res, keys.identity)
+	// The leaf follows the zone: only a key the zone is known to serve gets one. The link and the
+	// advice follow custody: a named pin decides them, and an empty one (the zone has not caught up
+	// with a key the service did take) leaves them to the note's sentence.
+	noLeaf := pin == pinOther || pin == pinUnknown
 	sent, _ := args["identity_public_key"].(string)
 	if sent == "" || sent != keys.identity.MarshalSPKIBase64() {
+		if noLeaf {
+			keys.unpinned = true // a signed reconnect by a key the zone does not serve (now)
+		}
 		return
 	}
 	var note, address string
@@ -506,6 +635,15 @@ func settleIdentity(args map[string]any, res *client.Result, keys *connectKeys) 
 		// sentence and its advice about a stolen API key belong to replacing a key, not to this.
 		forgetNewborn(agentArg(args))
 		adopt = false
+	}
+	switch pin {
+	case pinMine:
+		notAdopted = false // the published pin decides, never the sentence
+	case pinOther:
+		notAdopted = true
+	}
+	if noLeaf {
+		keys.unpinned = true
 	}
 	if n := strings.TrimSpace(note); n != "" && (adopt || notAdopted) {
 		if notAdopted && !strings.Contains(strings.ToLower(n), "owner") {
@@ -580,13 +718,32 @@ func retryAsBirthPin(args map[string]any, kp *idkey.Keypair) bool {
 type connectKeys struct {
 	wg       *wgtun.Keypair
 	identity *idkey.Keypair
-	// unpinned marks an identity key the server kept only as the device binding (it answered
-	// that the key "was not adopted"): it may sign, but it is not the published pin, so no
-	// self-signed leaf is served with it. A signed reconnect cannot tell, so a legacy
-	// binding key there still serves its leaf; the pin digest the connect answer should carry is
-	// the follow-up that closes it.
+	// unpinned marks an identity key that is not the published pin (the server kept it only as
+	// the device binding): it may sign, but no self-signed leaf is served with it. Read from
+	// the connect answer's identity_pin, on a signed reconnect as well; a service without
+	// that column is read by its "was not adopted" sentence, which a signed reconnect cannot carry.
 	unpinned bool
+	// listenPort is the UDP port this session's connect declared its underlay on (prepareWireGuard),
+	// or 0 when it declared none. A renewal declares again on the same port from the host's
+	// addresses as they are then: the service reads a connect with no declaration as a node with
+	// no direct path, so a check-in without one would drop the node back to the relay, and one
+	// that replayed the first connect's addresses would declare a dead path after a roam.
+	listenPort int
 }
+
+// newConnectKeys is the one way a session's keys are built from its prepared connect args, so
+// every holder that renews (connect, the daemon, whale serve) keeps the port its underlay was
+// declared on, and none can leave it out.
+func newConnectKeys(wg *wgtun.Keypair, identity *idkey.Keypair, args map[string]any) *connectKeys {
+	keys := &connectKeys{wg: wg, identity: identity}
+	if _, declared := args["endpoints"]; declared {
+		keys.listenPort = wgListenPort
+	}
+	return keys
+}
+
+// underlayEndpoints is the host's underlay endpoints on a port; a package var so a test can pin it.
+var underlayEndpoints = wgtun.LocalUnderlayEndpoints
 
 // localEndpoint is the shared surface BOTH egress tiers expose: the bearer/key-free local
 // SOCKS5/HTTP endpoint a caller hands to tools, and a Stop() that tears it down. The Tier-1.5
@@ -628,6 +785,9 @@ type egressSession struct {
 	accepts     []acceptRecord
 	acceptScope string
 	acceptFrom  []string
+	// peer names the box side of a Tier-1 tunnel (wgPeerOf), so a check-in can tell whether
+	// the connect it made kept the tunnel where it is.
+	peer string
 }
 
 // nat64 reports the NAT64 prefix this session's tunnel SETTLED on and where that came from, for
@@ -949,7 +1109,9 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 		if addr, aerr := netip.ParseAddr(strings.TrimSpace(ce.address)); aerr == nil {
 			// op:connect{tier:wireguard} returns only the canonical fqdn (no separate friendly-CNAME
 			// column) - the leaf carries just that one dNSName SAN + the /128 iPAddress SAN.
-			leaf, lerr := keys.identity.SelfSignedLeaf(ce.fqdn, "", addr)
+			// The serving key: the pin, or inside a rotation's first phase the outgoing key, which
+			// every cache still accepts until serve_new_after.
+			leaf, lerr := keys.identity.ServingKey().SelfSignedLeaf(ce.fqdn, "", addr)
 			if lerr == nil {
 				// Fetch the gateway-signed identity-doc (+jwks/did:web) so the in-tunnel listener
 				// serves them, giving a trustless DANE verifier the full 4/4 (identity_doc no longer times
@@ -968,6 +1130,7 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 		addr:     ce.address,
 		tier:     "wireguard",
 		local:    tun,
+		peer:     wgPeerOf(ce),
 	}
 	// The ports this process was asked to accept, opened on every tunnel it brings up, so a
 	// session renewed after the box dropped its peer answers on them again.
@@ -978,6 +1141,12 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 		}
 	}
 	return sess, nil
+}
+
+// wgPeerOf names the box side of a Tier-1 tunnel: its endpoint and its WireGuard key. Two
+// connect answers with the same peer keep the same tunnel.
+func wgPeerOf(ce connectEnvelope) string {
+	return strings.TrimSpace(ce.wgEndpoint) + "|" + strings.TrimSpace(ce.wgServerPubKey)
 }
 
 // wireGuardConfig builds the device configuration from a WireGuard connect envelope: OUR

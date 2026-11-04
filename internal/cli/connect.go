@@ -266,7 +266,7 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in)")
 	cmd.Flags().StringVar(&name, "name", "", "the agent's human name (required to create one; maps to the server label)")
 	cmd.Flags().StringVar(&agent, "agent", "", "bind egress to this agent (id or /128); overrides the persisted agent")
-	cmd.Flags().BoolVar(&adoptKey, "adopt-key", false, "publish this host's identity key for the agent, replacing its published TLSA/SSHFP/OPENPGPKEY (Tier 1 only; use once, when this host should hold the key)")
+	cmd.Flags().BoolVar(&adoptKey, "adopt-key", false, "publish this host's identity key for the agent, replacing its published TLSA/SSHFP/OPENPGPKEY (Tier 1 only; use once, when this host should hold the key; a key the agent already holds is replaced by the owner's signed recovery)")
 	cmd.Flags().StringVar(&vin, "vin", "", "bind this routed /128 to a vehicle VIN (automotive; op:connect)")
 	cmd.Flags().StringVar(&ecuSerial, "ecu-serial", "", "an ECU serial to combine with --vin (automotive)")
 	_ = cmd.Flags().MarkHidden("label") // --name is the documented spelling

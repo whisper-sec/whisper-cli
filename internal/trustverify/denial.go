@@ -5,339 +5,385 @@ package trustverify
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/miekg/dns"
 )
 
-// A wildcard-expanded answer is only half a proof. Its RRSIG shows the records came from
-// *.<closest encloser> (the Labels field counts fewer labels than the owner has, RFC 4035
-// 5.3.1), but a signed *.zone record can be replayed as the answer for ANY name below the
-// zone, including a name that exists with records of its own. The other half is a signed
-// denial that no closer name exists: RFC 4035 5.3.4 for NSEC, RFC 5155 8.8 for NSEC3. A
-// resolver puts it in the authority section of the same response, and without it the answer
-// is refused.
+// maxNSEC3Iterations is the most extra hash iterations a denial may ask for. RFC 9276 asks
+// signers for zero and lets a validator treat a large count as insecure; above this bound a
+// denial is refused, never searched.
+const maxNSEC3Iterations = 150
 
-// The NSEC3 work bounds (CVE-2023-50868, the NSEC3 half of the KeyTrap disclosure). BIND and
-// Unbound both treat more than 150 iterations as insecure, and RFC 9276 3.2 lets a validator
-// refuse anything above 0, so a proof hashed harder than 150 is refused here. Unbound 1.19.1
-// allows 8 NSEC3 hash calculations per response; a real proof uses one parameter set, so the
-// same 8 distinct parameter sets is generous.
-const (
-	maxNSEC3Iterations = 150
-	maxNSEC3Hashes     = 8
-)
+// proven is an RRset proven present, or its absence proven, by DNSSEC.
+type proven struct {
+	rrs    []dns.RR
+	sig    *dns.RRSIG // the RRSIG that verified a present RRset
+	absent bool
+	ttl    time.Duration // the verifying RRSIG's original TTL; for an absence, see proveAbsent
+}
 
-// ownerLabels is the label count a signature over name may claim at most: every label, less a
-// literal leftmost "*" (RFC 4034 3.1.3, RFC 4035 5.3.1).
-func ownerLabels(name string) int {
-	labels := dns.SplitDomainName(name)
-	if len(labels) > 0 && labels[0] == "*" {
-		return len(labels) - 1
+// fetchFunc is how a proof's records are fetched: the validator's own resolver, or one
+// authoritative server asked directly. The chain of trust always comes from the validator.
+type fetchFunc func(ctx context.Context, name string, qtype uint16) (*dns.Msg, error)
+
+// validateOrDeny proves (name, qtype) present, or proves it absent: an absence counts only when a
+// signed NSEC or NSEC3 denial in the answer proves it. A wildcard expansion is refused, because
+// every record read here must be published for its exact name.
+func (v *Validator) validateOrDeny(ctx context.Context, fetch fetchFunc, name string, qtype uint16) (*proven, error) {
+	name = dns.CanonicalName(name)
+	what := dns.TypeToString[qtype] + " " + trimDot(name)
+	msg, err := fetch(ctx, name, qtype)
+	if err != nil {
+		return nil, fmt.Errorf("dnssec: fetching %s: %w", what, err)
 	}
-	return len(labels)
-}
-
-// wildcardExpansion reports whether sig shows name was synthesized from a wildcard, and if so
-// the next closer name: the closest encloser (the rightmost sig.Labels labels of name) plus
-// one more label of name. The wildcard RRset answering for its own owner name is not an
-// expansion. A Labels field above ownerLabels is not an expansion either; signerMayCover
-// refuses that signature outright.
-func wildcardExpansion(sig *dns.RRSIG, name string) (nextCloser string, expanded bool) {
-	l := int(sig.Labels)
-	if l >= ownerLabels(name) {
-		return "", false
+	if msg == nil || (msg.Rcode != dns.RcodeSuccess && msg.Rcode != dns.RcodeNameError) {
+		rc := dns.RcodeToString[dns.RcodeServerFailure]
+		if msg != nil {
+			rc = dns.RcodeToString[msg.Rcode]
+		}
+		return nil, fmt.Errorf("dnssec: %s returned %s, which proves neither an answer nor an absence", what, rc)
 	}
-	labels := dns.SplitDomainName(name)
-	return dns.Fqdn(strings.Join(labels[len(labels)-l-1:], ".")), true
+	if msg.Rcode == dns.RcodeSuccess && len(rrsOfType(msg.Answer, name, qtype)) > 0 {
+		rrs, sig, err := v.validateAnswer(ctx, msg.Answer, msg.Ns, name, qtype)
+		if err != nil {
+			return nil, err
+		}
+		if int(sig.Labels) != dns.CountLabel(name) {
+			return nil, fmt.Errorf("dnssec: %s was synthesized from a wildcard (RRSIG covers %d labels, the name"+
+				" has %d); it must be published for that exact name", what, sig.Labels, dns.CountLabel(name))
+		}
+		return &proven{rrs: rrs, sig: sig, ttl: time.Duration(sig.OrigTtl) * time.Second}, nil
+	}
+	if len(rrsOfType(msg.Answer, name, dns.TypeCNAME)) > 0 {
+		return nil, fmt.Errorf("dnssec: %s is an alias (CNAME); the record is read at its canonical name", what)
+	}
+	ttl, err := v.proveAbsent(ctx, msg.Ns, name, qtype)
+	if err != nil {
+		return nil, fmt.Errorf("dnssec: %s is not answered and its absence is not proven: %v", what, err)
+	}
+	return &proven{absent: true, ttl: ttl}, nil
 }
 
-// maxDenialCandidates bounds the NSEC and NSEC3 records that pass the cheap interval checks and
-// go on to have their signatures examined, per proof. A real proof needs one; anything past a
-// handful is padding, and each candidate costs an RRset assembly and up to the per-RRset
-// verification budget.
-const maxDenialCandidates = 8
-
-// authority indexes a response's authority section by (owner, type) once, so a proof's cost is
-// linear in the section however it is padded.
-type authority struct {
-	rrs    map[string][]dns.RR
-	sigs   map[string][]*dns.RRSIG
-	owners map[uint16][]string // NSEC / NSEC3 owners, in section order
+// denialSet is the verified NSEC/NSEC3 records of an authority section and what they rest on.
+type denialSet struct {
+	nsec  []*dns.NSEC
+	nsec3 []*dns.NSEC3
+	zone  string
+	ttl   uint32
 }
 
-func authorityKey(owner string, qtype uint16) string {
-	return owner + "|" + dns.TypeToString[qtype]
+func (d *denialSet) note(sig *dns.RRSIG) {
+	if sig.OrigTtl > d.ttl {
+		d.ttl = sig.OrigTtl
+	}
 }
 
-func indexAuthority(ns []dns.RR) *authority {
-	a := &authority{rrs: map[string][]dns.RR{}, sigs: map[string][]*dns.RRSIG{}, owners: map[uint16][]string{}}
-	for _, rr := range ns {
+// proveAbsent proves from the authority section that qname holds no qtype RRset (and no CNAME
+// that could stand for one): RFC 4035 5.4 for NSEC, RFC 5155 8.4 to 8.7 for NSEC3. Every
+// record the proof uses is verified under the validated keys of a zone that encloses qname.
+// It returns the longest TTL a cache may hold the absence for: the larger of the denial RRSIGs'
+// original TTL and the negative TTL of RFC 2308 section 5, the lesser of the zone's signed SOA
+// MINIMUM and the SOA record's own (original) TTL. A lag window built on it is never too short
+// for a cache that keeps to RFC 2308 (serve-stale, RFC 8767, aside).
+func (v *Validator) proveAbsent(ctx context.Context, auth []dns.RR, qname string, qtype uint16) (time.Duration, error) {
+	d := &denialSet{}
+	for _, rr := range auth {
 		owner := dns.CanonicalName(rr.Header().Name)
-		if sig, ok := rr.(*dns.RRSIG); ok {
-			k := authorityKey(owner, sig.TypeCovered)
-			a.sigs[k] = append(a.sigs[k], sig)
+		switch r := rr.(type) {
+		case *dns.NSEC:
+			if zone, sig := v.verifiedBy(ctx, auth, owner, dns.TypeNSEC, []dns.RR{r}, qname); sig != nil {
+				if d.zone != "" && d.zone != zone {
+					return 0, fmt.Errorf("the denial mixes records signed by %s and %s", d.zone, zone)
+				}
+				d.zone = zone
+				d.nsec = append(d.nsec, r)
+				d.note(sig)
+			}
+		case *dns.NSEC3:
+			if r.Flags > 1 {
+				continue // RFC 5155 section 8.2: a flag other than Opt-Out makes the record one to ignore
+			}
+			zone, sig := v.verifiedBy(ctx, auth, owner, dns.TypeNSEC3, []dns.RR{r}, qname)
+			if sig == nil {
+				continue
+			}
+			// An NSEC3 owner is one hash label directly under the zone that signed it.
+			if dns.CountLabel(owner) != dns.CountLabel(zone)+1 || !dns.IsSubDomain(zone, owner) {
+				continue
+			}
+			if d.zone != "" && d.zone != zone {
+				return 0, fmt.Errorf("the denial mixes records signed by %s and %s", d.zone, zone)
+			}
+			d.zone = zone
+			d.nsec3 = append(d.nsec3, r)
+			d.note(sig)
+		}
+	}
+	if len(d.nsec) == 0 && len(d.nsec3) == 0 {
+		return 0, fmt.Errorf("no signed NSEC or NSEC3 record that verifies")
+	}
+	if len(d.nsec) > 0 && len(d.nsec3) > 0 {
+		return 0, fmt.Errorf("the denial mixes NSEC and NSEC3")
+	}
+	var err error
+	if len(d.nsec3) > 0 {
+		err = proveNSEC3(d.nsec3, d.zone, qname, qtype)
+	} else {
+		err = proveNSEC(d.nsec, d.zone, qname, qtype)
+	}
+	if err != nil {
+		return 0, err
+	}
+	ttl := d.ttl
+	for _, rr := range auth {
+		soa, ok := rr.(*dns.SOA)
+		if !ok || dns.CanonicalName(soa.Hdr.Name) != d.zone {
 			continue
 		}
-		t := rr.Header().Rrtype
-		k := authorityKey(owner, t)
-		if t == dns.TypeNSEC || t == dns.TypeNSEC3 {
-			a.owners[t] = append(a.owners[t], owner) // an owner with two records is skipped as often
+		_, sig := v.verifiedBy(ctx, auth, d.zone, dns.TypeSOA, []dns.RR{soa}, qname)
+		if sig == nil {
+			continue
 		}
-		a.rrs[k] = append(a.rrs[k], rr)
+		if neg := min(soa.Minttl, sig.OrigTtl); neg > ttl {
+			ttl = neg
+		}
 	}
-	return a
+	return time.Duration(ttl) * time.Second, nil
 }
 
-// denialRR returns the single NSEC or NSEC3 record at owner. An owner holds exactly one (RFC
-// 4034 4, RFC 5155 3); two would describe two intervals, and neither can be trusted to be the
-// one that was signed for this name.
-func (a *authority) denialRR(owner string, qtype uint16) dns.RR {
-	if rrs := a.rrs[authorityKey(owner, qtype)]; len(rrs) == 1 {
-		return rrs[0]
+// verifiedBy returns the zone and RRSIG that prove rrset (owner, qtype) out of section, or a nil
+// RRSIG. The signing zone must enclose both the record and qname.
+func (v *Validator) verifiedBy(ctx context.Context, section []dns.RR, owner string, qtype uint16, rrset []dns.RR,
+	qname string) (string, *dns.RRSIG) {
+	budget := newVerifyBudget() // the KeyTrap bounds (CVE-2023-50387) hold for a denial's records too
+	chased := 0
+	for _, sig := range rrsigsCovering(section, owner, qtype) {
+		zone := dns.CanonicalName(sig.SignerName)
+		if !signerMayCover(sig, owner, qtype) || !dns.IsSubDomain(zone, qname) {
+			continue
+		}
+		if chased++; chased > maxSigsPerRRset {
+			return "", nil
+		}
+		keys, err := v.keyForZone(ctx, zone)
+		if err != nil {
+			continue
+		}
+		if v.verifyWithKeys(sig, rrset, keys, budget) == nil {
+			return zone, sig
+		}
+	}
+	return "", nil
+}
+
+func hasType(bitmap []uint16, t uint16) bool {
+	for _, b := range bitmap {
+		if b == t {
+			return true
+		}
+	}
+	return false
+}
+
+// noData reports a type bitmap that proves qtype absent at its owner: neither qtype nor a CNAME
+// is there, and the owner is not a delegation, where the records live in another zone.
+func noData(bitmap []uint16, qtype uint16) error {
+	switch {
+	case hasType(bitmap, qtype):
+		return fmt.Errorf("the denial lists %s at the name, so it is present", dns.TypeToString[qtype])
+	case hasType(bitmap, dns.TypeCNAME):
+		return fmt.Errorf("the denial lists a CNAME at the name")
+	case hasType(bitmap, dns.TypeNS) && !hasType(bitmap, dns.TypeSOA):
+		return fmt.Errorf("the name is a delegation, so this zone cannot deny records below it")
 	}
 	return nil
 }
 
-// proveNoCloserName checks the authority section for a signed NSEC or NSEC3 record, from the zone
-// that signed the wildcard answer, proving the next closer name does not exist. zoneKeys is that
-// zone's DS-anchored DNSKEY set; b bounds the verifications the proof may spend.
-func (v *Validator) proveNoCloserName(auth *authority, name string, qtype uint16, sig *dns.RRSIG,
-	zoneKeys []*dns.DNSKEY, b *verifyBudget) error {
-	zone := dns.CanonicalName(sig.SignerName)
-	nextCloser, _ := wildcardExpansion(sig, name)
-	encloser := int(sig.Labels)
+// cutBelow reports a bitmap marking a zone cut or a DNAME at an ancestor of qname: then the
+// records under it are another zone's (or rewritten), and this denial does not reach qname.
+func cutBelow(bitmap []uint16) bool {
+	return (hasType(bitmap, dns.TypeNS) && !hasType(bitmap, dns.TypeSOA)) || hasType(bitmap, dns.TypeDNAME)
+}
 
-	var reason error // the most specific reason a candidate record was refused
-	note := func(err error) {
-		if reason == nil {
-			reason = err
+// --- NSEC3 (RFC 5155) ----------------------------------------------------------------------
+
+func proveNSEC3(set []*dns.NSEC3, zone, qname string, qtype uint16) error {
+	p := set[0]
+	for _, r := range set {
+		if r.Hash != dns.SHA1 {
+			return fmt.Errorf("an NSEC3 uses hash algorithm %d, which this verifier does not know", r.Hash)
+		}
+		if r.Iterations != p.Iterations || !strings.EqualFold(r.Salt, p.Salt) {
+			return fmt.Errorf("the NSEC3 records disagree on their parameters")
 		}
 	}
-	candidates := 0
-	tryCandidate := func(owner string, qtype uint16) (bool, error) {
-		if candidates++; candidates > maxDenialCandidates {
-			return false, &capError{fmt.Sprintf("dnssec: the denial for %s offers more than %d covering"+
-				" records; refusing it rather than checking them all (KeyTrap, CVE-2023-50387)",
-				name, maxDenialCandidates)}
-		}
-		err := v.verifyDenial(auth, owner, qtype, zone, zoneKeys, b)
-		if err == nil {
-			return true, nil
-		}
-		if isCapError(err) {
-			return false, err
-		}
-		note(err)
-		return false, nil
+	if p.Iterations > maxNSEC3Iterations {
+		return fmt.Errorf("the NSEC3 records ask for %d iterations, more than %d", p.Iterations, maxNSEC3Iterations)
 	}
-
-	// NSEC (RFC 4035 5.3.4): a record covering name whose owner and next name show the wildcard's
-	// closest encloser as the deepest existing ancestor of name. Deeper, and an existing name
-	// (possibly an empty non-terminal) sits between the closest encloser and name, so the
-	// wildcard does not apply (RFC 4592 4.4). Shallower, and the record also covers the closest
-	// encloser and the wildcard itself, which no consistent zone signs at once: it is an old
-	// denial replayed beside a newer wildcard.
-	for _, owner := range auth.owners[dns.TypeNSEC] {
-		nsec, ok := auth.denialRR(owner, dns.TypeNSEC).(*dns.NSEC)
-		if !ok {
-			continue
-		}
-		next := dns.CanonicalName(nsec.NextDomain)
-		if !dns.IsSubDomain(zone, owner) || !dns.IsSubDomain(zone, next) {
-			continue
-		}
-		if !nsecCovers(owner, next, name) ||
-			max(commonLabels(owner, name), commonLabels(next, name)) != encloser {
-			continue
-		}
-		if ok, err := tryCandidate(owner, dns.TypeNSEC); ok || err != nil {
-			return err
-		}
-	}
-
-	// NSEC3 (RFC 5155 8.8): a record covering the hash of the next closer name. An opt-out
-	// record (RFC 5155 6) only says no SIGNED name is there; an unsigned delegation may be, and
-	// a validator cannot tell, so this validator refuses it as proof of absence. That is
-	// stricter than 8.8 asks: a wildcard answer from an opt-out span does not validate here.
-	hashes := map[string]string{}
-	for _, owner := range auth.owners[dns.TypeNSEC3] {
-		n3, ok := auth.denialRR(owner, dns.TypeNSEC3).(*dns.NSEC3)
-		if !ok {
-			continue
-		}
-		ownerHash, ownerZone := splitNSEC3Owner(owner)
-		// RFC 5155 8.2: an NSEC3 with flags other than 0 or 1 is ignored.
-		if ownerZone != zone || n3.Hash != dns.SHA1 || n3.Flags > 1 {
-			continue
-		}
-		if n3.Iterations > maxNSEC3Iterations {
-			note(fmt.Errorf("dnssec: the NSEC3 at %s uses %d iterations, more than the %d this validator"+
-				" hashes (CVE-2023-50868)", owner, n3.Iterations, maxNSEC3Iterations))
-			continue
-		}
-		params := fmt.Sprintf("%d/%s", n3.Iterations, strings.ToUpper(n3.Salt))
-		h, seen := hashes[params]
-		if !seen {
-			if len(hashes) == maxNSEC3Hashes {
-				return &capError{fmt.Sprintf("dnssec: the denial for %s carries more than %d NSEC3"+
-					" parameter sets; refusing it rather than hashing them all (CVE-2023-50868)",
-					name, maxNSEC3Hashes)}
+	match := func(name string) *dns.NSEC3 {
+		for _, r := range set {
+			if r.Match(name) {
+				return r
 			}
-			h = dns.HashName(nextCloser, dns.SHA1, n3.Iterations, n3.Salt)
-			hashes[params] = h
 		}
-		if !hashCovers(ownerHash, strings.ToUpper(n3.NextDomain), h) {
+		return nil
+	}
+	// cover finds an NSEC3 that covers name. optOutOK says whether one with the Opt-Out flag
+	// counts. For the next closer name it does not: an Opt-Out span may hold an unsigned
+	// delegation there, so it proves no absence (RFC 5155 sections 6 and 9.2). For the wildcard
+	// at the closest encloser it does: section 8.4 asks only for an NSEC3 covering it, with no
+	// flag condition. Opt-Out hides only unsigned delegations, and what the wildcard cover has to
+	// prove is that no wildcard source of synthesis exists, which an unsigned delegation at that
+	// name is not.
+	cover := func(name string, optOutOK bool) *dns.NSEC3 {
+		for _, r := range set {
+			if (optOutOK || r.Flags&1 == 0) && !r.Match(name) && r.Cover(name) {
+				return r
+			}
+		}
+		return nil
+	}
+	// NODATA (8.5): an NSEC3 matches qname itself.
+	if m := match(qname); m != nil {
+		return noData(m.TypeBitMap, qtype)
+	}
+	// Closest encloser (8.3): the longest ancestor of qname an NSEC3 matches, at or under the zone.
+	labels := dns.SplitDomainName(qname)
+	for i := 1; i < len(labels)+1; i++ {
+		ce := dns.Fqdn(strings.Join(labels[i:], "."))
+		if i == len(labels) {
+			ce = "."
+		}
+		if !dns.IsSubDomain(zone, ce) {
+			break
+		}
+		m := match(ce)
+		if m == nil {
 			continue
 		}
-		if n3.Flags&0x01 != 0 {
-			note(fmt.Errorf("dnssec: the NSEC3 covering %s is opt-out, which cannot prove it does"+
-				" not exist (RFC 5155 6)", nextCloser))
-			continue
+		if cutBelow(m.TypeBitMap) {
+			return fmt.Errorf("the closest encloser %s is a delegation or a DNAME", trimDot(ce))
 		}
-		if ok, err := tryCandidate(owner, dns.TypeNSEC3); ok || err != nil {
-			return err
+		next := dns.Fqdn(strings.Join(labels[i-1:], "."))
+		if cover(next, false) == nil {
+			return fmt.Errorf("no NSEC3 without opt-out covers the next closer name %s", trimDot(next))
 		}
+		wild := "*." + ce
+		if ce == "." {
+			wild = "*."
+		}
+		if cover(wild, true) != nil {
+			return nil // NXDOMAIN (8.4)
+		}
+		if w := match(wild); w != nil {
+			return noData(w.TypeBitMap, qtype) // wildcard NODATA (8.7)
+		}
+		return fmt.Errorf("nothing proves there is no wildcard at %s", trimDot(wild))
 	}
-
-	missing := fmt.Errorf("dnssec: %s %s was synthesized from the wildcard *.%s and the response carries"+
-		" no signed NSEC or NSEC3 proving %s does not exist (RFC 4035 5.3.4, RFC 5155 8.8)",
-		dns.TypeToString[qtype], name, closestEncloser(name, encloser), nextCloser)
-	if reason != nil {
-		return fmt.Errorf("%w: %v", missing, reason)
-	}
-	return missing
+	return fmt.Errorf("no NSEC3 proves a closest encloser for %s", trimDot(qname))
 }
 
-// verifyDenial validates the NSEC or NSEC3 RRset at owner from the authority section. It must be
-// signed by zone itself (zoneKeys are zone's, and RRSIG.Verify requires the signer to be the
-// key's owner), and by a signature claiming exactly the owner's labels: a denial is never
-// synthesized from a wildcard.
-func (v *Validator) verifyDenial(auth *authority, owner string, qtype uint16, zone string,
-	zoneKeys []*dns.DNSKEY, b *verifyBudget) error {
-	k := authorityKey(owner, qtype)
-	rrset := auth.rrs[k]
-	tried := 0
-	for _, sig := range auth.sigs[k] {
-		if int(sig.Labels) != ownerLabels(owner) {
-			continue
-		}
-		if tried++; tried > maxSigsPerRRset {
-			return tooManySigs(owner, qtype)
-		}
-		err := v.verifyWithKeys(sig, rrset, zoneKeys, b)
-		if err == nil || isCapError(err) {
-			return err
+// --- NSEC (RFC 4035) -----------------------------------------------------------------------
+
+func proveNSEC(set []*dns.NSEC, zone, qname string, qtype uint16) error {
+	for _, r := range set {
+		if dns.CanonicalName(r.Hdr.Name) == qname {
+			return noData(r.TypeBitMap, qtype)
 		}
 	}
-	return fmt.Errorf("dnssec: the %s at %s is not signed by %s", dns.TypeToString[qtype], owner, zone)
+	for _, r := range set {
+		owner, next := dns.CanonicalName(r.Hdr.Name), dns.CanonicalName(r.NextDomain)
+		if !nsecCovers(owner, next, zone, qname) {
+			continue
+		}
+		if dns.IsSubDomain(owner, qname) && cutBelow(r.TypeBitMap) {
+			return fmt.Errorf("the covering NSEC at %s is a delegation or a DNAME", trimDot(owner))
+		}
+		if dns.IsSubDomain(qname, next) && next != qname {
+			return nil // qname is an empty non-terminal: it exists and holds nothing
+		}
+		ce := longerAncestor(qname, owner, next)
+		if !dns.IsSubDomain(zone, ce) {
+			ce = zone
+		}
+		wild := "*." + ce
+		if ce == "." {
+			wild = "*."
+		}
+		for _, w := range set {
+			wo, wn := dns.CanonicalName(w.Hdr.Name), dns.CanonicalName(w.NextDomain)
+			if wo == wild {
+				return noData(w.TypeBitMap, qtype) // wildcard NODATA
+			}
+			if nsecCovers(wo, wn, zone, wild) {
+				return nil // NXDOMAIN
+			}
+		}
+		return fmt.Errorf("nothing proves there is no wildcard at %s", trimDot(wild))
+	}
+	return fmt.Errorf("no NSEC covers %s", trimDot(qname))
 }
 
-// nsecCovers reports whether the NSEC interval (owner, next) strictly contains name in the
-// canonical order (RFC 4034 6.1). The zone's last NSEC points back at the apex, so next sorts
-// at or before owner and the interval runs to the end of the zone.
-func nsecCovers(owner, next, name string) bool {
-	if !packs(owner) || !packs(next) || !packs(name) {
-		return false // an interval with an end we cannot order covers nothing
+// nsecCovers reports owner < name < next in canonical order, the last NSEC of a zone wrapping
+// around to its apex.
+func nsecCovers(owner, next, zone, name string) bool {
+	if !dns.IsSubDomain(zone, name) || !dns.IsSubDomain(zone, owner) {
+		return false
 	}
 	if canonicalCompare(owner, name) >= 0 {
 		return false
 	}
-	return canonicalCompare(name, next) < 0 || canonicalCompare(next, owner) <= 0
+	if canonicalCompare(next, owner) <= 0 { // the wrap: next is the apex
+		return true
+	}
+	return canonicalCompare(name, next) < 0
 }
 
-// hashCovers is nsecCovers over NSEC3 hashes (RFC 5155 1.3, "covers"). Base32hex preserves the
-// order of the bytes it encodes, so equal-length upper-case strings compare as the hashes do.
-// The library's NSEC3.Cover is not used: it also returns true for a hash EQUAL to the owner's,
-// which is a match, a name that exists.
-func hashCovers(ownerHash, nextHash, h string) bool {
-	if len(h) == 0 || len(ownerHash) != len(h) || len(nextHash) != len(h) {
-		return false
+// longerAncestor is the longest common ancestor of qname with either a or b (RFC 4035 5.4).
+func longerAncestor(qname, a, b string) string {
+	ca, cb := commonAncestor(qname, a), commonAncestor(qname, b)
+	if dns.CountLabel(cb) > dns.CountLabel(ca) {
+		return cb
 	}
-	if ownerHash < nextHash {
-		return ownerHash < h && h < nextHash
-	}
-	// The last NSEC3 of the chain wraps to the first (and a chain of one points at itself).
-	return h > ownerHash || h < nextHash
+	return ca
 }
 
-// splitNSEC3Owner splits <hash>.<zone> into the upper-case hash and the canonical zone, by
-// labels, so an escaped dot inside a label is not a boundary.
-func splitNSEC3Owner(owner string) (string, string) {
-	labels := dns.SplitDomainName(owner)
-	if len(labels) < 2 || labels[0] == "" {
-		return "", ""
-	}
-	return strings.ToUpper(labels[0]), dns.Fqdn(strings.Join(labels[1:], "."))
-}
-
-// closestEncloser is the rightmost n labels of name, for messages.
-func closestEncloser(name string, n int) string {
-	labels := dns.SplitDomainName(name)
-	if n <= 0 || n > len(labels) {
+func commonAncestor(a, b string) string {
+	n := dns.CompareDomainName(a, b)
+	labels := dns.SplitDomainName(a)
+	if n == 0 || len(labels) == 0 {
 		return "."
 	}
 	return dns.Fqdn(strings.Join(labels[len(labels)-n:], "."))
 }
 
 // canonicalCompare orders two names as RFC 4034 6.1 does: label by label from the right,
-// each label compared as lower-cased octets, a shorter name first when it is a suffix of the
-// longer. Names are compared in wire form, so presentation escapes cannot change the order.
-// Callers check packs first; a name that does not pack has no labels here.
+// each label's octets compared with ASCII letters folded to lower case.
 func canonicalCompare(a, b string) int {
-	la, _ := wireLabels(a)
-	lb, _ := wireLabels(b)
-	for i := 1; i <= len(la) && i <= len(lb); i++ {
-		if c := bytes.Compare(la[len(la)-i], lb[len(lb)-i]); c != 0 {
+	la, lb := wireLabels(a), wireLabels(b)
+	for i, j := len(la)-1, len(lb)-1; i >= 0 && j >= 0; i, j = i-1, j-1 {
+		if c := bytes.Compare(la[i], lb[j]); c != 0 {
 			return c
 		}
 	}
 	return len(la) - len(lb)
 }
 
-// commonLabels counts the labels a and b share from the right, in wire form and case-folded.
-func commonLabels(a, b string) int {
-	la, _ := wireLabels(a)
-	lb, _ := wireLabels(b)
-	n := 0
-	for n < len(la) && n < len(lb) && bytes.Equal(la[len(la)-1-n], lb[len(lb)-1-n]) {
-		n++
-	}
-	return n
-}
-
-func packs(name string) bool {
-	_, ok := wireLabels(name)
-	return ok
-}
-
-// wireLabels returns name's labels as lower-cased wire octets, leftmost first, root excluded,
-// and whether the name packs at all.
-func wireLabels(name string) ([][]byte, bool) {
+func wireLabels(name string) [][]byte {
 	buf := make([]byte, 256)
 	off, err := dns.PackDomainName(dns.Fqdn(name), buf, 0, nil, false)
 	if err != nil {
-		return nil, false
+		return [][]byte{[]byte(strings.ToLower(name))}
 	}
 	var out [][]byte
 	for i := 0; i < off && buf[i] != 0; {
 		n := int(buf[i])
-		out = append(out, asciiLower(buf[i+1:i+1+n]))
-		i += 1 + n
-	}
-	return out, true
-}
-
-// asciiLower folds A-Z only. RFC 4034 6.2 folds US-ASCII letters and nothing else, and a
-// Unicode-aware fold would reorder or merge labels holding other octets.
-func asciiLower(in []byte) []byte {
-	out := make([]byte, len(in))
-	for i, c := range in {
-		if 'A' <= c && c <= 'Z' {
-			c += 'a' - 'A'
-		}
-		out[i] = c
+		out = append(out, asciiLower(buf[i+1:i+1+n])) // RFC 4034 6.1: ASCII case only, never UTF-8
+		i += n + 1
 	}
 	return out
 }

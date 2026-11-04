@@ -61,3 +61,17 @@ func TestARefusedRenewalWaitsTheLongestAtOnce(t *testing.T) {
 		t.Fatalf("capped: wait %v next %v", w, n)
 	}
 }
+
+func TestSamePeerIsOneEndpointAndOneServerKey(t *testing.T) {
+	a := wgtun.Config{Endpoint: "198.51.100.7:51820", ServerPublicKeyHex: "aa"}
+	if !samePeer(a, a) {
+		t.Fatal("a configuration is its own peer")
+	}
+	b := a
+	b.Endpoint = "203.0.113.9:51820"
+	c := a
+	c.ServerPublicKeyHex = "bb"
+	if samePeer(a, b) || samePeer(a, c) {
+		t.Fatal("another endpoint or another server key is another peer")
+	}
+}

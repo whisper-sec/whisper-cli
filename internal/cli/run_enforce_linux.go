@@ -276,8 +276,10 @@ func runEnforced(agent, agentFile, tier, flagUser, name string, childArgs []stri
 	// Renew registers THIS device's key for the same agent again, for a tunnel that was dead
 	// long enough for the box to forget its peer. It is not a fresh connect: a fresh connect
 	// mints a new WireGuard key, which the running device does not hold.
+	// The periodic signed check-in a held session makes (checkIn) runs on the tunnel's own
+	// goroutine, so it never overlaps the tunnel's renewal of a dead peer.
 	tun, err := enforce.StartTunnel(cfg, enforce.Policy{Resolvers: resolvers, NAT64: prefix},
-		enforce.Options{Logf: logf, Renew: hold.renew})
+		enforce.Options{Logf: logf, Renew: hold.renew, CheckInEvery: checkInEvery, Jitter: renewJitter})
 	if err != nil {
 		return &client.ProblemError{Status: 502, Detail: strings.TrimPrefix(err.Error(), "enforce: ")}
 	}

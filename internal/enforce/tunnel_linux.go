@@ -56,6 +56,12 @@ type Options struct {
 	// Renew asks the control plane to register this device's key for the same /128 again and
 	// returns the configuration it answered with. Nil means a dead tunnel can only wait.
 	Renew func() (wgtun.Config, error)
+	// CheckInEvery, when set, makes a healthy tunnel call Renew that often (less up to a twelfth,
+	// spread by Jitter): a signed connect that tells the service the device is there. The answer
+	// is applied only if it moved the peer. It runs on the tunnel's own goroutine, so a check-in
+	// and a dead tunnel's renewal never overlap.
+	CheckInEvery time.Duration
+	Jitter       func(time.Duration) time.Duration
 }
 
 // Tunnel is a running enforced tunnel: the namespace, the filter and the device.
@@ -66,6 +72,9 @@ type Tunnel struct {
 	cfg    wgtun.Config
 	logf   func(string, ...any)
 	renew  func() (wgtun.Config, error)
+
+	checkInEvery time.Duration
+	jitter       func(time.Duration) time.Duration
 
 	stop     chan struct{}
 	stopOnce sync.Once
@@ -111,7 +120,11 @@ func StartTunnel(cfg wgtun.Config, pol Policy, opts Options) (*Tunnel, error) {
 		return fail(errors.New("enforce: could not bring the WireGuard tunnel up"))
 	}
 	t := &Tunnel{NS: ns, Filter: f, dev: dev, cfg: cfg, logf: logf, renew: opts.Renew,
+		checkInEvery: opts.CheckInEvery, jitter: opts.Jitter,
 		stop: make(chan struct{}), done: make(chan struct{})}
+	if t.jitter == nil {
+		t.jitter = func(time.Duration) time.Duration { return 0 }
+	}
 	deadline := time.Now().Add(handshakeWait)
 	for {
 		if hs, ok := t.handshake(); ok && !hs.IsZero() {
@@ -148,6 +161,7 @@ func (t *Tunnel) watch() {
 	last, _ := t.handshake()
 	changed := time.Now()
 	var lastNudge, nextRenew time.Time
+	nextCheckIn := t.nextCheckIn(time.Now())
 	nudges := 0
 	renewBackoff := 30 * time.Second
 	renewFailing, renewRefused := false, false
@@ -159,6 +173,12 @@ func (t *Tunnel) watch() {
 		}
 		hs, ok := t.handshake()
 		now := time.Now()
+		if !nextCheckIn.IsZero() && !now.Before(nextCheckIn) && t.Filter.Live() {
+			nextCheckIn = t.nextCheckIn(now)
+			if err := t.checkIn(); err != nil {
+				t.logf("whisper: the periodic check-in with Whisper did not go through (%s); the tunnel is unaffected", err)
+			}
+		}
 		if ok && !hs.Equal(last) && !hs.IsZero() {
 			last, changed = hs, now
 			nudges, nextRenew, renewBackoff, renewFailing, renewRefused = 0, time.Time{}, 30*time.Second, false, false
@@ -217,6 +237,37 @@ func (t *Tunnel) reregister() error {
 	}
 	t.cfg = next
 	t.nudge()
+	return nil
+}
+
+// nextCheckIn is when the next periodic check-in is due, or zero when there is none.
+func (t *Tunnel) nextCheckIn(now time.Time) time.Time {
+	if t.checkInEvery <= 0 || t.renew == nil {
+		return time.Time{}
+	}
+	return now.Add(t.checkInEvery - t.jitter(t.checkInEvery/12))
+}
+
+// checkIn is the periodic signed connect of a healthy tunnel: the answer is applied only when it
+// moved the peer to another box, so a check-in that changed nothing leaves the session alone.
+func (t *Tunnel) checkIn() error {
+	fresh, err := t.renew()
+	if err != nil {
+		return err
+	}
+	next, err := renewedConfig(t.cfg, fresh, wgtun.ResolveEndpoint)
+	if err != nil {
+		return err
+	}
+	if samePeer(t.cfg, next) {
+		return nil
+	}
+	if err := t.dev.IpcSet("replace_peers=true\n" + wgtun.UAPIConfig(next)); err != nil {
+		return errors.New("the device refused the new configuration")
+	}
+	t.cfg = next
+	t.nudge()
+	t.logf("whisper: the check-in moved the tunnel to another Whisper box; it follows")
 	return nil
 }
 

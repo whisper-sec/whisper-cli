@@ -103,13 +103,19 @@ func genKey(t *testing.T, zone string, flags uint16) testKey {
 // signRRSet returns an RRSIG over rrset made by key, signed for the given signer zone.
 func signRRSet(t *testing.T, key testKey, zone string, rrset []dns.RR, now time.Time) *dns.RRSIG {
 	t.Helper()
+	return signRRSetTTL(t, key, zone, rrset, now, 3600)
+}
+
+// signRRSetTTL is signRRSet with the given original TTL.
+func signRRSetTTL(t *testing.T, key testKey, zone string, rrset []dns.RR, now time.Time, ttl uint32) *dns.RRSIG {
+	t.Helper()
 	owner := rrset[0].Header().Name
 	sig := &dns.RRSIG{
-		Hdr:         dns.RR_Header{Name: owner, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: 3600},
+		Hdr:         dns.RR_Header{Name: owner, Rrtype: dns.TypeRRSIG, Class: dns.ClassINET, Ttl: ttl},
 		TypeCovered: rrset[0].Header().Rrtype,
 		Algorithm:   key.dnskey.Algorithm,
 		Labels:      uint8(dns.CountLabel(owner)),
-		OrigTtl:     3600,
+		OrigTtl:     ttl,
 		Expiration:  uint32(now.Add(14 * 24 * time.Hour).Unix()),
 		Inception:   uint32(now.Add(-24 * time.Hour).Unix()),
 		KeyTag:      key.dnskey.KeyTag(),

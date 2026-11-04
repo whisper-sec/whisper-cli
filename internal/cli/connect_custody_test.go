@@ -71,6 +71,15 @@ func TestAdoptSendsThisHostsKeyWithTheFlag(t *testing.T) {
 	if _, signed := args["identity_signature"]; signed {
 		t.Fatal("an adopt is not a proof")
 	}
+	// A minted key is stored by the connect, under the handle or as a pending recovery, once
+	// the key history says which; prepare alone stores nothing.
+	if !kp.Unstored() {
+		t.Fatal("a minted adopt key is stored by the connect, not by prepare")
+	}
+	storeAdoptedKey(custodyAddr, kp)
+	if kp.Unstored() {
+		t.Fatal("stored under the handle before the connect is sent")
+	}
 	// The same key is adopted again on a second ask, never a fresh one.
 	args2 := map[string]any{"adopt_identity_key": true}
 	kp2, _ := prepareIdentityKey(tierWireGuard, args2, custodyAddr)
@@ -318,5 +327,127 @@ func TestTheNotAdoptedNoteNamesTheCliFlag(t *testing.T) {
 	settleIdentity(args, decodeConnect(t, "Your identity_public_key was not adopted: kept. To publish your own key instead, connect again with adopt_identity_key:true."), &connectKeys{identity: kp})
 	if len(printed) != 1 || !strings.Contains(printed[0], "whisper connect --adopt-key") {
 		t.Fatalf("the note must name the CLI flag: %q", printed)
+	}
+}
+
+// decodeConnectPin is decodeConnect with the identity_pin column appended, as the service answers
+// once it names the published pin.
+func decodeConnectPin(t *testing.T, note, pin string) *client.Result {
+	t.Helper()
+	body := strings.Replace(wgConnectReplyJSON(), `"Tier-1 routed WireGuard"`, quoteJSON(note), 1)
+	body = strings.Replace(body, `"dns","note"]`, `"dns","note","identity_pin"]`, 1)
+	body = strings.Replace(body, quoteJSON(note)+`]]`, quoteJSON(note)+`,`+quoteJSON(pin)+`]]`, 1)
+	env, err := client.DecodeEnvelope([]byte(body), 200)
+	if err != nil || env.Result == nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got := field(env.Result.Records()[0], "identity_pin"); got != pin && pin != "" {
+		t.Fatalf("the fixture lost the pin column: %q", got)
+	}
+	return env.Result
+}
+
+// The published pin decides, never the sentence: our own digest links the key even when a note
+// happens to carry the old marker, and another pin marks it unpinned even when the note is quiet.
+func TestThePublishedPinDecidesWhetherTheSentKeyIsThePin(t *testing.T) {
+	custodyStore(t)
+	args := map[string]any{}
+	kp, err := prepareIdentityKey(tierWireGuard, args, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	keys := &connectKeys{identity: kp}
+	settleIdentity(args, decodeConnectPin(t, "a note that says the key was not adopted", strings.ToUpper(pinDigestOf(kp))), keys)
+	if keys.unpinned {
+		t.Fatal("the zone publishes our key: it is the pin, whatever the note says")
+	}
+	if got, err := idkey.Load(custodyAddr); err != nil || got.MarshalSPKIBase64() != kp.MarshalSPKIBase64() {
+		t.Fatalf("the published key was not linked: %v", err)
+	}
+
+	custodyStore(t)
+	args2 := map[string]any{}
+	kp2, _ := prepareIdentityKey(tierWireGuard, args2, "")
+	keys2 := &connectKeys{identity: kp2}
+	other := strings.Repeat("ab", 32)
+	settleIdentity(args2, decodeConnectPin(t, "Tier-1 routed WireGuard", other), keys2)
+	if !keys2.unpinned {
+		t.Fatal("another pin is published: our key is only the binding, even with a quiet note")
+	}
+	if _, err := os.Stat(idkey.PathFor(custodyAddr)); err == nil {
+		t.Fatal("a binding-only key was linked under the address")
+	}
+}
+
+// A signed reconnect sends no key, so it never links one, and the pin still tells it whether its
+// key is the published one: a legacy binding key serves no leaf there any more.
+func TestASignedReconnectReadsThePublishedPin(t *testing.T) {
+	custodyStore(t)
+	kp, _ := idkey.GenerateKeypair()
+	args := map[string]any{"identity_signature": "sig"}
+
+	binding := &connectKeys{identity: kp}
+	settleIdentity(args, decodeConnectPin(t, "", strings.Repeat("cd", 32)), binding)
+	if !binding.unpinned {
+		t.Fatal("a signed reconnect by a key the zone does not publish must serve no leaf")
+	}
+	pinned := &connectKeys{identity: kp}
+	settleIdentity(args, decodeConnectPin(t, "", pinDigestOf(kp)), pinned)
+	if pinned.unpinned {
+		t.Fatal("a signed reconnect by the published key keeps its leaf")
+	}
+	if _, err := os.Stat(idkey.PathFor(custodyAddr)); err == nil {
+		t.Fatal("a connect that sent no key linked one")
+	}
+	// a pin column that is present but empty: the service cannot vouch any pin is served now, so the
+	// key serves no leaf
+	unknown := &connectKeys{identity: kp}
+	settleIdentity(args, decodeConnectPin(t, "", ""), unknown)
+	if !unknown.unpinned {
+		t.Fatal("an empty identity_pin is no proof our key is published")
+	}
+	// an older service answers no pin: the signed reconnect is left as it was (the control)
+	old := &connectKeys{identity: kp}
+	settleIdentity(args, decodeConnect(t, ""), old)
+	if old.unpinned {
+		t.Fatal("no pin column is no evidence: nothing changes")
+	}
+}
+
+// (review confirm): an empty identity_pin on a SENT key is the zone lagging a key the service
+// took: no leaf, but the key is still linked and no --adopt-key advice is printed, because custody
+// follows the note's sentence there, not the zone.
+func TestAnEmptyPinOnASentKeyServesNoLeafButStillLinksAndGivesNoAdoptAdvice(t *testing.T) {
+	custodyStore(t)
+	args := map[string]any{}
+	kp, err := prepareIdentityKey(tierWireGuard, args, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var printed []string
+	saved := identityNote
+	identityNote = func(format string, a ...any) { printed = append(printed, fmt.Sprintf(format, a...)) }
+	defer func() { identityNote = saved }()
+	keys := &connectKeys{identity: kp}
+	settleIdentity(args, decodeConnectPin(t, "Tier-1 routed WireGuard", ""), keys)
+	if !keys.unpinned {
+		t.Fatal("no leaf while the zone cannot vouch for the pin")
+	}
+	if got, err := idkey.Load(custodyAddr); err != nil || got.MarshalSPKIBase64() != kp.MarshalSPKIBase64() {
+		t.Fatalf("the key the service took was not linked: %v", err)
+	}
+	for _, line := range printed {
+		if strings.Contains(line, "--adopt-key") {
+			t.Fatalf("advice to adopt a key that is already adopted: %q", line)
+		}
+	}
+	// the control: the sentence still decides when the pin is empty and the note says not adopted
+	custodyStore(t)
+	args2 := map[string]any{}
+	kp2, _ := prepareIdentityKey(tierWireGuard, args2, "")
+	keys2 := &connectKeys{identity: kp2}
+	settleIdentity(args2, decodeConnectPin(t, "Your identity_public_key was not adopted: kept.", ""), keys2)
+	if _, err := os.Stat(idkey.PathFor(custodyAddr)); err == nil {
+		t.Fatal("a key the note says was not adopted was linked")
 	}
 }

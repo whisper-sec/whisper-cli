@@ -8,7 +8,6 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -17,6 +16,8 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+
+	"github.com/whisper-sec/whisper-cli/internal/kel"
 )
 
 // LedgerCheckpoint is the decoded C2SP signed-note checkpoint served at GET /checkpoint
@@ -453,58 +454,12 @@ func (cp *LedgerCheckpoint) VerifySignature(key *LedgerKey) error {
 // commitment = SHA-256(salt || canonicalEvent); leafHash = SHA-256(0x00 || commitment).
 // This is the selective-disclosure recompute: only a holder of the salt can do it.
 func LeafHashFromDisclosure(salt, canonicalEvent []byte) []byte {
-	c := sha256.New()
-	c.Write(salt)
-	c.Write(canonicalEvent)
-	commitment := c.Sum(nil)
-	l := sha256.New()
-	l.Write([]byte{0x00}) // RFC 6962 leaf domain-separation prefix
-	l.Write(commitment)
-	return l.Sum(nil)
+	return kel.LeafHash(salt, canonicalEvent)
 }
 
 // VerifyInclusion folds leafHash with the RFC 6962 audit path and returns nil iff it
-// reconstructs the checkpoint root for (index, treeSize). The exact reference index-walk a
-// stock CT verifier uses, interoperable with the server's RFC 6962 inclusion proofs.
+// reconstructs the checkpoint root for (index, treeSize). The key-history verifier uses the
+// same walk, so there is one inclusion check in the client.
 func VerifyInclusion(leafHash []byte, index, treeSize uint64, path [][]byte, root []byte) error {
-	if len(leafHash) != sha256.Size || len(root) != sha256.Size {
-		return fmt.Errorf("leaf hash / root must be 32 bytes")
-	}
-	if index >= treeSize {
-		return fmt.Errorf("leaf index %d is out of range for tree size %d", index, treeSize)
-	}
-	fn, sn := index, treeSize-1
-	r := append([]byte(nil), leafHash...)
-	for _, sib := range path {
-		if sn == 0 {
-			return fmt.Errorf("inclusion proof has more siblings than the tree shape allows (forged?)")
-		}
-		if fn&1 == 1 || fn == sn {
-			r = hashNode(sib, r)
-			for fn&1 == 0 {
-				fn >>= 1
-				sn >>= 1
-			}
-		} else {
-			r = hashNode(r, sib)
-		}
-		fn >>= 1
-		sn >>= 1
-	}
-	if sn != 0 {
-		return fmt.Errorf("inclusion proof is too short for the tree shape (forged?)")
-	}
-	if subtle.ConstantTimeCompare(r, root) != 1 {
-		return fmt.Errorf("the inclusion proof does NOT fold to the signed checkpoint root")
-	}
-	return nil
-}
-
-// hashNode is the RFC 6962 interior-node hash SHA-256(0x01 || left || right).
-func hashNode(left, right []byte) []byte {
-	h := sha256.New()
-	h.Write([]byte{0x01})
-	h.Write(left)
-	h.Write(right)
-	return h.Sum(nil)
+	return kel.VerifyInclusion(leafHash, index, treeSize, path, root)
 }

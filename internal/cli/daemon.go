@@ -125,7 +125,7 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 			return err
 		}
 	}
-	keys := &connectKeys{wg: wgKey, identity: idKey}
+	keys := newConnectKeys(wgKey, idKey, args)
 
 	// Connect + verify with BOUNDED retry (the false-"up" companion fix): a failed op:connect
 	// or a failed egress verify used to kill the daemon on the spot, so a transient serving-side

@@ -13,7 +13,6 @@ import (
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/enforce"
-	"github.com/whisper-sec/whisper-cli/internal/idkey"
 	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
@@ -202,14 +201,14 @@ func newEnforcedHold(c *client.Client, base map[string]any, keys *connectKeys, a
 // box answered. Without it a renewal leaves no trace at all, and a tunnel that recovered on its
 // own looks exactly like one that was renewed.
 func (h *enforcedHold) renew() (wgtun.Config, error) {
-	var wgKey, id = (*wgtun.Keypair)(nil), (*idkey.Keypair)(nil)
+	var wgKey *wgtun.Keypair
 	if h.keys != nil {
-		wgKey, id = h.keys.wg, h.keys.identity
+		wgKey = h.keys.wg
 	}
 	cx, cancel := h.ctx()
 	defer cancel()
 	args := renewalArgs(h.base, h.keys, h.addr, time.Now())
-	env, err := connectWithSelfHeal(cx, h.c, args, id, tierWireGuard)
+	env, err := connectWithSelfHeal(cx, h.c, args, h.keys, tierWireGuard)
 	sent := renewalKeyNote(args) // after the call: a self-heal may have sent the key after all
 	if err != nil {
 		refused := classifyRenewErr(err) == renewFinal

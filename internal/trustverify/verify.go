@@ -215,28 +215,11 @@ func resolveAndValidate(ctx context.Context, v *Validator, target string) (netip
 
 	if a, err := netip.ParseAddr(target); err == nil {
 		addr = a.Unmap()
-		// Address given -> PTR to find the name (DNSSEC-validated).
-		rev, rerr := dns.ReverseAddr(addr.String())
-		if rerr != nil {
-			return addr, "", nil, fail(check, "cannot form reverse name for "+addr.String()+": "+rerr.Error())
+		name, perr := v.proveName(ctx, addr)
+		if perr != nil {
+			return addr, name, nil, fail(check, perr.Error())
 		}
-		ptrRRs, err := v.ValidateRRSet(ctx, rev, dns.TypePTR)
-		if err != nil {
-			return addr, "", nil, fail(check, "PTR: "+err.Error())
-		}
-		fqdn = ptrTarget(ptrRRs)
-		if fqdn == "" {
-			return addr, "", nil, fail(check, "PTR had no target name")
-		}
-		// Forward-confirm: AAAA(fqdn) must include addr.
-		aaaaRRs, err := v.ValidateRRSet(ctx, fqdn, dns.TypeAAAA)
-		if err != nil {
-			return addr, fqdn, nil, fail(check, "AAAA: "+err.Error())
-		}
-		if !containsAddr(aaaaAddrs(aaaaRRs), addr) {
-			return addr, fqdn, nil, fail(check,
-				fmt.Sprintf("forward-confirm failed: AAAA(%s) does not contain %s", trimDot(fqdn), addr))
-		}
+		fqdn = name
 	} else {
 		// Name given -> AAAA to find the address, then PTR to confirm the name.
 		fqdn = dns.Fqdn(target)
@@ -278,6 +261,42 @@ func resolveAndValidate(ctx context.Context, v *Validator, target string) (netip
 	check.Detail = fmt.Sprintf("AAAA, PTR and TLSA(3 1 1) all DNSSEC-validated to the IANA root; %s <-> %s consistent",
 		addr, trimDot(fqdn))
 	return addr, fqdn, pins, check
+}
+
+// ProveName returns the identity FQDN of an address, proven by DNSSEC: the validated PTR of
+// the address names it, and the validated AAAA of that name contains the address again
+// (forward-confirmed). The name carries a trailing dot. Nothing the address's owner says about
+// itself is taken on trust: both legs chain to the root anchor.
+func (v *Validator) ProveName(ctx context.Context, addr netip.Addr) (string, error) {
+	return v.proveName(ctx, addr.Unmap())
+}
+
+// proveName is ProveName's body. On a failed forward-confirm it still returns the name the PTR
+// gave, so a caller reporting the failure can say which name it was.
+func (v *Validator) proveName(ctx context.Context, addr netip.Addr) (string, error) {
+	if !addr.IsValid() {
+		return "", fmt.Errorf("no address to prove a name for")
+	}
+	rev, rerr := dns.ReverseAddr(addr.String())
+	if rerr != nil {
+		return "", fmt.Errorf("cannot form reverse name for %s: %v", addr, rerr)
+	}
+	ptrRRs, err := v.ValidateRRSet(ctx, rev, dns.TypePTR)
+	if err != nil {
+		return "", fmt.Errorf("PTR: %v", err)
+	}
+	fqdn := ptrTarget(ptrRRs)
+	if fqdn == "" {
+		return "", fmt.Errorf("PTR had no target name")
+	}
+	aaaaRRs, err := v.ValidateRRSet(ctx, fqdn, dns.TypeAAAA)
+	if err != nil {
+		return fqdn, fmt.Errorf("AAAA: %v", err)
+	}
+	if !containsAddr(aaaaAddrs(aaaaRRs), addr) {
+		return fqdn, fmt.Errorf("forward-confirm failed: AAAA(%s) does not contain %s", trimDot(fqdn), addr)
+	}
+	return fqdn, nil
 }
 
 // runDANE performs the DANE-EE handshake + pin/SAN check and records the served SPKI.

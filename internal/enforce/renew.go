@@ -35,6 +35,11 @@ func nextRenewBackoff(cur, max time.Duration, err error) (wait, next time.Durati
 // and an answer naming a different address is refused rather than followed. The private key
 // is kept unless the control plane minted a new one, and the endpoint is resolved to the
 // literal the device needs. Direct peers stay off.
+// samePeer reports two configurations for the same box side: one endpoint and one server key.
+func samePeer(a, b wgtun.Config) bool {
+	return a.Endpoint == b.Endpoint && a.ServerPublicKeyHex == b.ServerPublicKeyHex
+}
+
 func renewedConfig(cur, fresh wgtun.Config, resolve func(string) (string, error)) (wgtun.Config, error) {
 	if fresh.Address != cur.Address {
 		return wgtun.Config{}, errors.New("the control plane answered with a different address")

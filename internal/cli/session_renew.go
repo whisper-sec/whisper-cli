@@ -114,11 +114,7 @@ func renewerFor(c *client.Client, base map[string]any, sess *egressSession, nego
 	r := &sessionRenewer{
 		port: endpointPort(sess.endpoint),
 		register: func(cx context.Context, now time.Time) (*client.Result, string, error) {
-			var id *idkey.Keypair
-			if keys != nil {
-				id = keys.identity
-			}
-			env, err := connectWithSelfHeal(cx, c, renewalArgs(base, keys, addr, now), id, tierWireGuard)
+			env, err := connectWithSelfHeal(cx, c, renewalArgs(base, keys, addr, now), keys, tierWireGuard)
 			if err != nil {
 				return nil, "", err
 			}
@@ -155,11 +151,21 @@ func renewalArgs(base map[string]any, keys *connectKeys, addr string, now time.T
 	}
 	// adopt_identity_key is the user's one-off request to publish this host's key; a renewal
 	// never repeats it (a client that always sends it recreates the incident).
-	for _, k := range []string{"identity_public_key", "identity_signature", "identity_signature_window", "public_key", "adopt_identity_key"} {
+	// A vehicle binding (vin, ecu_serial) derives the address at the first connect and asks for
+	// the key beside it; a renewal names the address it holds and proves the key, so it sends
+	// neither, which the service would otherwise refuse for want of identity_public_key.
+	for _, k := range []string{"identity_public_key", "identity_signature", "identity_signature_window", "public_key",
+		"adopt_identity_key", "vin", "ecu_serial", "endpoints"} {
 		delete(args, k)
 	}
 	args["tier"] = tierWireGuard
 	args["agent"] = addr
+	if keys != nil && keys.listenPort > 0 {
+		// the same device on the same port, at the addresses the host has now
+		if eps := underlayEndpoints(keys.listenPort); len(eps) > 0 {
+			args["endpoints"] = eps
+		}
+	}
 	wgPub := ""
 	if keys != nil && keys.wg != nil {
 		wgPub = keys.wg.PublicKeyBase64
@@ -168,6 +174,9 @@ func renewalArgs(base map[string]any, keys *connectKeys, addr string, now time.T
 	if keys == nil || keys.identity == nil {
 		return args
 	}
+	// A rotation made since this session started (by `whisper identity rotate`, in another
+	// process) moved the pin: prove the key the store now holds, never the one held in memory.
+	keys.identity = idkey.Refresh(keys.identity)
 	if a, err := netip.ParseAddr(strings.TrimSpace(addr)); err == nil {
 		window := idkey.EnrolmentWindow(now)
 		if sig, serr := keys.identity.SignEnrolment(a, wgPub, window); serr == nil {
@@ -213,6 +222,7 @@ type sessionSupervisor struct {
 	unreached   bool      // the last failure never reached the control plane
 	rebindsSeen int       // the tunnel's socket re-opens, as last seen
 	refused     string    // why the Whisper side refused a fresh session for good, "" if it has not
+	nextCheckIn time.Time // when the next signed check-in of a healthy session is due (checkIn)
 
 	published string // what was last written into the record, so a write happens only on a change
 	since     time.Time
@@ -286,7 +296,7 @@ func (s *sessionSupervisor) step(run context.Context) (done bool) {
 		}
 		s.tried, s.latched, s.yielded, s.refused = false, false, false, ""
 		s.publish(tunnelUp, "", now)
-		return false
+		return s.checkIn(run, now)
 	}
 	if !s.renewedAt.IsZero() && now.Sub(s.renewedAt) < renewGrace {
 		return false // a tunnel that verified moments ago is up; its reading has not caught up
@@ -312,6 +322,47 @@ func (s *sessionSupervisor) step(run context.Context) (done bool) {
 		return false
 	}
 	return s.renewNow(run, now, th.HandshakeAge())
+}
+
+// checkInEvery is the longest a held Tier-1 session goes without a signed connect. A healthy
+// tunnel needs none, but the service lets a signed connect by the bound device veto an owner's
+// pending clear of its binding, inside a 24-hour window, so a device that
+// keeps one tunnel up for days still says it is there at least four times in every window.
+const checkInEvery = 6 * time.Hour
+
+// checkIn makes the periodic signed connect of a healthy held session: the renewal's own connect,
+// with a proof made now. The tunnel is replaced only if the answer moved it to another box; a
+// failed check-in is retried at the next one and never touches a working tunnel.
+func (s *sessionSupervisor) checkIn(run context.Context, now time.Time) (done bool) {
+	if s.renew == nil || s.sess == nil || s.sess.peer == "" {
+		return false
+	}
+	if s.nextCheckIn.IsZero() {
+		// the first one is spread, so a fleet started together does not check in together
+		s.nextCheckIn = now.Add(checkInEvery - s.jitter(checkInEvery/12))
+		return false
+	}
+	if now.Before(s.nextCheckIn) {
+		return false
+	}
+	s.nextCheckIn = now.Add(checkInEvery - s.jitter(checkInEvery/12))
+	rcx, rcancel := context.WithTimeout(run, renewRegisterTimeout)
+	res, _, err := s.renew.register(rcx, now)
+	rcancel()
+	if err != nil || run.Err() != nil {
+		debugf("check-in for %s not made: %v", s.addr, err)
+		return false
+	}
+	if got := envelopeAddress(res); got != "" && !sameIP(got, s.addr) {
+		s.wrongAddress(got, now)
+		return false
+	}
+	if ce, perr := parseConnectEnvelope(res); perr == nil && wgPeerOf(ce) == s.sess.peer {
+		return false // the same box keeps the same peer: the tunnel is untouched
+	}
+	// the connect moved the peer to another box: bring the tunnel to it now, as a renewal does
+	s.say("whisper: the check-in for %s moved its tunnel to another box; following it...", s.addr)
+	return s.renewNow(run, now, 0)
 }
 
 // yieldToAnotherHolder reports whether another holder on this host should be the one to renew

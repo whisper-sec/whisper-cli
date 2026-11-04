@@ -80,11 +80,20 @@ func (v *Validator) ValidateRRSetSigned(ctx context.Context, name string, qtype 
 		return nil, nil, fmt.Errorf("dnssec: %s %s returned %s (no signed answer to validate)",
 			dns.TypeToString[qtype], name, rc)
 	}
-	rrset := rrsOfType(msg.Answer, name, qtype)
+	return v.validateAnswer(ctx, msg.Answer, msg.Ns, name, qtype)
+}
+
+// validateAnswer proves the (name, qtype) RRset inside an answer section already fetched (ns is
+// the same response's authority section, where a wildcard expansion's denial lives): some
+// RRSIG over it must verify under the validated DNSKEY of its signing zone, and that zone must
+// be the name itself or one of its ancestors. A signature by any other zone proves nothing about
+// this name (RFC 4035 5.3.1), however well that zone's own chain of trust validates.
+func (v *Validator) validateAnswer(ctx context.Context, answer, ns []dns.RR, name string, qtype uint16) ([]dns.RR, *dns.RRSIG, error) {
+	rrset := rrsOfType(answer, name, qtype)
 	if len(rrset) == 0 {
 		return nil, nil, fmt.Errorf("dnssec: no %s record for %s", dns.TypeToString[qtype], name)
 	}
-	sigs := rrsigsCovering(msg.Answer, name, qtype)
+	sigs := rrsigsCovering(answer, name, qtype)
 	if len(sigs) == 0 {
 		return nil, nil, fmt.Errorf("dnssec: %s %s is UNSIGNED (no RRSIG) -- cannot prove trustlessly",
 			dns.TypeToString[qtype], name)
@@ -126,7 +135,7 @@ func (v *Validator) ValidateRRSetSigned(ctx context.Context, name string, qtype 
 			perr, done := proofs[pk]
 			if !done {
 				if auth == nil {
-					auth, proofBudget = indexAuthority(msg.Ns), newVerifyBudget()
+					auth, proofBudget = indexAuthority(ns), newVerifyBudget()
 				}
 				perr = v.proveNoCloserName(auth, name, qtype, sig, zoneKeys, proofBudget)
 				proofs[pk] = perr
@@ -529,7 +538,9 @@ func (r *netResolver) Query(ctx context.Context, name string, qtype uint16) (*dn
 	var lastErr error
 	for _, srv := range r.servers {
 		in, _, err := r.udp.ExchangeContext(ctx, m, srv)
-		if err == nil && in != nil && in.Truncated {
+		if (err == nil && in != nil && in.Truncated) || (err != nil && ctx.Err() == nil) {
+			// A truncated answer, or no UDP answer at all: a network that drops UDP/53 still
+			// carries TCP, so the same server is asked again over TCP before the next one.
 			in, _, err = r.tcp.ExchangeContext(ctx, m, srv)
 		}
 		if err != nil {

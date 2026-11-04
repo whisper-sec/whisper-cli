@@ -488,7 +488,7 @@ var whaleServeConnect = func(cx context.Context, c *client.Client, sel string) (
 	if perr := envelopeError(env); perr != nil {
 		return nil, nil, perr
 	}
-	keys := &connectKeys{wg: wgKey, identity: idKey}
+	keys := newConnectKeys(wgKey, idKey, args)
 	settleIdentity(args, env.Result, keys)
 	sess, err := connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, 0)
 	if err != nil {

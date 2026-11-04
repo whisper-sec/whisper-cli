@@ -286,7 +286,7 @@ func TestSigner_WildcardAboveTheSignerApexIsRefused(t *testing.T) {
 		rr.Hdr.Name, sig.Hdr.Name = "a.whisper.online.", "a.whisper.online."
 		// The expansion carries its denial of a closer name, so the only variable is the signer.
 		proof := nsecRR("*.whisper.online.", "b.whisper.online.")
-		tr.res.setMsg("a.whisper.online.", dns.TypeTXT, []dns.RR{rr, sig},
+		tr.res.setWildMsg("a.whisper.online.", dns.TypeTXT, []dns.RR{rr, sig},
 			[]dns.RR{proof, signRRSet(t, w.zsk, w.name, []dns.RR{proof}, tr.now)})
 		_, err := tr.validator(tr.res).ValidateRRSet(context.Background(), "a.whisper.online.", dns.TypeTXT)
 		if (err == nil) != c.ok {

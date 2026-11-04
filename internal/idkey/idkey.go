@@ -42,7 +42,31 @@ type Keypair struct {
 	// re-derived) - the server hashes this SAME byte sequence, verbatim, so it must never drift from
 	// what MarshalSPKIBase64 reports.
 	spkiDER []byte
+	// serving and servingUntil are set on a pin reached by a rotation still in its first phase:
+	// the outgoing key keeps serving the TLS leaf until then (ServingKey).
+	serving      *Keypair
+	servingUntil time.Time
+	// dir is the identity directory the key was read from ("" for a key minted in this process),
+	// so its recorded moves are read from the same store, whoever's it is.
+	dir string
+	// unstored marks a key from Mint that no store holds yet (Unstored).
+	unstored bool
 }
+
+// Mint is a fresh key that no store holds yet. Its caller stores it before anything that names
+// it leaves this host: under a handle (Link), or as a pending recovery (KeepRecovery), because
+// which of the two is right is known only once the identity's key history has been read.
+func Mint() (*Keypair, error) {
+	kp, err := GenerateKeypair()
+	if err != nil {
+		return nil, err
+	}
+	kp.unstored = true
+	return kp, nil
+}
+
+// Unstored reports a key from Mint that neither Link nor KeepRecovery has stored yet.
+func (k *Keypair) Unstored() bool { return k != nil && k.unstored }
 
 // GenerateKeypair mints a fresh EC P-256 identity keypair from the host CSPRNG (crypto/rand). The
 // private key stays in-memory only; the caller persists it via Save if it wants reuse across runs.
@@ -165,7 +189,11 @@ func PathFor(handle string) string {
 // itself which store to read (the enforced run under sudo reads the invoking user's, read-only).
 // It never mints and never writes.
 func LoadFile(path string) (*Keypair, error) {
-	return load(path)
+	kp, err := load(path)
+	if err != nil {
+		return nil, err
+	}
+	return follow(kp, filepath.Dir(path)), nil
 }
 
 // LoadOrGenerate loads the persisted identity key for handle, or mints + persists a fresh one if none
@@ -175,7 +203,7 @@ func LoadFile(path string) (*Keypair, error) {
 func LoadOrGenerate(handle string) (*Keypair, error) {
 	path := PathFor(handle)
 	if kp, err := load(path); err == nil {
-		return kp, nil
+		return follow(kp, identityDir()), nil
 	}
 	kp, err := GenerateKeypair()
 	if err != nil {
@@ -190,7 +218,11 @@ func LoadOrGenerate(handle string) (*Keypair, error) {
 // DANE-EE pin is already published (the summary uplink's mTLS client cert) use this,
 // because a freshly-minted key would present an unpinned - and thus unverifiable - leaf.
 func Load(handle string) (*Keypair, error) {
-	return load(PathFor(handle))
+	kp, err := load(PathFor(handle))
+	if err != nil {
+		return nil, err
+	}
+	return follow(kp, identityDir()), nil
 }
 
 // ErrLinkedElsewhere is Link's answer when the handle already holds a DIFFERENT key. Nothing is
@@ -207,8 +239,10 @@ func Link(handle string, kp *Keypair) error {
 	}
 	path := PathFor(handle)
 	if cur, err := load(path); err == nil {
-		if cur.MarshalSPKIBase64() == kp.MarshalSPKIBase64() {
-			return nil
+		if cur.MarshalSPKIBase64() == kp.MarshalSPKIBase64() ||
+			follow(cur, identityDir()).MarshalSPKIBase64() == kp.MarshalSPKIBase64() {
+			kp.unstored = false
+			return nil // the handle holds this key, or a key whose recorded moves lead to it
 		}
 		return ErrLinkedElsewhere
 	}
@@ -236,13 +270,16 @@ func Link(handle string, kp *Keypair) error {
 	}
 	if err := os.Link(tmp, path); err != nil {
 		if errors.Is(err, os.ErrExist) {
-			if cur, lerr := load(path); lerr == nil && cur.MarshalSPKIBase64() == kp.MarshalSPKIBase64() {
+			if cur, lerr := load(path); lerr == nil && (cur.MarshalSPKIBase64() == kp.MarshalSPKIBase64() ||
+				follow(cur, identityDir()).MarshalSPKIBase64() == kp.MarshalSPKIBase64()) {
+				kp.unstored = false
 				return nil
 			}
 			return ErrLinkedElsewhere
 		}
 		return err
 	}
+	kp.unstored = false
 	return nil
 }
 
@@ -288,7 +325,7 @@ func load(path string) (*Keypair, error) {
 	if err != nil {
 		return nil, fmt.Errorf("idkey: %w", err)
 	}
-	return &Keypair{Private: priv, spkiDER: der}, nil
+	return &Keypair{Private: priv, spkiDER: der, dir: filepath.Dir(path)}, nil
 }
 
 // save persists kp as a PEM EC PRIVATE KEY that only its owner can read, creating the

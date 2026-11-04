@@ -19,8 +19,8 @@ import (
 // other name below the apex), the zone answers with the expansion, which is only proved when
 // the authority section carries a signed NSEC or NSEC3 showing no closer name exists.
 
-// setMsg serves a full response: answer and authority sections.
-func (m *mapResolver) setMsg(name string, qtype uint16, answer, ns []dns.RR) {
+// setWildMsg serves a full response: answer and authority sections.
+func (m *mapResolver) setWildMsg(name string, qtype uint16, answer, ns []dns.RR) {
 	msg := new(dns.Msg)
 	msg.Rcode = dns.RcodeSuccess
 	msg.Answer = answer
@@ -92,7 +92,7 @@ func nsec3Around(t *testing.T, name string, iterations uint16, salt string, lo, 
 
 func (z *wildZone) validate(qname string, ns []dns.RR, t *testing.T) error {
 	t.Helper()
-	z.tr.res.setMsg(qname, dns.TypeTXT, z.expansion(t, qname), ns)
+	z.tr.res.setWildMsg(qname, dns.TypeTXT, z.expansion(t, qname), ns)
 	_, err := z.tr.validator(z.tr.res).ValidateRRSet(context.Background(), qname, dns.TypeTXT)
 	return err
 }
@@ -317,7 +317,7 @@ func TestWildcard_ProofVerificationsAreBounded(t *testing.T) {
 	}
 	ns := append(bad(nsecRR("0.whisper.online.", "b.whisper.online."), maxSigsPerRRset),
 		bad(nsecRR("1.whisper.online.", "b.whisper.online."), 1)...)
-	z.tr.res.setMsg("a.whisper.online.", dns.TypeTXT, z.expansion(t, "a.whisper.online."), ns)
+	z.tr.res.setWildMsg("a.whisper.online.", dns.TypeTXT, z.expansion(t, "a.whisper.online."), ns)
 	v := z.tr.validator(z.tr.res)
 	_, err := v.ValidateRRSet(context.Background(), "a.whisper.online.", dns.TypeTXT)
 	mustRefuse(t, err, "needed more than 8 signature verifications")
@@ -344,7 +344,7 @@ func TestWildcard_DenialCandidateFloodIsRefused(t *testing.T) {
 		dup := *ans[1].(*dns.RRSIG)
 		ans = append(ans, &dup)
 	}
-	z.tr.res.setMsg("a.whisper.online.", dns.TypeTXT, ans, ns)
+	z.tr.res.setWildMsg("a.whisper.online.", dns.TypeTXT, ans, ns)
 	v := z.tr.validator(z.tr.res)
 	_, err := v.ValidateRRSet(context.Background(), "a.whisper.online.", dns.TypeTXT)
 	if !isCapError(err) || !strings.Contains(err.Error(), "more than 8 covering records") {
@@ -372,11 +372,11 @@ func TestWildcard_NSECOlderThanTheWildcardIsRefused(t *testing.T) {
 	sig := signRRSet(t, z.w.zsk, z.w.name, []dns.RR{rr}, z.tr.now)
 	rr.Hdr.Name, sig.Hdr.Name = "x.a.whisper.online.", "x.a.whisper.online."
 	old := z.signed(t, z.w, nsecRR("whisper.online.", "b.whisper.online."))
-	z.tr.res.setMsg("x.a.whisper.online.", dns.TypeTXT, []dns.RR{rr, sig}, old)
+	z.tr.res.setWildMsg("x.a.whisper.online.", dns.TypeTXT, []dns.RR{rr, sig}, old)
 	_, err := z.tr.validator(z.tr.res).ValidateRRSet(context.Background(), "x.a.whisper.online.", dns.TypeTXT)
 	mustRefuse(t, err, "proving x.a.whisper.online. does not exist")
 	fresh := z.signed(t, z.w, nsecRR("*.a.whisper.online.", "b.whisper.online."))
-	z.tr.res.setMsg("x.a.whisper.online.", dns.TypeTXT, []dns.RR{rr, sig}, fresh)
+	z.tr.res.setWildMsg("x.a.whisper.online.", dns.TypeTXT, []dns.RR{rr, sig}, fresh)
 	if _, err := z.tr.validator(z.tr.res).ValidateRRSet(context.Background(), "x.a.whisper.online.",
 		dns.TypeTXT); err != nil {
 		t.Fatalf("control: the denial from the wildcard's own zone state must validate, got %v", err)
@@ -410,7 +410,7 @@ func TestWildcard_NonWildcardAnswerIsUnchanged(t *testing.T) {
 		Ttl: 60}, Txt: []string{"v=whisper1"}}
 	junk := []dns.RR{nsecRR("zzz.whisper.online.", "whisper.online.")}
 	for _, ns := range [][]dns.RR{nil, junk} {
-		z.tr.res.setMsg("a.whisper.online.", dns.TypeTXT, z.signed(t, z.w, rr), ns)
+		z.tr.res.setWildMsg("a.whisper.online.", dns.TypeTXT, z.signed(t, z.w, rr), ns)
 		if _, err := z.tr.validator(z.tr.res).ValidateRRSet(context.Background(), "a.whisper.online.",
 			dns.TypeTXT); err != nil {
 			t.Fatalf("an exact answer must validate as before, got %v", err)
@@ -434,7 +434,7 @@ func TestWildcard_AgentKeyRefusesAProvenExpansion(t *testing.T) {
 		Class: dns.ClassINET, Ttl: 60}, Hash: dns.SHA1, NextDomain: shiftHash(t, h, 1), HashLength: 20,
 		TypeBitMap: []uint16{dns.TypeTXT}}
 	n3sig := signRRSet(t, fx.h.childZSK, akeyZone, []dns.RR{n3}, fx.h.now)
-	fx.h.res.setMsg(owner, dns.TypeTXT, []dns.RR{wild, sig}, []dns.RR{n3, n3sig})
+	fx.h.res.setWildMsg(owner, dns.TypeTXT, []dns.RR{wild, sig}, []dns.RR{n3, n3sig})
 
 	if _, _, err := fx.validator().ValidateRRSetSigned(context.Background(), owner, dns.TypeTXT); err != nil {
 		t.Fatalf("fixture: the expansion must be proven for this test to mean anything, got %v", err)
@@ -520,7 +520,7 @@ func TestWildcardExpansion(t *testing.T) {
 // is and once with the authority section stripped in transit.
 func TestWildcard_NetResolverCarriesTheAuthoritySection(t *testing.T) {
 	z := newWildZone(t)
-	z.tr.res.setMsg("a.whisper.online.", dns.TypeTXT, z.expansion(t, "a.whisper.online."),
+	z.tr.res.setWildMsg("a.whisper.online.", dns.TypeTXT, z.expansion(t, "a.whisper.online."),
 		z.signed(t, z.w, nsecRR("*.whisper.online.", "b.whisper.online.")))
 	serve := func(strip bool) string {
 		return deepentrustverify_startDNSServer(t, dns.HandlerFunc(func(w dns.ResponseWriter, req *dns.Msg) {
@@ -553,7 +553,7 @@ func TestWildcard_NSEC3ProofVerificationsAreBounded(t *testing.T) {
 		sig.KeyTag = z.w.zsk.dnskey.KeyTag()
 		ns = append(ns, n3, sig)
 	}
-	z.tr.res.setMsg("a.whisper.online.", dns.TypeTXT, z.expansion(t, "a.whisper.online."), ns)
+	z.tr.res.setWildMsg("a.whisper.online.", dns.TypeTXT, z.expansion(t, "a.whisper.online."), ns)
 	v := z.tr.validator(z.tr.res)
 	_, err := v.ValidateRRSet(context.Background(), "a.whisper.online.", dns.TypeTXT)
 	if !isCapError(err) {
@@ -604,8 +604,8 @@ func TestNSECCovers(t *testing.T) {
 		{"c.example.", "example.", "d.example.", true}, // the last NSEC wraps to the apex
 		{"c.example.", "example.", "b.example.", false},
 	} {
-		if got := nsecCovers(c.owner, c.next, c.name); got != c.want {
-			t.Errorf("nsecCovers(%s, %s, %s) = %v, want %v", c.owner, c.next, c.name, got, c.want)
+		if got := nsecCoversName(c.owner, c.next, c.name); got != c.want {
+			t.Errorf("nsecCoversName(%s, %s, %s) = %v, want %v", c.owner, c.next, c.name, got, c.want)
 		}
 	}
 }
@@ -628,7 +628,7 @@ func TestDenialHelpers_EdgeCases(t *testing.T) {
 	if packs(strings.Repeat("x", 64) + ".") {
 		t.Error("a 64-octet label must not pack")
 	}
-	if nsecCovers("a.example.", strings.Repeat("x", 64)+".example.", "b.example.") {
+	if nsecCoversName("a.example.", strings.Repeat("x", 64)+".example.", "b.example.") {
 		t.Error("an interval with an end that does not pack must cover nothing")
 	}
 }
@@ -699,7 +699,7 @@ func TestWildcard_ProofIsWorkedOutOncePerZone(t *testing.T) {
 		sig.KeyTag = z.w.zsk.dnskey.KeyTag()
 		ns = append(ns, sig)
 	}
-	z.tr.res.setMsg("a.whisper.online.", dns.TypeTXT, ans, ns)
+	z.tr.res.setWildMsg("a.whisper.online.", dns.TypeTXT, ans, ns)
 	v := z.tr.validator(z.tr.res)
 	_, err := v.ValidateRRSet(context.Background(), "a.whisper.online.", dns.TypeTXT)
 	if err == nil || isCapError(err) || !strings.Contains(err.Error(), "is not signed by whisper.online.") {

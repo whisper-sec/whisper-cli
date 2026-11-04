@@ -88,9 +88,9 @@ func buildTxFixtureFor(t *testing.T, addr string) txFixture {
 	keyID := kh.Sum(nil)
 	blob := append(append([]byte{}, keyID[:4]...), ed25519.Sign(edPriv, []byte(body))...)
 	// The signature line prefix is U+2014 EM DASH, mandated by the C2SP signed-note format.
-	// It is a wire constant, not prose: an automated em-dash scrub over this tree would
-	// silently turn every valid checkpoint into an unverifiable one. Leave it exactly as is.
-	note := body + "\n— " + origin + " " + base64.StdEncoding.EncodeToString(blob) + "\n"
+	// It is a wire constant, not prose, so it is written as the escape: the same bytes at run
+	// time, and nothing an em-dash rewrite of the tree would find to turn into a hyphen.
+	note := body + "\n\u2014 " + origin + " " + base64.StdEncoding.EncodeToString(blob) + "\n"
 
 	obj := fmt.Sprintf(`{"object":"identity-transparency","address":"%s","count":1,`+
 		`"events":[{"event":%s,"proof":"%s","prev_proof":""}],`+
@@ -156,7 +156,7 @@ func TestTransparency_HappyPath(t *testing.T) {
 func TestTransparency_BadCheckpointSigFails(t *testing.T) {
 	fx := buildTxFixture(t)
 	// Corrupt the checkpoint signature base64 blob inside the note.
-	bad := strings.Replace(fx.obj, "— whisper.online/ledger ", "— whisper.online/ledger AAAA", 1)
+	bad := strings.Replace(fx.obj, "\u2014 whisper.online/ledger ", "\u2014 whisper.online/ledger AAAA", 1)
 	res := runTx(t, fx, bad)
 	if res.status != StatusFail {
 		t.Fatalf("expected FAIL for a corrupted checkpoint signature, got %s: %s", res.status, res.detail)

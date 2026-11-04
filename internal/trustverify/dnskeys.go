@@ -263,3 +263,14 @@ func crossCheckJWKS(ctx context.Context, f Fetcher, urls []string, anchored JWKS
 	}
 	return nil
 }
+
+// LedgerKeys are the transparency log's checkpoint keys as the DNSSEC-validated
+// _whisper-ledger.<zone> TXT RRset publishes them (zone "" is DefaultKeyAnchorZone): an anchor
+// for the log key that does not come from the log being checked.
+func (v *Validator) LedgerKeys(ctx context.Context, zone string) ([]client.LedgerKey, error) {
+	keys, why := fetchDNSAnchoredKeys(ctx, v, zone)
+	if keys == nil || len(keys.Ledger) == 0 {
+		return nil, fmt.Errorf("no DNSSEC-anchored ledger key: %s", why)
+	}
+	return keys.Ledger, nil
+}
