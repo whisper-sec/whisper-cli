@@ -12,11 +12,15 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	osuser "os/user"
 	"path/filepath"
 	"runtime"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/miekg/dns"
 	"github.com/spf13/cobra"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
@@ -43,6 +47,19 @@ const sshAuthzBudget = 15 * time.Second
 // operator's own sshd_config is never edited.
 const sshAuthzSnippetPath = "/etc/ssh/sshd_config.d/50-whisper-ssh-authz.conf"
 
+// sshAuthzFleetsPath is where `install --write` keeps the fleet set it read from the roster.
+// Per-agent tenancy gives every hosted agent its own tenant, so an owner's fleet is a list of
+// zones; a file keeps sshd's command line short however long the list grows, and a refresh
+// rewrites the file without touching sshd's configuration (sshd runs the check per login).
+const sshAuthzFleetsPath = "/etc/ssh/whisper-ssh-authz.fleets"
+
+// sshAuthzFleetsMax bounds what check reads from the fleets file, so a file that grew wrong
+// is refused rather than read without end.
+const (
+	sshAuthzFleetsMaxBytes = 256 << 10
+	sshAuthzFleetsMaxLines = 4096
+)
+
 // Seams, so the tests can stand in for the network, the host and the log.
 var (
 	sshAuthzLookup = func(resolver string) whale.AuthzLookup {
@@ -55,6 +72,31 @@ var (
 	sshAuthzExecutable = os.Executable
 	// sshAuthzSshdTest proves sshd accepts the configuration (-t) and returns the effective
 	// configuration it would run with (-T), so install can check its lines are the ones in force.
+	// sshAuthzPathUnsafe is sshd's own safe_path rule (root-owned, writable by nobody else, along
+	// the whole path), applied to the fleets file the check reads.
+	sshAuthzPathUnsafe = commandPathUnsafe
+	// sshAuthzRoster reads the owner's agents, the same op:list `whale status` lists peers from.
+	sshAuthzRoster = func(cx context.Context) ([]whalePeer, error) {
+		c, err := resolveClient(false, false)
+		if err != nil {
+			return nil, err
+		}
+		if c == nil || c.Credential().IsZero() {
+			return nil, errors.New("no key in effect on this host")
+		}
+		return whaleFleet(cx, c)
+	}
+	sshAuthzSelfFleet = sshAuthzOwnFleet
+	// sshAuthzGroupOf is the primary group of the account sshd runs the check as, which the
+	// fleets file is readable by (and nobody else but root).
+	sshAuthzGroupOf = func(name string) (int, error) {
+		u, err := osuser.Lookup(name)
+		if err != nil {
+			return 0, err
+		}
+		return strconv.Atoi(u.Gid)
+	}
+	sshAuthzFchown   = func(f *os.File, uid, gid int) error { return f.Chown(uid, gid) }
 	sshAuthzSshdTest = func(config string) (string, error) {
 		if out, err := exec.Command("sshd", "-t", "-f", config).CombinedOutput(); err != nil {
 			return "", fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
@@ -75,9 +117,11 @@ func newWhaleSSHAuthzCmd() *cobra.Command {
 			"AuthorizedKeysCommand. It admits a key only when the connection came from an\n" +
 			"active agent of your fleet and the key is that agent's own, both proven from the\n" +
 			"IANA DNSSEC root in this process:\n\n" +
-			"  - the caller's address has a validated PTR to a name in your fleet's zone,\n" +
-			"    and that name's validated AAAA points back at it;\n" +
-			"  - the name's whisper-id1 TXT says status=active, so a revoked agent stops;\n" +
+			"  - the caller's address has a validated PTR to a name directly in one of your\n" +
+			"    fleet's zones (each hosted agent has its own tenant, so install writes every\n" +
+			"    tenant your roster holds), and that name's validated AAAA points back at it;\n" +
+			"  - the name's whisper-id1 TXT says status=active and names the tenant the name\n" +
+			"    sits in, so a revoked agent stops;\n" +
 			"  - the offered key matches the name's SSHFP (its TLSA 3 1 1 pin only with --allow-tlsa).\n\n" +
 			"Anything less, including a lookup that times out or an unsigned answer, prints\n" +
 			"nothing and sshd says \"Permission denied\". sshd reads authorized_keys before it\n" +
@@ -95,27 +139,115 @@ func newWhaleSSHAuthzCmd() *cobra.Command {
 // sshAuthzFlags are the policy flags check and install share, so the snippet install writes
 // is exactly what check reads.
 type sshAuthzFlags struct {
-	fleet    string
-	allow    []string
-	users    []string
-	resolver string
-	tlsa     bool
+	fleet     []string
+	fleetFile string
+	allow     []string
+	users     []string
+	resolver  string
+	tlsa      bool
 }
 
 func (f *sshAuthzFlags) bind(cmd *cobra.Command) {
-	cmd.Flags().StringVar(&f.fleet, "fleet", "", "your fleet: its tenant (t...), its zone, or one of its node names (install finds it when omitted)")
+	cmd.Flags().StringSliceVar(&f.fleet, "fleet", nil, "a fleet whose agents may log in: a tenant (t...), its zone, or one of its node names (repeatable; install reads your roster when omitted)")
+	cmd.Flags().StringVar(&f.fleetFile, "fleet-file", "", "a root-owned file listing fleets, one per line (install writes "+sshAuthzFleetsPath+" from your roster)")
 	cmd.Flags().StringSliceVar(&f.allow, "allow", nil, "admit only these agents: a full name or its first label (repeatable; default every active agent of the fleet)")
 	cmd.Flags().StringSliceVar(&f.users, "user", nil, "the local accounts fleet agents may log in as (repeatable; default any account except root and uid 0)")
 	cmd.Flags().StringVar(&f.resolver, "resolver", "", "resolver to walk the DNSSEC chain through (default: the system resolvers, then public ones)")
 	cmd.Flags().BoolVar(&f.tlsa, "allow-tlsa", false, "also accept the agent's TLSA 3 1 1 pin when no SSHFP admits the key (it pins the TLS service's key, so whoever holds that can log in too)")
 }
 
+// policy is the set check enforces: every --fleet, and every line of --fleet-file. Both may
+// be given and are joined. A fleets file that cannot be trusted or read refuses the whole
+// policy, inline fleets included: a set with a hole in it is not the set the operator wrote.
 func (f *sshAuthzFlags) policy() (whale.AuthzPolicy, error) {
-	zone, tenant, err := whale.NormalizeFleet(f.fleet)
+	raw := nonBlank(f.fleet)
+	if p := strings.TrimSpace(f.fleetFile); p != "" {
+		lines, err := readSSHAuthzFleets(p)
+		if err != nil {
+			return whale.AuthzPolicy{}, fmt.Errorf("--fleet-file: %v", err)
+		}
+		raw = append(raw, lines...)
+	}
+	fleets, err := whale.ParseFleets(raw)
 	if err != nil {
 		return whale.AuthzPolicy{}, fmt.Errorf("--fleet: %v", err)
 	}
-	return whale.AuthzPolicy{Fleet: zone, Tenant: tenant, Allow: nonBlank(f.allow), Users: nonBlank(f.users), AllowTLSA: f.tlsa}, nil
+	return whale.AuthzPolicy{Fleets: fleets, Allow: nonBlank(f.allow), Users: nonBlank(f.users), AllowTLSA: f.tlsa}, nil
+}
+
+// policyWithout is the policy install writes into the command line. With a fleets file the
+// fleets live in the file, which check reads per login, and the line names only the file.
+func (f *sshAuthzFlags) policyWithout(file string) (whale.AuthzPolicy, error) {
+	if file != "" {
+		f.fleetFile = file
+		return whale.AuthzPolicy{Allow: nonBlank(f.allow), Users: nonBlank(f.users), AllowTLSA: f.tlsa}, nil
+	}
+	return f.policy()
+}
+
+// readSSHAuthzFleets reads the fleets file the way sshd reads its own command: only when root
+// owns it and nothing on its path can be written by anyone else, and only a regular file of a
+// bounded size. Anything else is an error, which check turns into a denial with the reason.
+func readSSHAuthzFleets(path string) ([]string, error) {
+	real, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %v", path, err)
+	}
+	li, err := os.Lstat(real)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %v", path, err)
+	}
+	if !li.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if why := sshAuthzPathUnsafe(real); why != "" {
+		return nil, fmt.Errorf("%s cannot be trusted: %s", path, why)
+	}
+	fh, err := os.Open(real)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %v", path, err)
+	}
+	defer fh.Close()
+	fi, err := fh.Stat()
+	if err != nil || !os.SameFile(li, fi) {
+		return nil, fmt.Errorf("%s changed while it was being read", path)
+	}
+	if fi.Size() > sshAuthzFleetsMaxBytes {
+		return nil, fmt.Errorf("%s is %d bytes, more than a fleets file ever needs (%d)", path, fi.Size(), sshAuthzFleetsMaxBytes)
+	}
+	b, err := io.ReadAll(io.LimitReader(fh, sshAuthzFleetsMaxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("cannot read %s: %v", path, err)
+	}
+	return parseSSHAuthzFleets(path, b)
+}
+
+// parseSSHAuthzFleets reads one fleet per line. Blank lines and # comments are skipped, a
+// leading byte-order mark and CRLF line ends are tolerated, and a file that names no fleet at
+// all is an error: an empty set would admit nobody without saying why.
+func parseSSHAuthzFleets(path string, b []byte) ([]string, error) {
+	text := strings.TrimPrefix(string(b), "\ufeff")
+	var out []string
+	for i, line := range strings.Split(text, "\n") {
+		if i >= sshAuthzFleetsMaxLines {
+			return nil, fmt.Errorf("%s has more than %d lines", path, sshAuthzFleetsMaxLines)
+		}
+		if c := strings.IndexByte(line, '#'); c >= 0 {
+			line = line[:c]
+		}
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, _, err := whale.NormalizeFleet(line); err != nil {
+			return nil, fmt.Errorf("%s line %d: %v", path, i+1, err)
+		}
+		out = append(out, line)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("%s names no fleet", path)
+	}
+	return out, nil
 }
 
 func newWhaleSSHAuthzCheckCmd() *cobra.Command {
@@ -124,7 +256,8 @@ func newWhaleSSHAuthzCheckCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "check <user> <key-type> <base64-key> <%C...>",
 		Short: "sshd's AuthorizedKeysCommand: print the key line to admit, or nothing",
-		Long: "Run by sshd as `whisper whale ssh-authz check --fleet <fleet> -- %u %t %k %C`.\n" +
+		Long: "Run by sshd as `whisper whale ssh-authz check --fleet-file <file> -- %u %t %k %C`\n" +
+			"(or with --fleet, repeatable, naming the fleets inline).\n" +
 			"Prints exactly one authorized_keys line when the key belongs to an active agent of\n" +
 			"the fleet that the connection really came from, and nothing otherwise. A denial\n" +
 			"exits 0 with no output, so sshd simply moves on; the reason goes to the auth log.\n\n" +
@@ -332,23 +465,21 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 			sshAuthzSnippetPath + ", checks the result with `sshd -t`, and takes\n" +
 			"the file back out if sshd rejects it. It never reloads sshd; it prints the one\n" +
 			"command that does.\n\n" +
-			"The fleet is this node's own, found from its validated name, unless --fleet names\n" +
-			"it. sshd only runs a command that root owns and nobody else can write, along its\n" +
+			"Which agents may log in: every agent of your account. Each hosted agent has its own\n" +
+			"tenant (the t... label in its name), so install reads your roster with this host's\n" +
+			"key, the same list `whisper whale status` shows, and writes the tenants to\n" +
+			sshAuthzFleetsPath + " (root-owned, readable only by root and the account\n" +
+			"sshd runs the check as). Run `install --write` again after you add an agent: it\n" +
+			"rewrites that list, and sshd picks it up at the next login with no reload. Each\n" +
+			"login is still proven from DNSSEC, so a revoked agent is refused at once.\n\n" +
+			"--fleet names the fleets yourself instead (repeatable; a tenant, a zone, or a node\n" +
+			"name), written into the command line; --allow narrows any of this to named agents.\n" +
+			"With no key and no --fleet, only this node's own tenant is admitted, and install\n" +
+			"says so.\n\n" +
+			"sshd only runs a command that root owns and nobody else can write, along its\n" +
 			"whole path, so install refuses a binary that would be ignored and says where to put it.",
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if strings.TrimSpace(f.fleet) == "" {
-				fleet, err := sshAuthzOwnFleet()
-				if err != nil {
-					return &client.ProblemError{Status: 400, Title: "cannot tell which fleet this node is in", Detail: err.Error() +
-						". Name it: `whisper whale ssh-authz install --fleet <tenant>` (the t... label in your node's name, which `whisper whale status` shows)"}
-				}
-				f.fleet = fleet
-			}
-			pol, err := f.policy()
-			if err != nil {
-				return usageErr("%v", err)
-			}
 			// The snippet names the path as invoked (a stable /usr/local/bin link survives an
 			// upgrade that moves its target); sshd checks the resolved file, and so does this.
 			bin, err := sshAuthzExecutable()
@@ -359,14 +490,38 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 			if r, rerr := filepath.EvalSymlinks(bin); rerr == nil {
 				real = r
 			}
-			if err := checkSnippetValues(bin, f, cmdUser); err != nil {
+			fleetsPath := strings.TrimSpace(f.fleetFile)
+			if fleetsPath == "" {
+				fleetsPath = sshAuthzFleetsPath
+			}
+			plan, err := planSSHAuthzFleets(&f, fleetsPath)
+			if err != nil {
+				return err
+			}
+			pol, err := f.policyWithout(plan.file)
+			if err != nil {
+				return usageErr("%v", err)
+			}
+			if err := checkSnippetValues(bin, f, cmdUser, plan.file); err != nil {
 				return usageErr("%v", err)
 			}
 			snippet := sshAuthzSnippet(bin, pol, f, cmdUser)
+			for _, n := range plan.notes {
+				whaleNote("%s", n)
+			}
 			if !write {
 				fmt.Fprint(os.Stdout, snippet)
+				if plan.file != "" {
+					fmt.Fprintf(os.Stdout, "# %s (root-owned, mode 0640, group of %s):\n", plan.file, orNobody(cmdUser))
+					for _, l := range strings.Split(strings.TrimRight(plan.content, "\n"), "\n") {
+						fmt.Fprintf(os.Stdout, "#   %s\n", l)
+					}
+				}
 				if why := commandPathUnsafe(real); why != "" {
 					whaleNote("sshd will ignore this command as it stands: %s", why)
+					for _, line := range strings.Split(sshAuthzPlacementHint(real, hostPlacementProbe()), "\n") {
+						whaleNote("%s", line)
+					}
 				}
 				whaleNote("write it with: sudo whisper whale ssh-authz install --write")
 				return nil
@@ -379,9 +534,21 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 			}
 			if why := commandPathUnsafe(real); why != "" {
 				return &client.ProblemError{Status: 409, Title: "sshd would ignore this command",
-					Detail: why + ". Install the binary somewhere root owns, such as /usr/local/bin, and run this again from there."}
+					Detail: why + ". " + sshAuthzPlacementHint(real, hostPlacementProbe())}
 			}
-			return writeSSHAuthzSnippet(os.Stdout, path, snippet, sshAuthzCommandLine(bin, pol, f), orNobody(cmdUser))
+			restore := func() {}
+			if plan.file != "" {
+				restore, err = writeSSHAuthzFleets(plan.file, plan.content, orNobody(cmdUser))
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stdout, "wrote %s: %d fleet(s) from your roster\n", plan.file, plan.count)
+			}
+			if err := writeSSHAuthzSnippet(os.Stdout, path, snippet, sshAuthzCommandLine(bin, pol, f), orNobody(cmdUser)); err != nil {
+				restore()
+				return err
+			}
+			return nil
 		},
 	}
 	f.bind(cmd)
@@ -391,10 +558,179 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 	return cmd
 }
 
+// sshAuthzFleetPlan is what install decided the fleet set is, and where it goes.
+type sshAuthzFleetPlan struct {
+	file    string // the fleets file to write and name with --fleet-file; "" when the fleets go inline
+	content string // that file's bytes
+	count   int
+	notes   []string
+}
+
+// planSSHAuthzFleets decides the fleet set. --fleet named by hand goes inline, as written.
+// Otherwise the owner's roster, read with this host's key, gives every hosted tenant the
+// account holds, written to the fleets file. Only a hosted tenant zone is ever taken from the
+// roster: a name in a domain of the account's own would make that domain's whole zone a
+// fleet, and that is a decision for the operator to write with --fleet, never one to infer.
+//
+// When the roster cannot be read, a refresh (a fleets file is already there) refuses and keeps
+// the file, so a control-plane hiccup never narrows a working fleet to one node. A first
+// install falls back to this node's own tenant, inline, and says that is all it admits.
+func planSSHAuthzFleets(f *sshAuthzFlags, fleetsPath string) (sshAuthzFleetPlan, error) {
+	if !snippetValue(fleetsPath) || !(strings.HasPrefix(fleetsPath, "/") || filepath.IsAbs(fleetsPath)) {
+		return sshAuthzFleetPlan{}, usageErr("--fleet-file %q cannot go into sshd_config as it is: name an absolute path "+
+			"of letters, digits and . _ - : @ + / only", fleetsPath)
+	}
+	if len(nonBlank(f.fleet)) > 0 {
+		return sshAuthzFleetPlan{}, nil
+	}
+	cx, cancel := ctx()
+	defer cancel()
+	peers, rerr := sshAuthzRoster(cx)
+	zones := sshAuthzRosterZones(peers)
+	if rerr == nil && len(zones) > 0 {
+		content := sshAuthzFleetsContent(zones)
+		if _, err := parseSSHAuthzFleets(fleetsPath, []byte(content)); err != nil {
+			return sshAuthzFleetPlan{}, fmt.Errorf("the fleet set read from your roster does not parse: %v", err)
+		}
+		return sshAuthzFleetPlan{file: fleetsPath, content: content, count: len(zones),
+			notes: []string{fmt.Sprintf("your roster holds %d agent tenant(s); every active agent among them may log in", len(zones))}}, nil
+	}
+	why := "it lists no hosted agent"
+	if rerr != nil {
+		why = friendly(rerr)
+	}
+	if _, err := os.Lstat(fleetsPath); err == nil {
+		return sshAuthzFleetPlan{}, &client.ProblemError{Status: 503, Title: "cannot refresh the fleet set",
+			Detail: "your roster could not be read (" + why + "), so " + fleetsPath + " was left as it is rather than " +
+				"narrowed. Run this again when `whisper whale status` lists your fleet, or name the fleets with --fleet"}
+	}
+	fleet, err := sshAuthzSelfFleet()
+	if err != nil {
+		return sshAuthzFleetPlan{}, &client.ProblemError{Status: 400, Title: "cannot tell which fleet this node is in", Detail: "your roster " +
+			"could not be read (" + why + ") and " + err.Error() + ". Name it: `whisper whale ssh-authz install --fleet <tenant>` " +
+			"(the t... label in your node's name, which `whisper whale status` shows)"}
+	}
+	// The fleets path named the file a roster would have filled; with no roster there is
+	// nothing to put in it, so the command line names only the node's own tenant.
+	f.fleet, f.fleetFile = []string{fleet}, ""
+	return sshAuthzFleetPlan{notes: []string{"your roster could not be read (" + why + "), so only this node's own tenant, " +
+		strings.TrimSuffix(fleet, ".") + ", may log in; with a key on this host, run install again to admit the rest of your agents"}}, nil
+}
+
+// sshAuthzRosterZones is the sorted, de-duplicated set of hosted tenant zones the roster's
+// agents sit in. An agent whose state says it is no longer live is left out; one that says
+// nothing is kept, because every login still proves status=active from its own record.
+func sshAuthzRosterZones(peers []whalePeer) []string {
+	seen := map[string]bool{}
+	var zones []string
+	for _, p := range peers {
+		if st := strings.ToLower(strings.TrimSpace(p.State)); st != "" && st != "active" {
+			continue
+		}
+		parent := agentDomain(p.FQDN)
+		if _, ok := whale.HostedTenantZone(parent); !ok {
+			continue
+		}
+		z := strings.TrimSuffix(dns.CanonicalName(dns.Fqdn(parent)), ".")
+		if !seen[z] {
+			seen[z] = true
+			zones = append(zones, z)
+		}
+	}
+	sort.Strings(zones)
+	return zones
+}
+
+// sshAuthzFleetsContent is the fleets file. It carries no time stamp, so the same roster
+// writes the same bytes and a refresh that changed nothing changes nothing.
+func sshAuthzFleetsContent(zones []string) string {
+	var b strings.Builder
+	b.WriteString("# Written by `whisper whale ssh-authz install` from your roster: the tenants your agents\n")
+	b.WriteString("# sit in. An agent here logs in only while DNSSEC proves it active and the key its own.\n")
+	b.WriteString("# Refresh after adding an agent: sudo whisper whale ssh-authz install --write\n")
+	for _, z := range zones {
+		b.WriteString(z + "\n")
+	}
+	return b.String()
+}
+
+// writeSSHAuthzFleets puts the fleets file in place atomically: written, owned by root and the
+// check's group, mode 0640 and synced before the rename, so sshd never reads a half-written or
+// wrongly owned file. It then reads the file back through check's own reader, so install never
+// leaves a file check would refuse. It returns how to put back what was there before.
+func writeSSHAuthzFleets(path, content, cmdUser string) (func(), error) {
+	gid, err := sshAuthzGroupOf(cmdUser)
+	if err != nil {
+		return nil, fmt.Errorf("cannot find the group of %q, the account sshd runs the check as, so %s cannot be made "+
+			"readable to it without making it readable to everyone (it links your agents' tenants): %v. Name the account "+
+			"with --command-user", cmdUser, path, err)
+	}
+	prev, prevErr := os.ReadFile(path)
+	dir := filepath.Dir(path)
+	if why := sshAuthzPathUnsafe(dir); why != "" {
+		return nil, &client.ProblemError{Status: 409, Title: "check would not trust the fleets file there",
+			Detail: why + ". Name a root-owned place with --fleet-file, such as " + sshAuthzFleetsPath}
+	}
+	put := func(b []byte) error {
+		tmp, err := os.CreateTemp(dir, ".whisper-ssh-authz-*.tmp")
+		if err != nil {
+			return err
+		}
+		name := tmp.Name()
+		defer os.Remove(name) // a no-op after the rename
+		fail := func(err error) error { _ = tmp.Close(); return err }
+		if _, err := tmp.Write(b); err != nil {
+			return fail(err)
+		}
+		if err := sshAuthzFchown(tmp, 0, gid); err != nil {
+			return fail(err)
+		}
+		if err := tmp.Chmod(0o640); err != nil {
+			return fail(err)
+		}
+		if err := tmp.Sync(); err != nil {
+			return fail(err)
+		}
+		if err := tmp.Close(); err != nil {
+			return err
+		}
+		if err := os.Rename(name, path); err != nil {
+			return err
+		}
+		if d, err := os.Open(dir); err == nil {
+			_ = d.Sync()
+			_ = d.Close()
+		}
+		return nil
+	}
+	restore := func() {
+		if prevErr == nil {
+			_ = put(prev)
+		} else {
+			_ = os.Remove(path)
+		}
+	}
+	if err := put([]byte(content)); err != nil {
+		return nil, fmt.Errorf("cannot write %s: %w", path, err)
+	}
+	if _, err := readSSHAuthzFleets(path); err != nil {
+		restore()
+		return nil, &client.ProblemError{Status: 409, Title: "check would refuse the fleets file, so nothing was changed",
+			Detail: err.Error()}
+	}
+	return restore, nil
+}
+
 // sshAuthzCommandLine is the AuthorizedKeysCommand. Only what the operator chose is written,
 // so the command line in the file is the policy, readable at a glance.
 func sshAuthzCommandLine(bin string, pol whale.AuthzPolicy, f sshAuthzFlags) string {
-	args := []string{bin, "whale", "ssh-authz", "check", "--fleet", strings.TrimSuffix(pol.Fleet, ".")}
+	args := []string{bin, "whale", "ssh-authz", "check"}
+	if p := strings.TrimSpace(f.fleetFile); p != "" {
+		args = append(args, "--fleet-file", p)
+	}
+	for _, fl := range pol.Fleets {
+		args = append(args, "--fleet", strings.TrimSuffix(fl.Zone, "."))
+	}
 	for _, a := range pol.Allow {
 		args = append(args, "--allow", a)
 	}
@@ -435,7 +771,7 @@ func snippetValue(v string) bool {
 	return true
 }
 
-func checkSnippetValues(bin string, f sshAuthzFlags, cmdUser string) error {
+func checkSnippetValues(bin string, f sshAuthzFlags, cmdUser, fleetsFile string) error {
 	check := func(what, v string) error {
 		if !snippetValue(v) {
 			return fmt.Errorf("%s %q cannot go into sshd_config as it is: use letters, digits and . _ - : @ + / only "+
@@ -445,6 +781,20 @@ func checkSnippetValues(bin string, f sshAuthzFlags, cmdUser string) error {
 	}
 	if err := check("the binary path", bin); err != nil {
 		return err
+	}
+	for _, fl := range nonBlank(f.fleet) {
+		if err := check("--fleet", fl); err != nil {
+			return err
+		}
+	}
+	if p := strings.TrimSpace(fleetsFile); p != "" {
+		if err := check("--fleet-file", p); err != nil {
+			return err
+		}
+	} else if p := strings.TrimSpace(f.fleetFile); p != "" {
+		if err := check("--fleet-file", p); err != nil {
+			return err
+		}
 	}
 	for _, a := range nonBlank(f.allow) {
 		if err := check("--allow", a); err != nil {
@@ -570,21 +920,28 @@ func sshReloadCommand() string {
 // every directory above it must be owned by root and writable by nobody else. "" when it is
 // fine, or when the platform does not say who owns a file.
 func commandPathUnsafe(bin string) string {
+	_, why := commandPathRefusal(bin)
+	return why
+}
+
+// commandPathRefusal is commandPathUnsafe with the element that failed: the first one along
+// the path, from bin up, that sshd's safe_path would refuse. ("", "") when none does.
+func commandPathRefusal(bin string) (at, why string) {
 	for p := bin; ; p = filepath.Dir(p) {
 		fi, err := os.Stat(p)
 		if err != nil {
-			return fmt.Sprintf("cannot read %s (%v)", p, err)
+			return p, fmt.Sprintf("cannot read %s (%v)", p, err)
 		}
 		uid, ok := fileOwnerUID(fi)
 		if ok && uid != 0 {
-			return fmt.Sprintf("%s is not owned by root", p)
+			return p, fmt.Sprintf("%s is not owned by root", p)
 		}
 		// sshd's own check (safe_path) makes no exception for a sticky directory such as /tmp.
 		if fi.Mode().Perm()&0o022 != 0 {
-			return fmt.Sprintf("%s can be written by accounts other than its owner", p)
+			return p, fmt.Sprintf("%s can be written by accounts other than its owner", p)
 		}
 		if parent := filepath.Dir(p); parent == p {
-			return ""
+			return "", ""
 		}
 	}
 }

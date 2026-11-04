@@ -26,13 +26,35 @@ import (
 // start (the saved identity had been removed from the account) nothing on the machine said why:
 // the panel said "not connected, run: whisper connect", which was the command failing.
 
-// init points the record at the null device for every test in this package. Plenty of connect
-// tests fail on purpose without isolating HOME, and each failure writes a record; none of them
-// may write into the home of whoever runs the suite, and none may leave a record behind for an
-// unrelated test to read (a panel test once read a usage error another test had recorded). A
-// write there vanishes and a read finds nothing. A test that wants a record uses refusalAt.
+// init turns the record off for every test in this package. Plenty of connect tests fail on
+// purpose without isolating HOME, and each failure writes a record; none of them may write into
+// the home of whoever runs the suite, and none may leave a record behind for an unrelated test
+// to read (a panel test once read a usage error another test had recorded). "" is production's
+// own "no home" value: nothing is written, a read finds nothing and a clear removes nothing. It
+// used to be the null device, and clearConnectRefusal's os.Remove unlinked /dev/null whenever
+// the suite ran as root. A test that wants a record uses refusalAt.
 func init() {
-	connectRefusalFile = func() string { return os.DevNull }
+	connectRefusalFile = func() string { return "" }
+}
+
+// The package's default record must never name a file that is not the record's own: a connect
+// that holds a session clears the record, and a clear is an unlink.
+func TestTheTestDefaultRecordNamesNoFileAClearCouldRemove(t *testing.T) {
+	if p := connectRefusalFile(); p != "" {
+		t.Fatalf("the test default record is %q; it must be \"\" so a clear unlinks nothing", p)
+	}
+	before, err := os.Lstat(os.DevNull)
+	writeConnectRefusal(connectRefusal{Reason: "a refusal"})
+	clearConnectRefusal()
+	if _, ok := readConnectRefusal(); ok {
+		t.Fatal("with no record file a read must find nothing")
+	}
+	if err == nil {
+		after, aerr := os.Lstat(os.DevNull)
+		if aerr != nil || after.Mode() != before.Mode() {
+			t.Fatalf("%s changed under a write and a clear: before %v, after %v (%v)", os.DevNull, before.Mode(), after, aerr)
+		}
+	}
 }
 
 // refusalAt gives one test its own record file and returns its path.

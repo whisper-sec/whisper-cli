@@ -243,7 +243,9 @@ func refusalFixable(r connectRefusal, saved, markerPath string) bool {
 // clearConnectRefusal removes the record. Called the moment a connect holds a session, so the
 // panel never shows a refusal beside a working connection.
 func clearConnectRefusal() {
-	_ = os.Remove(connectRefusalFile())
+	if path := connectRefusalFile(); path != "" {
+		_ = os.Remove(path)
+	}
 }
 
 // connectRefusedError is what a failed connect returns once its refusal is recorded. When the

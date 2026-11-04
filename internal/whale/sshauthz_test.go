@@ -123,7 +123,7 @@ func fleetAgent(t *testing.T, k agentKey) *fakeLookup {
 	return f
 }
 
-func pol() AuthzPolicy { return AuthzPolicy{Fleet: tZone, Tenant: tFleet} }
+func pol() AuthzPolicy { return AuthzPolicy{Fleets: []AuthzFleet{{Zone: tZone, Tenant: tFleet}}} }
 
 func req(k agentKey) AuthzRequest {
 	return AuthzRequest{User: "deploy", KeyType: k.typ, Key: k.b64, Source: netip.MustParseAddr(tSource)}
@@ -476,6 +476,241 @@ func TestNormalizeFleetReadsWhatPeopleType(t *testing.T) {
 	for _, bad := range []string{"", "  ", "agents.whisper.online", "a..b", "*.example.com", "a b", "x/y"} {
 		if z, _, err := NormalizeFleet(bad); err == nil {
 			t.Errorf("NormalizeFleet(%q) = %q, want a refusal", bad, z)
+		}
+	}
+}
+
+// --- a fleet of several tenants ----------------------------------------------
+
+// A second agent of the same owner, in its own tenant, as per-agent tenancy names it.
+const (
+	tFleet2  = "tsecond"
+	tZone2   = "tsecond.agents.whisper.online."
+	tName2   = "mac-01.tsecond.agents.whisper.online."
+	tSource2 = "2a04:2a01:9::e2"
+)
+
+// secondAgent publishes an active agent at tSource2 in tenant tFleet2, whose key is k.
+func secondAgent(t *testing.T, f *fakeLookup, k agentKey, txtTenant string) {
+	t.Helper()
+	rev, _ := dns.ReverseAddr(tSource2)
+	f.add(t, rev+" 60 IN PTR "+tName2)
+	f.add(t, tName2+" 60 IN AAAA "+tSource2)
+	f.add(t, tName2+` 60 IN TXT "whisper-id1 status=active label=mac-01 tenant=`+txtTenant+`"`)
+	f.add(t, tName2+" 60 IN SSHFP 3 2 "+k.sshfp)
+}
+
+func twoFleets() AuthzPolicy {
+	return AuthzPolicy{Fleets: []AuthzFleet{{Zone: tZone, Tenant: tFleet}, {Zone: tZone2, Tenant: tFleet2}}}
+}
+
+func req2(k agentKey) AuthzRequest {
+	r := req(k)
+	r.Source = netip.MustParseAddr(tSource2)
+	return r
+}
+
+// The bug in an owner's agents each sit in their own tenant, and a node pinned to one
+// tenant refused every other. With both tenants in the set, both log in.
+func TestEveryTenantInTheSetIsAdmitted(t *testing.T) {
+	k1, k2 := newECDSAKey(t), newECDSAKey(t)
+	f := fleetAgent(t, k1)
+	secondAgent(t, f, k2, tFleet2)
+	if d := Authorize(context.Background(), f, twoFleets(), req(k1)); !d.Admit {
+		t.Fatalf("the first tenant's agent was refused: %+v", d)
+	}
+	d := Authorize(context.Background(), f, twoFleets(), req2(k2))
+	if !d.Admit || d.Name != strings.TrimSuffix(tName2, ".") {
+		t.Fatalf("the second tenant's agent was refused: %+v", d)
+	}
+	// One agent's key never logs in as the other, whichever tenant it sits in.
+	mustDeny(t, Authorize(context.Background(), f, twoFleets(), req2(k1)), "not mac-01.tsecond.agents.whisper.online's published key")
+}
+
+func TestATenantOutsideTheSetIsRefused(t *testing.T) {
+	k1, k2 := newECDSAKey(t), newECDSAKey(t)
+	f := fleetAgent(t, k1)
+	secondAgent(t, f, k2, tFleet2)
+	mustDeny(t, Authorize(context.Background(), f, pol(), req2(k2)), "is not a member of tfleet.agents.whisper.online")
+}
+
+// The tenant a record names must be the tenant of the zone the name sits in. A name in one
+// tenant whose record names ANOTHER tenant of the set is refused: the set is a list of zones,
+// each vouching only for itself, never a pool of tenants any record may name.
+func TestARecordNamingAnotherTenantOfTheSetIsRefused(t *testing.T) {
+	k1, k2 := newECDSAKey(t), newECDSAKey(t)
+	f := fleetAgent(t, k1)
+	secondAgent(t, f, k2, tFleet) // in tsecond, but its record says tfleet
+	mustDeny(t, Authorize(context.Background(), f, twoFleets(), req2(k2)),
+		"belongs to tenant tfleet, not to tsecond, the tenant its name sits in")
+}
+
+func TestARevokedAgentInASecondTenantIsRefused(t *testing.T) {
+	k1, k2 := newECDSAKey(t), newECDSAKey(t)
+	f := fleetAgent(t, k1)
+	secondAgent(t, f, k2, tFleet2)
+	f.rrs[key(tName2, dns.TypeTXT)] = nil
+	f.add(t, tName2+` 60 IN TXT "whisper-id1 status=revoked label=mac-01 tenant=`+tFleet2+`"`)
+	mustDeny(t, Authorize(context.Background(), f, twoFleets(), req2(k2)), "is revoked, not active")
+}
+
+// A name deeper in a tenant of the set is not a member of any of them, even when its parent
+// is one label under the agents zone.
+func TestADeeperNameIsNotAMemberOfAnyFleetInTheSet(t *testing.T) {
+	k := newECDSAKey(t)
+	f := fleetAgent(t, k)
+	rev, _ := dns.ReverseAddr(tSource)
+	f.rrs[key(rev, dns.TypePTR)] = nil
+	f.add(t, rev+" 60 IN PTR x.db-01.tsecond.agents.whisper.online.")
+	mustDeny(t, Authorize(context.Background(), f, twoFleets(), req(k)), "is not a member of")
+}
+
+// With a fleet in its own domain in the set, a caller outside the agent block may be a member
+// of it, so it is looked up; with only hosted tenants it is refused before any lookup.
+func TestTheAgentBlockPrefilterHoldsOnlyForAnAllHostedSet(t *testing.T) {
+	k := newECDSAKey(t)
+	p := twoFleets()
+	r := req(k)
+	r.Source = netip.MustParseAddr("2001:db8:aa::e1")
+	f := fleetAgent(t, k)
+	mustDeny(t, Authorize(context.Background(), f, p, r), "outside 2a04:2a01::/32")
+	if len(f.asked) != 0 {
+		t.Fatalf("an all-hosted set looked a stranger up: %v", f.asked)
+	}
+	p.Fleets = append(p.Fleets, AuthzFleet{Zone: "agents.example.com."})
+	f = fleetAgent(t, k)
+	mustDeny(t, Authorize(context.Background(), f, p, r), "PTR")
+	if len(f.asked) == 0 {
+		t.Fatal("a set with a fleet in its own domain refused without looking")
+	}
+}
+
+func TestParseFleetsReadsAListAndRefusesAHole(t *testing.T) {
+	got, err := ParseFleets([]string{"tfleet", "TFLEET.agents.whisper.online.", "db-01.tsecond.agents.whisper.online", "agents.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []AuthzFleet{{Zone: tZone, Tenant: tFleet}, {Zone: tZone2, Tenant: tFleet2}, {Zone: "agents.example.com."}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for _, bad := range [][]string{{"tfleet", "agents.whisper.online"}, {"tfleet", "bad name"}, {}, {"tfleet", "x/y.example.com"}} {
+		if _, err := ParseFleets(bad); err == nil {
+			t.Fatalf("%q parsed", bad)
+		}
+	}
+}
+
+// A fleet goes into sshd_config, so anything sshd would expand or split is refused, as is a
+// public suffix, under which anybody may register a name.
+func TestNormalizeFleetRefusesTokensAndPublicSuffixes(t *testing.T) {
+	for _, bad := range []string{"%u.example.com", "a%C.example.com", "-x.example.com", `x\032y.example.com`,
+		"x_y.example.com", "co.uk", "github.io", "co.uk.", "x-.example.com"} {
+		if z, _, err := NormalizeFleet(bad); err == nil {
+			t.Fatalf("%q normalised to %q", bad, z)
+		}
+	}
+	if z, _, err := NormalizeFleet("agents.example.co.uk"); err != nil || z != "agents.example.co.uk." {
+		t.Fatalf("a registrable fleet was refused: %q %v", z, err)
+	}
+}
+
+func TestHostedTenantZoneIsExact(t *testing.T) {
+	good := "t0000000000000000000000000000c0de.agents.whisper.online"
+	if tn, ok := HostedTenantZone(good); !ok || tn != "t0000000000000000000000000000c0de" {
+		t.Fatalf("%q: %q %v", good, tn, ok)
+	}
+	for _, bad := range []string{"tfleet.agents.whisper.online", "agents.whisper.online", "x.t0000000000000000000000000000c0de.agents.whisper.online",
+		"t0000000000000000000000000000c0dz.agents.whisper.online", "t0000000000000000000000000000c0de.agents.example.com", ""} {
+		if _, ok := HostedTenantZone(bad); ok {
+			t.Fatalf("%q read as a hosted tenant zone", bad)
+		}
+	}
+}
+
+// A zone cut at the agent's own name would let it sign its own records; the signature must
+// come from the fleet's zone or above.
+func TestASignerAtTheNameItselfIsRefused(t *testing.T) {
+	k := newECDSAKey(t)
+	f := &signerOverride{fakeLookup: fleetAgent(t, k), signer: map[string]string{key(tName, dns.TypeTXT): tName}}
+	mustDeny(t, Authorize(context.Background(), f, pol(), req(k)), "is signed by db-01.tfleet.agents.whisper.online, not by tfleet.agents.whisper.online")
+	// A signature that names no signer proves no zone, so it is refused too.
+	f = &signerOverride{fakeLookup: fleetAgent(t, k), signer: map[string]string{key(tName, dns.TypeSSHFP): ""}}
+	mustDeny(t, Authorize(context.Background(), f, pol(), req(k)), "is signed by unknown")
+}
+
+type signerOverride struct {
+	*fakeLookup
+	signer map[string]string
+}
+
+func (s *signerOverride) Validated(ctx context.Context, name string, qtype uint16) ([]dns.RR, *dns.RRSIG, error) {
+	rrs, sig, err := s.fakeLookup.Validated(ctx, name, qtype)
+	if sig != nil {
+		if sn, ok := s.signer[key(name, qtype)]; ok {
+			sig.SignerName = sn
+		}
+	}
+	return rrs, sig, err
+}
+
+// A PTR to a literal wildcard owner is not an agent: its records can only ever come back
+// signed with one label fewer than the name has.
+func TestAPTRToAWildcardOwnerIsRefused(t *testing.T) {
+	k := newECDSAKey(t)
+	f := fleetAgent(t, k)
+	rev, _ := dns.ReverseAddr(tSource)
+	star := "*.tfleet.agents.whisper.online."
+	f.rrs[key(rev, dns.TypePTR)] = nil
+	f.add(t, rev+" 60 IN PTR "+star)
+	f.add(t, star+" 60 IN AAAA "+tSource)
+	f.labels = map[string]int{key(star, dns.TypeAAAA): dns.CountLabel(star) - 1}
+	mustDeny(t, Authorize(context.Background(), f, pol(), req(k)), "wildcard")
+}
+
+// In a set that holds a fleet in its own domain the up-front prefilter cannot run, so a name
+// that turns out to be in a hosted tenant is still refused for a source outside the agent block.
+func TestAHostedNameIsRefusedFromOutsideTheBlockInAMixedSet(t *testing.T) {
+	k := newECDSAKey(t)
+	stranger := "2001:db8:aa::e1"
+	f := &fakeLookup{}
+	rev, _ := dns.ReverseAddr(stranger)
+	f.add(t, rev+" 60 IN PTR "+tName)
+	f.add(t, tName+" 60 IN AAAA "+stranger)
+	f.add(t, tName+` 60 IN TXT "whisper-id1 status=active tenant=`+tFleet+`"`)
+	f.add(t, tName+" 60 IN SSHFP 3 2 "+k.sshfp)
+	p := pol()
+	p.Fleets = append(p.Fleets, AuthzFleet{Zone: "agents.example.com."})
+	r := req(k)
+	r.Source = netip.MustParseAddr(stranger)
+	mustDeny(t, Authorize(context.Background(), f, p, r), "where every agent of tfleet.agents.whisper.online lives")
+	for _, a := range f.asked {
+		if strings.HasPrefix(a, dns.CanonicalName(tName)) {
+			t.Fatalf("the hosted name was looked up for a stranger: %v", f.asked)
+		}
+	}
+}
+
+// Two in-fleet names, one revoked and one active, admit in either RRset order: every name is
+// tried in full, so the order cannot hide the active one.
+func TestARevokedNameCannotHideAnActiveOneInEitherOrder(t *testing.T) {
+	k := newECDSAKey(t)
+	old := "aaa.tsecond.agents.whisper.online."
+	for _, first := range []string{old, tName} {
+		f := fleetAgent(t, k)
+		rev, _ := dns.ReverseAddr(tSource)
+		f.rrs[key(rev, dns.TypePTR)] = nil
+		second := tName
+		if first == tName {
+			second = old
+		}
+		f.add(t, rev+" 60 IN PTR "+first)
+		f.add(t, rev+" 60 IN PTR "+second)
+		f.add(t, old+" 60 IN AAAA "+tSource)
+		f.add(t, old+` 60 IN TXT "whisper-id1 status=revoked tenant=`+tFleet2+`"`)
+		f.add(t, old+" 60 IN SSHFP 3 2 "+k.sshfp)
+		if d := Authorize(context.Background(), f, twoFleets(), req(k)); !d.Admit || d.Name != strings.TrimSuffix(tName, ".") {
+			t.Fatalf("first=%s: %+v", first, d)
 		}
 	}
 }

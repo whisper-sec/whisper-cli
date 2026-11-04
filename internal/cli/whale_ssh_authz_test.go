@@ -45,7 +45,7 @@ func (z authzZone) Validated(_ context.Context, name string, qtype uint16) ([]dn
 	if len(rrs) == 0 {
 		return nil, nil, fmt.Errorf("dnssec: no %s record for %s", dns.TypeToString[qtype], name)
 	}
-	return rrs, &dns.RRSIG{Labels: uint8(dns.CountLabel(name))}, nil
+	return rrs, &dns.RRSIG{Labels: uint8(dns.CountLabel(name)), SignerName: whale.AgentsZone}, nil
 }
 
 func (z authzZone) add(t *testing.T, s string) {
@@ -483,6 +483,11 @@ func TestInstallRefusesABinarySshdWouldIgnore(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "not owned by root") {
 		t.Fatalf("err = %v", err)
 	}
+	// On the real host, the place the refusal names next passes the same check.
+	if strings.Contains(err.Error(), "such as /usr/local/bin") {
+		t.Fatalf("the fixed hint is back: %v", err)
+	}
+	assertNeverSuggestsARefusedPlace(t, err.Error(), hostPlacementProbe())
 }
 
 func TestIncludesDropIns(t *testing.T) {

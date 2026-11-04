@@ -51,10 +51,12 @@ import (
 // StrictHostKeyChecking is yes, so the ONLY thing that can accept the host is a
 // DNSSEC-validated SSHFP. There is no trust-on-first-use path through this command.
 //
-// What this command does NOT decide is who may log in. That is the AuthorizedKeysCommand
-// and AuthorizedPrincipalsCommand reading a DNSSEC-signed ACL ON THE TARGET, and the denial
-// belongs in the target's auth log where an auditor can find it. `--explain` says where
-// that decision is made rather than implying this client makes it.
+// What this command does NOT decide is who may log in. That is `whisper whale ssh-authz
+// check`, the AuthorizedKeysCommand ON THE TARGET: it admits an active agent of the fleets
+// written into that host's sshd snippet (or its fleets file) whose key matches the agent's
+// DNSSEC-validated SSHFP, and the denial lands in the target's auth log where an auditor can
+// find it. It does not read the Whalenet ACL's ssh block. `--explain` says where that
+// decision is made, and what decides it, rather than implying this client makes it.
 
 // whaleSSHDefaultPort is the port ssh uses when nobody says otherwise.
 const whaleSSHDefaultPort = 22
@@ -78,9 +80,11 @@ func newWhaleSSHCmd() *cobra.Command {
 			"sets AD, and it would print a DNS match and then prompt you anyway.\n\n" +
 			"There is no trust-on-first-use here. If no SSHFP is published, or the offered key\n" +
 			"does not match one, the connection is refused and the message says which.\n\n" +
-			"Who may log in is decided ON the target by its authorized-keys command reading a\n" +
-			"DNSSEC-signed ACL, so a removed principal is denied there and the denial lands in\n" +
-			"the target's auth log. `--explain` names both halves without connecting.\n\n" +
+			"Who may log in is decided ON the target, by `whisper whale ssh-authz check`: an\n" +
+			"active agent of the fleets written into that host's sshd snippet, with its own key\n" +
+			"as its SSHFP publishes it, both proven from DNSSEC there. A revoked agent is denied\n" +
+			"and the denial lands in the target's auth log. `--explain` names both halves\n" +
+			"without connecting.\n\n" +
 			"The argument shape is ssh's own: anything after the destination is the remote\n" +
 			"command, and anything after -- is an ssh(1) option inserted before it.",
 		Args: cobra.MinimumNArgs(1),
@@ -305,23 +309,28 @@ func explainWhaleSSH(cx context.Context, c *client.Client, v whaleSSHVerificatio
 // the ACL document rather than guessing at it. A read that FAILED is reported as a failed
 // read, never as an absent policy: those are different facts and only one of them means
 // "nobody is authorised".
+//
+// What it names is what the target really checks: `whale ssh-authz check` admits an
+// active agent whose validated name sits directly in one of the fleets written into the
+// target's snippet or fleets file, offering the key its validated SSHFP publishes. The
+// Whalenet ACL's ssh block is stored, not compiled, and nothing on the target reads it, so
+// the note says so plainly when the account publishes one rather than implying it is enforced.
 func whaleSSHPrincipalNote(cx context.Context, c *client.Client) string {
-	const where = "who may log in is decided ON the target, by its authorized-keys command reading a DNSSEC-signed ACL; " +
-		"a denial appears in the target's auth log"
+	const where = "who may log in is decided ON the target, by `whisper whale ssh-authz check`: an active agent of " +
+		"the fleets written into that host's sshd snippet (refresh them there with `sudo whisper whale ssh-authz " +
+		"install --write`), offering the key its DNSSEC-validated SSHFP publishes; a denial appears in the target's auth log"
 	if c == nil || c.Credential().IsZero() {
-		return where + " (no key here, so your account's ssh ACL was not read)"
+		return where
 	}
 	env, err := c.Agents(cx, "policy", map[string]any{})
 	if err == nil {
 		err = envelopeError(env)
 	}
-	if err != nil {
-		return where + " - your account's ssh ACL COULD NOT BE READ (" + friendly(err) + "), which is not the same as it being empty"
+	if err == nil && sshACLPublished(env) {
+		return where + ". Your account publishes an ssh block in its Whalenet ACL; ssh-authz does not read it yet, " +
+			"so it changes nothing about who may log in"
 	}
-	if sshACLPublished(env) {
-		return where + ", and your account publishes an ssh block in its Whalenet ACL"
-	}
-	return where + ", and your account publishes no ssh block in its Whalenet ACL yet"
+	return where
 }
 
 // sshACLPublished looks for the `ssh` block of the Whalenet ACL in a policy read. It is

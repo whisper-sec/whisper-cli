@@ -473,9 +473,13 @@ func TestAHostKeyIsCheckableWithNoAccount(t *testing.T) {
 			t.Errorf("the keyless explanation is missing %q:\n%s", must, out)
 		}
 	}
-	// And it must say WHY the account half is missing rather than pretending it read one.
-	if !strings.Contains(out, "no key here") {
-		t.Errorf("a keyless run does not say that your account's ssh ACL was not read:\n%s", out)
+	// And it must name what really decides the login on the target: the ssh-authz
+	// check and the fleets written there, never an ACL nothing on the target reads.
+	if !strings.Contains(out, "whisper whale ssh-authz check") || !strings.Contains(out, "fleets written into that host's sshd snippet") {
+		t.Errorf("the explanation does not name the target's real login check:\n%s", out)
+	}
+	if strings.Contains(out, "reading a DNSSEC-signed ACL") {
+		t.Errorf("the explanation still says an ACL decides the login:\n%s", out)
 	}
 }
 

@@ -14,10 +14,12 @@ import (
 	"fmt"
 	"net/netip"
 	osuser "os/user"
+	"sort"
 	"strings"
 
 	"github.com/miekg/dns"
 	xssh "golang.org/x/crypto/ssh"
+	"golang.org/x/net/publicsuffix"
 
 	"github.com/whisper-sec/whisper-cli/internal/trustverify"
 )
@@ -30,12 +32,14 @@ import (
 // a fleet node needs no authorized_keys entry for a fleet agent. It needs to prove four things
 // from the IANA root, in this process, and to print the key line only when every one holds:
 //
-//  1. the address the connection came from has a validated PTR to a name directly inside this
-//     fleet's zone;
+//  1. the address the connection came from has a validated PTR to a name directly inside one
+//     of the fleet zones the operator wrote down (a hosted owner's agents each sit in their
+//     own tenant, so a fleet is a SET of zones, and every rule below holds per zone);
 //  2. that name's validated AAAA contains the address back (forward-confirmed reverse DNS), so
 //     an address outside the fleet cannot claim a fleet name by writing its own PTR;
 //  3. that name's validated whisper-id1 TXT says status=active and, for a hosted fleet, names
-//     this tenant, so a revoked agent stops logging in at the next answer's TTL;
+//     the tenant of the very zone the name sits in, so a revoked agent stops logging in at the
+//     next answer's TTL and one tenant's record never vouches for a name in another;
 //  4. the offered key hashes to the name's validated SSHFP type 2 (or, only when the operator
 //     opted in, to its TLSA 3 1 1 SPKI pin).
 //
@@ -63,13 +67,23 @@ func (l ValidatorLookup) Validated(ctx context.Context, name string, qtype uint1
 	return l.V.ValidateRRSetSigned(ctx, name, qtype)
 }
 
-// AuthzPolicy is what the node's operator decided, written into the sshd snippet.
-type AuthzPolicy struct {
-	// Fleet is the zone the fleet's agents are named in, canonical with a trailing dot.
-	Fleet string
-	// Tenant is the tenant label of a hosted fleet ("t..." under agents.whisper.online), which
-	// the whisper-id1 TXT must repeat. Empty for a fleet in its own domain.
+// AuthzFleet is one zone whose agents may log in.
+type AuthzFleet struct {
+	// Zone is where the agents are named, canonical with a trailing dot.
+	Zone string
+	// Tenant is the tenant label of a hosted zone ("t..." under agents.whisper.online), which
+	// the whisper-id1 TXT of a name in Zone must repeat. Empty for a fleet in its own domain.
 	Tenant string
+}
+
+// AuthzPolicy is what the node's operator decided, written into the sshd snippet or into the
+// fleets file the snippet names.
+type AuthzPolicy struct {
+	// Fleets are the zones whose agents may log in. Per-agent tenancy gives every hosted agent
+	// its own tenant label, so one owner's fleet is several zones; nothing in public DNS links
+	// them, and nothing here needs it to: the operator's own node holds the list. Order does
+	// not matter, and an empty set admits nobody.
+	Fleets []AuthzFleet
 	// Allow narrows the fleet to these agents: a full name or its first label, both read from
 	// the validated PTR. Never the label= a TXT carries: a label is a display name, and
 	// nothing makes it unique or keeps an agent from choosing another agent's.
@@ -128,8 +142,11 @@ func NormalizeFleet(raw string) (zone, tenant string, err error) {
 	if s == "" {
 		return "", "", errors.New("no fleet named")
 	}
-	if _, ok := dns.IsDomainName(s); !ok || strings.ContainsAny(s, " \t/@*") {
-		return "", "", fmt.Errorf("%q is not a DNS name", raw)
+	if _, ok := dns.IsDomainName(s); !ok || !ldhName(s) {
+		// Hostname syntax only: a fleet is written into sshd_config, where a % would be expanded
+		// (so `%u.example.com` would let the caller choose the zone) and a backslash escape would
+		// name a label nobody can read the same way twice.
+		return "", "", fmt.Errorf("%q is not a fleet zone: use letters, digits and hyphens between the dots", raw)
 	}
 	agents := strings.TrimSuffix(AgentsZone, ".")
 	switch {
@@ -146,8 +163,101 @@ func NormalizeFleet(raw string) (zone, tenant string, err error) {
 		if dns.CountLabel(dns.Fqdn(s)) < 2 {
 			return "", "", fmt.Errorf("%q is a top-level domain, not a fleet's zone", raw)
 		}
+		// Directly under a public suffix (co.uk, github.io) is everybody's registrable domain,
+		// so such a fleet would admit whoever signs one.
+		if ps, _ := publicsuffix.PublicSuffix(s); ps == s {
+			return "", "", fmt.Errorf("%q is a public suffix, under which anyone may register a name, not a fleet's zone", raw)
+		}
 		return dns.Fqdn(s), "", nil
 	}
+}
+
+// ParseFleets reads a list of fleets (as --fleet or a fleets file spells them) into a
+// de-duplicated set. Any entry that does not parse fails the whole list: a set with a hole in
+// it is not the set the operator wrote, so it is refused rather than read around.
+func ParseFleets(raw []string) ([]AuthzFleet, error) {
+	seen := map[string]bool{}
+	var out []AuthzFleet
+	for _, r := range raw {
+		zone, tenant, err := NormalizeFleet(r)
+		if err != nil {
+			return nil, err
+		}
+		if seen[zone] {
+			continue
+		}
+		seen[zone] = true
+		out = append(out, AuthzFleet{Zone: zone, Tenant: tenant})
+	}
+	if len(out) == 0 {
+		return nil, errors.New("no fleet named")
+	}
+	return out, nil
+}
+
+// fleetOf returns the fleet a name sits DIRECTLY inside: its parent zone, looked up in the
+// set. A name has exactly one parent, so with nested zones in the set (agents.example.com and
+// eu.agents.example.com) a name still belongs to at most one of them.
+func fleetOf(name string, fleets []AuthzFleet) (AuthzFleet, bool) {
+	for _, f := range fleets {
+		if inFleet(name, f.Zone) {
+			return f, true
+		}
+	}
+	return AuthzFleet{}, false
+}
+
+// allHosted reports whether every fleet in the set is a hosted tenant, which is when a caller
+// outside the agent block can be refused before any lookup.
+func allHosted(fleets []AuthzFleet) bool {
+	for _, f := range fleets {
+		if f.Tenant == "" {
+			return false
+		}
+	}
+	return len(fleets) > 0
+}
+
+func fleetNames(fleets []AuthzFleet) string {
+	var out []string
+	for _, f := range fleets {
+		out = append(out, strings.TrimSuffix(f.Zone, "."))
+	}
+	if len(out) > 3 {
+		return fmt.Sprintf("%s and %d more", strings.Join(out[:3], ", "), len(out)-3)
+	}
+	return strings.Join(out, ", ")
+}
+
+// ldhName reports whether s is dot-separated letter-digit-hyphen labels, none starting or
+// ending with a hyphen.
+func ldhName(s string) bool {
+	for _, l := range strings.Split(s, ".") {
+		if l == "" || len(l) > 63 || l[0] == '-' || l[len(l)-1] == '-' {
+			return false
+		}
+		for i := 0; i < len(l); i++ {
+			c := l[i]
+			if !(c >= 'a' && c <= 'z' || c >= '0' && c <= '9' || c == '-') {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// HostedTenantZone reports whether zone is exactly a hosted tenant zone,
+// t<32 hex>.agents.whisper.online., the only shape a hosted agent's parent ever has.
+func HostedTenantZone(zone string) (tenant string, ok bool) {
+	z := dns.CanonicalName(dns.Fqdn(strings.TrimSpace(zone)))
+	label, rest, found := strings.Cut(z, ".")
+	if !found || rest != AgentsZone || len(label) != 33 || label[0] != 't' {
+		return "", false
+	}
+	if _, err := hex.DecodeString(label[1:]); err != nil {
+		return "", false
+	}
+	return label, true
 }
 
 // Authorize decides one request. It never returns an error: every failure is a denial with a
@@ -159,7 +269,7 @@ func Authorize(ctx context.Context, lk AuthzLookup, pol AuthzPolicy, req AuthzRe
 		d.Reason = fmt.Sprintf(format, a...)
 		return d
 	}
-	if lk == nil || pol.Fleet == "" {
+	if lk == nil || len(pol.Fleets) == 0 {
 		return deny("no fleet is configured, so nobody is a member of it")
 	}
 
@@ -194,7 +304,7 @@ func Authorize(ctx context.Context, lk AuthzLookup, pol AuthzPolicy, req AuthzRe
 	if src.IsLoopback() || src.IsUnspecified() {
 		return deny("the connection came from %s on this host, not from a fleet member's address", src)
 	}
-	if pol.Tenant != "" && !AgentsPrefix.Contains(src) {
+	if allHosted(pol.Fleets) && !AgentsPrefix.Contains(src) {
 		return deny("%s is outside %s, where every hosted agent lives, so it is not a fleet member", src, AgentsPrefix)
 	}
 
@@ -203,76 +313,108 @@ func Authorize(ctx context.Context, lk AuthzLookup, pol AuthzPolicy, req AuthzRe
 	if err != nil {
 		return deny("cannot form the reverse name of %s", src)
 	}
-	ptrs, err := validatedExact(ctx, lk, rev, dns.TypePTR)
+	ptrs, err := validatedExact(ctx, lk, rev, dns.TypePTR, "")
 	if err != nil {
 		return deny("the PTR for %s did not validate: %v", src, err)
 	}
 	var names []string
+	fleetFor := map[string]AuthzFleet{}
 	for _, rr := range ptrs {
-		if p, ok := rr.(*dns.PTR); ok && inFleet(p.Ptr, pol.Fleet) {
-			names = append(names, dns.CanonicalName(p.Ptr))
+		p, ok := rr.(*dns.PTR)
+		if !ok {
+			continue
+		}
+		n := dns.CanonicalName(p.Ptr)
+		if fl, in := fleetOf(n, pol.Fleets); in {
+			if _, dup := fleetFor[n]; !dup {
+				names = append(names, n)
+			}
+			fleetFor[n] = fl
 		}
 	}
 	if len(names) == 0 {
-		return deny("%s is not a member of %s: its validated PTR names %s", src, strings.TrimSuffix(pol.Fleet, "."), ptrTargets(ptrs))
+		return deny("%s is not a member of %s: its validated PTR names %s", src, fleetNames(pol.Fleets), ptrTargets(ptrs))
 	}
+	// RRset order is not signed, so it must not pick which name is tried first.
+	sort.Strings(names)
 
-	// 2. The name points back at the address. Every in-fleet PTR target is tried, so the
-	// order a resolver returns the RRset in cannot decide the answer.
-	var name, fcrdns string
+	// 2-4 run for each in-fleet name in full, and the first that passes every one admits. Every
+	// target is tried, so the order a resolver returns the RRset in can neither hide an active
+	// name behind a revoked one nor pick which fleet's rules are applied.
+	var reasons []string
 	for _, n := range names {
-		aaaas, err := validatedExact(ctx, lk, n, dns.TypeAAAA)
-		switch {
-		case err != nil:
-			fcrdns = fmt.Sprintf("the AAAA for %s did not validate: %v", strings.TrimSuffix(n, "."), err)
-		case !rrsetHasAddr(aaaas, src):
-			fcrdns = fmt.Sprintf("%s claims %s in its PTR, but the validated AAAA of that name does not contain it",
-				src, strings.TrimSuffix(n, "."))
-		default:
-			name = n
+		fl := fleetFor[n]
+		// A hosted tenant's agents all live in the agent block. In a set that also holds a
+		// fleet in its own domain the prefilter above could not run, so it is applied here,
+		// per fleet, before anything else is asked about the name.
+		if fl.Tenant != "" && !AgentsPrefix.Contains(src) {
+			reasons = append(reasons, fmt.Sprintf("%s is outside %s, where every agent of %s lives",
+				src, AgentsPrefix, strings.TrimSuffix(fl.Zone, ".")))
+			continue
 		}
-		if name != "" {
-			break
+		via, why, ok := proveName(ctx, lk, pol, fl, src, n, req.KeyType, blob, pub)
+		if d.Name == "" {
+			d.Name = strings.TrimSuffix(n, ".")
 		}
+		if ok {
+			d.Name = strings.TrimSuffix(n, ".")
+			d.Admit, d.Via, d.Reason = true, via, why
+			d.Line = fmt.Sprintf("%s %s whisper:%s", pub.Type(), base64.StdEncoding.EncodeToString(blob), d.Name)
+			return d
+		}
+		reasons = append(reasons, why)
 	}
-	if name == "" {
-		return deny("%s", fcrdns)
-	}
-	d.Name = strings.TrimSuffix(name, ".")
+	return deny("%s", strings.Join(reasons, "; "))
+}
 
-	// 3. The agent is live, and is this fleet's.
-	txts, err := validatedExact(ctx, lk, name, dns.TypeTXT)
+// proveName runs rules 2 to 4 for one in-fleet name: the AAAA confirms the source, the
+// whisper-id1 record is active and names the tenant of the zone the name sits in, the
+// allowlist (if any) names it, and the key is its own. It returns how the key was proven, or
+// why the name does not admit.
+func proveName(ctx context.Context, lk AuthzLookup, pol AuthzPolicy, fl AuthzFleet, src netip.Addr, name, keyType string,
+	blob []byte, pub xssh.PublicKey) (string, string, bool) {
+	short := strings.TrimSuffix(name, ".")
+	// 2. The name points back at the address.
+	aaaas, err := validatedExact(ctx, lk, name, dns.TypeAAAA, fl.Zone)
 	if err != nil {
-		return deny("the whisper-id1 TXT for %s did not validate: %v", d.Name, err)
+		return "", fmt.Sprintf("the AAAA for %s did not validate: %v", short, err), false
+	}
+	if !rrsetHasAddr(aaaas, src) {
+		return "", fmt.Sprintf("%s claims %s in its PTR, but the validated AAAA of that name does not contain it", src, short), false
+	}
+	// 3. The agent is live, and is this fleet's.
+	txts, err := validatedExact(ctx, lk, name, dns.TypeTXT, fl.Zone)
+	if err != nil {
+		return "", fmt.Sprintf("the whisper-id1 TXT for %s did not validate: %v", short, err), false
 	}
 	id, err := parseWhisperID(txts)
 	if err != nil {
-		return deny("%s: %v", d.Name, err)
+		return "", fmt.Sprintf("%s: %v", short, err), false
 	}
 	if !strings.EqualFold(id["status"], "active") {
-		return deny("%s is %s, not active", d.Name, orUnknown(id["status"]))
+		return "", fmt.Sprintf("%s is %s, not active", short, orUnknown(id["status"])), false
 	}
-	if pol.Tenant != "" && !strings.EqualFold(id["tenant"], pol.Tenant) {
-		return deny("%s belongs to tenant %s, not to this fleet's %s", d.Name, orUnknown(id["tenant"]), pol.Tenant)
+	// The tenant the record names must be the tenant of the zone the name sits in, never just
+	// any tenant in the set: one agent's record cannot vouch for a name under another's label.
+	if fl.Tenant != "" && !strings.EqualFold(id["tenant"], fl.Tenant) {
+		return "", fmt.Sprintf("%s belongs to tenant %s, not to %s, the tenant its name sits in", short, orUnknown(id["tenant"]), fl.Tenant), false
 	}
 	if len(pol.Allow) > 0 && !allowed(pol.Allow, name) {
-		return deny("%s is a fleet member but not on this node's allowlist", d.Name)
+		return "", fmt.Sprintf("%s is a fleet member but not on this node's allowlist", short), false
 	}
-
 	// 4. The key is the agent's own.
-	via, why := matchAgentKey(ctx, lk, name, req.KeyType, blob, pub, pol.AllowTLSA)
-	if via == "" {
-		return deny("%s", why)
-	}
-	d.Admit, d.Via = true, via
-	d.Reason = why
-	d.Line = fmt.Sprintf("%s %s whisper:%s", pub.Type(), base64.StdEncoding.EncodeToString(blob), d.Name)
-	return d
+	via, why := matchAgentKey(ctx, lk, name, fl.Zone, keyType, blob, pub, pol.AllowTLSA)
+	return via, why, via != ""
 }
 
 // validatedExact is Validated, refusing an answer synthesised from a wildcard: every record
 // this decision reads must be published for that exact name.
-func validatedExact(ctx context.Context, lk AuthzLookup, name string, qtype uint16) ([]dns.RR, error) {
+//
+// zone, when set, is the fleet the name belongs to, and the signature must come from that
+// zone or one above it. A signer at the name itself or below would be a zone cut handing the
+// name authority over its own records, which no fleet member has: for a hosted tenant the
+// signer is the agents zone, and for a fleet in its own domain it is that domain or a parent.
+func validatedExact(ctx context.Context, lk AuthzLookup, name string, qtype uint16, zone string) ([]dns.RR, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("out of time (%v)", err)
 	}
@@ -286,6 +428,13 @@ func validatedExact(ctx context.Context, lk AuthzLookup, name string, qtype uint
 	}
 	if sig == nil {
 		return nil, errors.New("no signature came back with the answer")
+	}
+	if zone != "" {
+		signer, z := dns.CanonicalName(dns.Fqdn(sig.SignerName)), dns.CanonicalName(dns.Fqdn(zone))
+		if strings.TrimSpace(sig.SignerName) == "" || !dns.IsSubDomain(signer, z) {
+			return nil, fmt.Errorf("the answer is signed by %s, not by %s or a zone above it",
+				orUnknown(strings.TrimSuffix(signer, ".")), strings.TrimSuffix(z, "."))
+		}
 	}
 	if int(sig.Labels) != dns.CountLabel(owner) {
 		return nil, fmt.Errorf("the answer was synthesised from a wildcard (the signature covers %d labels, the name has %d)",
@@ -305,10 +454,10 @@ func validatedExact(ctx context.Context, lk AuthzLookup, name string, qtype uint
 
 // matchAgentKey checks the offered key against the agent's SSHFP and then its TLSA. It returns
 // "sshfp" or "tlsa" with what matched, or "" with why nothing did.
-func matchAgentKey(ctx context.Context, lk AuthzLookup, name, keyType string, blob []byte, pub xssh.PublicKey, allowTLSA bool) (string, string) {
+func matchAgentKey(ctx context.Context, lk AuthzLookup, name, zone, keyType string, blob []byte, pub xssh.PublicKey, allowTLSA bool) (string, string) {
 	short := strings.TrimSuffix(name, ".")
 	var reasons []string
-	if rrs, err := validatedExact(ctx, lk, name, dns.TypeSSHFP); err != nil {
+	if rrs, err := validatedExact(ctx, lk, name, dns.TypeSSHFP, zone); err != nil {
 		reasons = append(reasons, "SSHFP: "+err.Error())
 	} else {
 		pin, merr := MatchHostKey(keyType, base64.StdEncoding.EncodeToString(blob), ParseSSHFP(rrs))
@@ -324,7 +473,7 @@ func matchAgentKey(ctx context.Context, lk AuthzLookup, name, keyType string, bl
 		return "", "out of time before the key could be proven (" + strings.Join(reasons, "; ") + ")"
 	}
 	tlsaName := "_443._tcp." + name
-	if rrs, err := validatedExact(ctx, lk, tlsaName, dns.TypeTLSA); err != nil {
+	if rrs, err := validatedExact(ctx, lk, tlsaName, dns.TypeTLSA, zone); err != nil {
 		reasons = append(reasons, "TLSA: "+err.Error())
 	} else if spki, ok := spkiSHA256(pub); !ok {
 		reasons = append(reasons, "TLSA: a "+pub.Type()+" key has no SubjectPublicKeyInfo to compare")
