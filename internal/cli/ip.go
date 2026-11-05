@@ -4,9 +4,11 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"net/netip"
 	"os"
+	"runtime"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -120,9 +122,11 @@ func newIPCmd() *cobra.Command {
 	return cmd
 }
 
-// enforcedIP is `whisper ip` inside an enforced agent's namespace. There is no proxy to bring
-// up and no key to spend: the namespace's network IS the tunnel, so the keyless echo is asked
-// directly and the source it saw must be the /128 the agent was enforced as.
+// enforcedIP is `whisper ip` inside an enforced agent. There is no proxy to bring up and no key
+// to spend. On Linux the namespace's network IS the tunnel, so the keyless echo is asked directly;
+// on Windows the local proxy is the agent's only door, so it is asked through the proxy
+// the run put in the environment. Either way the source the echo saw must be the /128 the agent
+// was enforced as.
 func enforcedIP(addr string) error {
 	c, err := resolveClient(false, false)
 	if err != nil {
@@ -130,7 +134,7 @@ func enforcedIP(addr string) error {
 	}
 	cx, cancel := ctx()
 	defer cancel()
-	observed, oerr := c.DirectEgressIP(cx)
+	observed, oerr := enforcedEcho(cx, c, runtime.GOOS, os.Getenv)
 	verified := oerr == nil && inWhisperRange(observed) && sameIP(observed, addr)
 	if g.jsonOut {
 		emitJSONValue(map[string]any{"ip": observed, "verified": verified, "agent": addr, "enforced": true})
@@ -141,14 +145,27 @@ func enforcedIP(addr string) error {
 	}
 	if oerr != nil {
 		return &client.ProblemError{Status: 502, Detail: "the Whisper echo could not be reached from inside the " +
-			"enforced namespace, which means the tunnel is not carrying right now (connections are refused, not leaked)"}
+			"enforced agent, which means the tunnel is not carrying right now (connections are refused, not leaked)"}
 	}
 	if !verified {
-		return &client.ProblemError{Status: 502, Detail: "the egress seen from inside this enforced namespace is " +
+		return &client.ProblemError{Status: 502, Detail: "the egress seen from inside this enforced agent is " +
 			observed + ", not " + addr}
 	}
 	fmt.Fprintln(os.Stdout, green(observed+"  ✓ egress verified (enforced)"))
 	return nil
+}
+
+// enforcedEcho asks the keyless echo the way an enforced agent on goos can reach it: through the
+// proxy named in its environment on Windows, directly elsewhere.
+func enforcedEcho(cx context.Context, c *client.Client, goos string, getenv func(string) string) (string, error) {
+	if goos == "windows" {
+		ep := strings.TrimSpace(getenv("ALL_PROXY"))
+		if ep == "" {
+			ep = strings.TrimSpace(getenv("all_proxy"))
+		}
+		return c.ObservedEgressIP(cx, ep)
+	}
+	return c.DirectEgressIP(cx)
 }
 
 // agentDisplay picks the most useful agent identifier for the --json `agent` field:

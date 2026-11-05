@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 viaGraph B.V. (Whisper Security)
 
-//go:build !linux
+//go:build !linux && !windows
 
 package enforce
 

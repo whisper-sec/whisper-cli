@@ -368,8 +368,8 @@ func runWhaleServe(cmd *cobra.Command, opt serveOptions) error {
 	// handler behind a listener that never bound is the shipped-but-unreachable defect,
 	// and from inside this process it would look perfectly healthy.
 	if !whaleServeListenerUp(tun) {
-		return &client.ProblemError{Status: 503, Title: "no listener", Detail: "the in-tunnel TLS listener did not " +
-			"start on this node, so there is nothing to serve on. Run `whisper connect --tier wireguard` to see why it failed"}
+		return &client.ProblemError{Status: 503, Type: localActionable, Title: "no listener",
+			Detail: whaleServeNoListenerDetail(sess.pinKeyMissing, pasteableSelector(opt.agent, sel, sess.addr))}
 	}
 
 	gate, err := newFleetGate(cx, c, sess.addr, extra, opt.scope)
@@ -446,6 +446,52 @@ func runWhaleServe(cmd *cobra.Command, opt serveOptions) error {
 	return nil
 }
 
+// whaleServeNoListenerDetail says why the in-tunnel listener did not start and what fixes it.
+// The listener presents a leaf signed by the identity key the agent's TLSA pins, so it only
+// starts on a host that HOLDS that key. An agent minted by its owner (op:register, or
+// `whisper create`) has a Whisper-held key, so the first serve from a fresh host lands here
+// (measured 2026-11-05). Adopting fixes that, and moves the pin, so the sentence names
+// who loses by it. Any other cause (a leaf that could not be minted, a listener that could not
+// bind) is not fixed by moving an identity, so it gets the diagnostic instead.
+func whaleServeNoListenerDetail(pinKeyMissing bool, sel string) string {
+	agent := ""
+	if sel != "" {
+		agent = " --agent " + sel
+	}
+	if !pinKeyMissing {
+		return "the in-tunnel TLS listener did not start on this node, so there is nothing to serve on. " +
+			"This host holds the agent's identity key, so the cause is local: run `whisper connect --tier wireguard" +
+			agent + "` and it prints why the listener failed"
+	}
+	return "the in-tunnel TLS listener did not start, so there is nothing to serve on. It presents a leaf " +
+		"signed by the identity key the agent's TLSA pins, and this host does not hold that key (an agent " +
+		"created by its owner starts with a key Whisper holds). To make this host the key holder, run `" +
+		"whisper connect --adopt-key" + agent + "` once, as the user who runs the serve. It re-pins the agent's " +
+		"TLSA, SSHFP and OPENPGPKEY to this host's key, so any OTHER host already serving this agent stops " +
+		"matching them; if one does, serve from that host instead"
+}
+
+// pasteableSelector is the agent as the person typed it when that is one plain token, else the
+// address it resolved to, so the command in a sentence can always be pasted as it stands.
+func pasteableSelector(typed, resolved, addr string) string {
+	for _, s := range []string{typed, resolved, addr} {
+		if s = strings.TrimSpace(s); s != "" && plainToken(s) {
+			return s
+		}
+	}
+	return ""
+}
+
+func plainToken(s string) bool {
+	for _, r := range s {
+		ok := r == '.' || r == '_' || r == ':' || r == '-' || (r >= '0' && r <= '9') || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // whaleServeListenerUp and whaleServeInstall are the two seams between this command and
 // the tunnel it serves inside. They exist so a test can drive the REAL command - flags,
 // consent, gate, proxy, headers, state record - and then send real requests through the
@@ -494,10 +540,11 @@ var whaleServeConnect = func(cx context.Context, c *client.Client, sel string) (
 	if err != nil {
 		return nil, nil, err
 	}
+	sess.pinKeyMissing = keys.identity == nil || keys.unpinned
 	tun, ok := sess.local.(*wgtun.Tunnel)
 	if !ok || tun == nil {
 		sess.Stop()
-		return nil, nil, &client.ProblemError{Status: 503, Title: "no routed tunnel", Detail: "this connection did " +
+		return nil, nil, &client.ProblemError{Status: 503, Type: localActionable, Title: "no routed tunnel", Detail: "this connection did " +
 			"not land on the routed WireGuard tier, and only a routed node can be reached on its own /128. " +
 			"`whisper whale netcheck` reports whether UDP to the box is getting out"}
 	}
@@ -543,7 +590,7 @@ func newFleetGate(cx context.Context, c *client.Client, self string, extra []net
 		return g, nil // everyone is answered; the fleet is not consulted
 	}
 	if err := g.refresh(cx, c); err != nil {
-		return nil, &client.ProblemError{Status: 503, Title: "fleet unknown", Detail: fmt.Sprintf(
+		return nil, &client.ProblemError{Status: 503, Type: localActionable, Title: "fleet unknown", Detail: fmt.Sprintf(
 			"could not read your fleet, so there is no way to know who to answer: %s. "+
 				"Name the callers with --allow, or use `whisper whale funnel` if you meant to answer everyone",
 			friendly(err))}

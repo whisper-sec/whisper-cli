@@ -174,6 +174,14 @@ func renderWhaleACL(s whale.ACLSummary) {
 	if s.LastRefusal != "" {
 		rows = append(rows, []string{"last refusal", s.LastRefusal})
 	}
+	switch s.SSH {
+	case "enforced":
+		rows = append(rows, []string{"ssh", "enforced per node, after `whisper whale ssh-authz install --write` on each target"})
+	case "invalid_stored":
+		rows = append(rows, []string{"ssh", "NOT enforced: the stored block cannot be enforced as it stands (the notes say why)"})
+	case "none":
+		rows = append(rows, []string{"ssh", "no ssh block: each target's own ssh-authz flags decide"})
+	}
 	printTable([]string{"WHALE ACL", ""}, rows)
 	fmt.Fprintln(os.Stdout)
 	for _, n := range s.Notes {
@@ -187,7 +195,8 @@ func renderWhaleACL(s whale.ACLSummary) {
 // --- test -------------------------------------------------------------------------
 
 func newWhaleACLTestCmd() *cobra.Command {
-	return &cobra.Command{
+	var user string
+	cmd := &cobra.Command{
 		Use:   "test <src> <dst>",
 		Short: "What the document says about one source and one target",
 		Long: "Ask the compiled document whether one principal may reach one target, without\n" +
@@ -195,7 +204,10 @@ func newWhaleACLTestCmd() *cobra.Command {
 			"Both arguments are in the document's own grammar:\n\n" +
 			"  whisper whale acl test group:sre tag:prod:22\n" +
 			"  whisper whale acl test autogroup:member autogroup:internet:443\n" +
-			"  whisper whale acl test tag:web '[2a04:2a01::5]:443'\n\n" +
+			"  whisper whale acl test tag:web '[2a04:2a01::5]:443'\n" +
+			"  whisper whale acl test tag:ops tag:db:22 --user root\n\n" +
+			"--user asks about a LOGIN: the port must be open AND an ssh rule must admit the\n" +
+			"account. On the target the node's own --allow and --user flags apply too.\n\n" +
 			"The answer comes from the artifact the CONNECT path itself reads, so it is what\n" +
 			"is enforced rather than a second reading of the same file. Exit status is 1 when\n" +
 			"the document refuses the flow, so it can gate a deploy.",
@@ -212,9 +224,11 @@ func newWhaleACLTestCmd() *cobra.Command {
 			}
 			cx, cancel := ctx()
 			defer cancel()
-			env, err := c.Agents(cx, "list", map[string]any{
-				"kind": "whale", "view": "acltest", "src": src, "dst": dst,
-			})
+			q := map[string]any{"kind": "whale", "view": "acltest", "src": src, "dst": dst}
+			if u := strings.TrimSpace(user); u != "" {
+				q["user"] = u
+			}
+			env, err := c.Agents(cx, "list", q)
 			if err != nil {
 				return err
 			}
@@ -226,15 +240,33 @@ func newWhaleACLTestCmd() *cobra.Command {
 			if !handled {
 				renderWhaleACLTest(src, dst, state, note, verdicts)
 			}
+			if strings.TrimSpace(user) != "" && len(verdicts) > 0 {
+				answered := false
+				for _, v := range verdicts {
+					answered = answered || v.SSH != ""
+				}
+				if !answered {
+					// An older control plane ignores the user it was sent; a login question it did not
+					// answer must not exit 0 as if the login were allowed.
+					return &client.ProblemError{Status: 1, Detail: "the control plane answered the network half only, " +
+						"not the login as " + strings.TrimSpace(user) + ": it does not compile the ssh block yet"}
+				}
+			}
 			for _, v := range verdicts {
 				if v.Denied() {
+					why := v.Why
+					if strings.EqualFold(v.SSH, "deny") {
+						why = "ssh as " + v.SSHUser + ": " + v.SSHWhy
+					}
 					return &client.ProblemError{Status: 1, Detail: fmt.Sprintf(
-						"the document in force REFUSES %s -> %s (%s)", src, dst, v.Why)}
+						"the document in force REFUSES %s -> %s (%s)", src, dst, why)}
 				}
 			}
 			return nil
 		},
 	}
+	cmd.Flags().StringVar(&user, "user", "", "ask about an ssh login as this local account, against the compiled ssh view")
+	return cmd
 }
 
 // whaleACLTestRows splits a dry-run result into its header (what was asked, and whether
@@ -261,6 +293,9 @@ func whaleACLTestRows(env *client.Envelope) (state, note string, verdicts []whal
 			Port:    cellString(item["port"]),
 			Verdict: cellString(item["verdict"]),
 			Why:     cellString(item["why"]),
+			SSHUser: cellString(item["ssh_user"]),
+			SSH:     cellString(item["ssh"]),
+			SSHWhy:  cellString(item["ssh_why"]),
 		})
 	}
 	return state, note, verdicts
@@ -306,13 +341,25 @@ func renderWhaleACLTest(src, dst, state, note string, verdicts []whale.ACLTestVe
 		return
 	}
 	rows := make([][]string, 0, len(verdicts))
+	ssh := false
 	for _, v := range verdicts {
-		rows = append(rows, []string{
+		ssh = ssh || v.SSH != ""
+	}
+	for _, v := range verdicts {
+		row := []string{
 			orVal(v.SrcName, v.Src), v.Dst, strings.TrimSpace(v.Proto + ":" + v.Port),
 			strings.ToUpper(v.Verdict), v.Why,
-		})
+		}
+		if ssh {
+			row = append(row, strings.ToUpper(v.SSH)+" as "+v.SSHUser, v.SSHWhy)
+		}
+		rows = append(rows, row)
 	}
-	printTable([]string{"SOURCE", "TARGET", "PORT", "VERDICT", "DECIDED BY"}, rows)
+	head := []string{"SOURCE", "TARGET", "PORT", "VERDICT", "DECIDED BY"}
+	if ssh {
+		head = append(head, "SSH", "SSH DECIDED BY")
+	}
+	printTable(head, rows)
 	fmt.Fprintln(os.Stdout)
 	if note != "" {
 		whaleNote("%s", note)

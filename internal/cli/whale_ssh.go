@@ -55,8 +55,10 @@ import (
 // check`, the AuthorizedKeysCommand ON THE TARGET: it admits an active agent of the fleets
 // written into that host's sshd snippet (or its fleets file) whose key matches the agent's
 // DNSSEC-validated SSHFP, and the denial lands in the target's auth log where an auditor can
-// find it. It does not read the Whalenet ACL's ssh block. `--explain` says where that
-// decision is made, and what decides it, rather than implying this client makes it.
+// find it. When the account's Whalenet ACL has an ssh block, a target that refreshed with
+// `install --write` also requires an ssh rule naming the caller, the target and the account.
+// `--explain` says where that decision is made, and what decides it, rather than
+// implying this client makes it.
 
 // whaleSSHDefaultPort is the port ssh uses when nobody says otherwise.
 const whaleSSHDefaultPort = 22
@@ -312,9 +314,10 @@ func explainWhaleSSH(cx context.Context, c *client.Client, v whaleSSHVerificatio
 //
 // What it names is what the target really checks: `whale ssh-authz check` admits an
 // active agent whose validated name sits directly in one of the fleets written into the
-// target's snippet or fleets file, offering the key its validated SSHFP publishes. The
-// Whalenet ACL's ssh block is stored, not compiled, and nothing on the target reads it, so
-// the note says so plainly when the account publishes one rather than implying it is enforced.
+// target's snippet or fleets file, offering the key its validated SSHFP publishes. When the
+// account publishes a Whalenet ACL ssh block, the note says what the control plane reports
+// about it (whale.acl.ssh): enforced on targets that refreshed, unenforceable as
+// stored, or, from a control plane that does not report it, not compiled at all.
 func whaleSSHPrincipalNote(cx context.Context, c *client.Client) string {
 	const where = "who may log in is decided ON the target, by `whisper whale ssh-authz check`: an active agent of " +
 		"the fleets written into that host's sshd snippet (refresh them there with `sudo whisper whale ssh-authz " +
@@ -326,11 +329,29 @@ func whaleSSHPrincipalNote(cx context.Context, c *client.Client) string {
 	if err == nil {
 		err = envelopeError(env)
 	}
-	if err == nil && sshACLPublished(env) {
-		return where + ". Your account publishes an ssh block in its Whalenet ACL; ssh-authz does not read it yet, " +
-			"so it changes nothing about who may log in"
+	if err != nil {
+		return where
 	}
-	return where
+	return whaleSSHNoteFor(where, env)
+}
+
+// whaleSSHNoteFor adds what the policy read says about the account's ssh block to where.
+func whaleSSHNoteFor(where string, env *client.Envelope) string {
+	if !sshACLPublished(env) {
+		return where
+	}
+	switch whale.ACLSummaryFrom(policyPairs(env)).SSH {
+	case "enforced":
+		return where + ". Your account's Whalenet ACL has an ssh block, and a target that has run `sudo whisper whale " +
+			"ssh-authz install --write` since it changed also requires an ssh rule naming you, it and the account; " +
+			"`whisper whale acl test` with --user, asked about the target's port 22, says what the document answers"
+	case "invalid_stored":
+		return where + ". Your account's Whalenet ACL has an ssh block that cannot be enforced as it stands " +
+			"(`whisper whale acl show` says why), so it changes nothing about who may log in until it is fixed"
+	default:
+		return where + ". Your account publishes an ssh block in its Whalenet ACL; this control plane does not " +
+			"compile it yet, so it changes nothing about who may log in"
+	}
 }
 
 // sshACLPublished looks for the `ssh` block of the Whalenet ACL in a policy read. It is

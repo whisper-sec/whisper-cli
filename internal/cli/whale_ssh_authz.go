@@ -123,6 +123,10 @@ func newWhaleSSHAuthzCmd() *cobra.Command {
 			"  - the name's whisper-id1 TXT says status=active and names the tenant the name\n" +
 			"    sits in, so a revoked agent stops;\n" +
 			"  - the offered key matches the name's SSHFP (its TLSA 3 1 1 pin only with --allow-tlsa).\n\n" +
+			"When your fleet's WhaleACL has an ssh block, install also writes this node's\n" +
+			"compiled view beside the fleets file, and a login must ALSO be admitted by an ssh\n" +
+			"rule naming the caller, this node and the account. The view moves only when you\n" +
+			"run install --write again; a login never calls the control plane.\n\n" +
 			"Anything less, including a lookup that times out or an unsigned answer, prints\n" +
 			"nothing and sshd says \"Permission denied\". sshd reads authorized_keys before it\n" +
 			"runs the command, so keys you added by hand keep working. root is never admitted\n" +
@@ -142,6 +146,7 @@ func newWhaleSSHAuthzCmd() *cobra.Command {
 type sshAuthzFlags struct {
 	fleet     []string
 	fleetFile string
+	aclFile   string
 	allow     []string
 	users     []string
 	resolver  string
@@ -151,6 +156,7 @@ type sshAuthzFlags struct {
 func (f *sshAuthzFlags) bind(cmd *cobra.Command) {
 	cmd.Flags().StringSliceVar(&f.fleet, "fleet", nil, "a fleet whose agents may log in: a tenant (t...), its zone, or one of its node names (repeatable; install reads your roster when omitted)")
 	cmd.Flags().StringVar(&f.fleetFile, "fleet-file", "", "a root-owned file listing fleets, one per line (install writes "+sshAuthzFleetsPath+" from your roster)")
+	cmd.Flags().StringVar(&f.aclFile, "acl-file", "", "this node's WhaleACL ssh view (default: "+sshAuthzACLName+" beside the fleets file, else "+sshAuthzACLDefault+"; install writes it)")
 	cmd.Flags().StringSliceVar(&f.allow, "allow", nil, "admit only these agents: a full name or its first label (repeatable; default every active agent of the fleet)")
 	cmd.Flags().StringSliceVar(&f.users, "user", nil, "the local accounts fleet agents may log in as (repeatable; default any account except root and uid 0)")
 	cmd.Flags().StringVar(&f.resolver, "resolver", "", "resolver to walk the DNSSEC chain through (default: the system resolvers, then public ones)")
@@ -190,6 +196,18 @@ func (f *sshAuthzFlags) policyWithout(file string) (whale.AuthzPolicy, error) {
 // owns it and nothing on its path can be written by anyone else, and only a regular file of a
 // bounded size. Anything else is an error, which check turns into a denial with the reason.
 func readSSHAuthzFleets(path string) ([]string, error) {
+	b, err := readSSHAuthzRootFile(path, sshAuthzFleetsMaxBytes, "a fleets file")
+	if err != nil {
+		return nil, err
+	}
+	return parseSSHAuthzFleets(path, b)
+}
+
+// readSSHAuthzRootFile is the one trusted read behind every file check consults (the fleets
+// file and the ssh ACL file): only a regular file root owns, on a path nobody else can
+// write, no larger than max, and the same file from the stat to the last byte. what names the
+// kind of file in the size refusal.
+func readSSHAuthzRootFile(path string, max int64, what string) ([]byte, error) {
 	real, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s: %v", path, err)
@@ -213,14 +231,17 @@ func readSSHAuthzFleets(path string) ([]string, error) {
 	if err != nil || !os.SameFile(li, fi) {
 		return nil, fmt.Errorf("%s changed while it was being read", path)
 	}
-	if fi.Size() > sshAuthzFleetsMaxBytes {
-		return nil, fmt.Errorf("%s is %d bytes, more than a fleets file ever needs (%d)", path, fi.Size(), sshAuthzFleetsMaxBytes)
+	if fi.Size() > max {
+		return nil, fmt.Errorf("%s is %d bytes, more than %s ever needs (%d)", path, fi.Size(), what, max)
 	}
-	b, err := io.ReadAll(io.LimitReader(fh, sshAuthzFleetsMaxBytes+1))
+	b, err := io.ReadAll(io.LimitReader(fh, max+1))
 	if err != nil {
 		return nil, fmt.Errorf("cannot read %s: %v", path, err)
 	}
-	return parseSSHAuthzFleets(path, b)
+	if int64(len(b)) > max {
+		return nil, fmt.Errorf("%s grew past %d bytes while it was being read", path, max)
+	}
+	return b, nil
 }
 
 // parseSSHAuthzFleets reads one fleet per line. Blank lines and # comments are skipped, a
@@ -287,6 +308,9 @@ func newWhaleSSHAuthzCheckCmd() *cobra.Command {
 				sshAuthzLog(false, sshAuthzLogLine(req, whale.AuthzDecision{Reason: "a login name that starts with - is refused"}, ""))
 				return nil
 			}
+			// The ACL half is read before anything else is asked, so a file the operator turned on
+			// and that cannot be read refuses the login rather than being read around.
+			acl, aclPresent, aclErr := loadSSHAuthzACL(sshAuthzACLPathFor(f.aclFile, f.fleetFile))
 			dry := strings.TrimSpace(from) != ""
 			via := ""
 			if dry {
@@ -303,9 +327,18 @@ func newWhaleSSHAuthzCheckCmd() *cobra.Command {
 					return nil
 				}
 			}
-			cx, cancel := context.WithTimeout(context.Background(), sshAuthzBudget)
-			defer cancel()
-			d := whale.Authorize(cx, sshAuthzLookup(f.resolver), pol, req)
+			var d whale.AuthzDecision
+			switch {
+			case aclErr != nil:
+				d = whale.AuthzDecision{Reason: "acl: " + aclErr.Error()}
+			case aclPresent && acl.Governed && !acl.ListsAddr(req.Source):
+				// No ssh rule names the caller at all: refused before this host walks any chain for it.
+				d = whale.AuthzDecision{Reason: "acl: no ssh rule admits " + req.Source.String() + " as " + logToken(req.User)}
+			default:
+				cx, cancel := context.WithTimeout(context.Background(), sshAuthzBudget)
+				defer cancel()
+				d = sshAuthzACLDecide(acl, aclPresent, whale.Authorize(cx, sshAuthzLookup(f.resolver), pol, req), req)
+			}
 			if dry {
 				verdict := "DENY"
 				if d.Admit {
@@ -499,6 +532,15 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			// The node's WhaleACL ssh view, beside the fleets file check will read.
+			if p := strings.TrimSpace(f.aclFile); p != "" && (!snippetValue(p) || !filepath.IsAbs(p)) {
+				return usageErr("--acl-file %q cannot go into sshd_config as it is: name an absolute path "+
+					"of letters, digits and . _ - : @ + / only", p)
+			}
+			aclPlan, err := planSSHAuthzACL(sshAuthzACLPathFor(f.aclFile, plan.file))
+			if err != nil {
+				return err
+			}
 			pol, err := f.policyWithout(plan.file)
 			if err != nil {
 				return usageErr("%v", err)
@@ -510,11 +552,20 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 			for _, n := range plan.notes {
 				whaleNote("%s", n)
 			}
+			for _, n := range aclPlan.notes {
+				whaleNote("%s", n)
+			}
 			if !write {
 				fmt.Fprint(os.Stdout, snippet)
 				if plan.file != "" {
 					fmt.Fprintf(os.Stdout, "# %s (root-owned, mode 0640, group of %s):\n", plan.file, orNobody(cmdUser))
 					for _, l := range strings.Split(strings.TrimRight(plan.content, "\n"), "\n") {
+						fmt.Fprintf(os.Stdout, "#   %s\n", l)
+					}
+				}
+				if aclPlan.write {
+					fmt.Fprintf(os.Stdout, "# %s (root-owned, mode 0640, group of %s):\n", aclPlan.path, orNobody(cmdUser))
+					for _, l := range strings.Split(strings.TrimRight(aclPlan.content, "\n"), "\n") {
 						fmt.Fprintf(os.Stdout, "#   %s\n", l)
 					}
 				}
@@ -537,16 +588,33 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 				return &client.ProblemError{Status: 409, Title: "sshd would ignore this command",
 					Detail: why + ". " + sshAuthzPlacementHint(real, hostPlacementProbe())}
 			}
+			// (M1): the ACL file goes first. A crash before the fleets file follows leaves the new
+			// view intersected with the old fleets: never wider than the new view, which is the direction
+			// the operator asked for, and the next install --write completes it.
+			restoreACL := func() {}
+			if aclPlan.write {
+				restoreACL, err = writeSSHAuthzRootFile(aclPlan.path, aclPlan.content, orNobody(cmdUser), "ssh ACL file",
+					"it lists which of your agents may log in here", "--acl-file", func(p string) error {
+						_, _, e := loadSSHAuthzACL(p)
+						return e
+					})
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stdout, "wrote %s\n", aclPlan.path)
+			}
 			restore := func() {}
 			if plan.file != "" {
 				restore, err = writeSSHAuthzFleets(plan.file, plan.content, orNobody(cmdUser))
 				if err != nil {
+					restoreACL()
 					return err
 				}
 				fmt.Fprintf(os.Stdout, "wrote %s: %d fleet(s) from your roster\n", plan.file, plan.count)
 			}
 			if err := writeSSHAuthzSnippet(os.Stdout, path, snippet, sshAuthzCommandLine(bin, pol, f), orNobody(cmdUser)); err != nil {
 				restore()
+				restoreACL()
 				return err
 			}
 			return nil
@@ -601,7 +669,7 @@ func planSSHAuthzFleets(f *sshAuthzFlags, fleetsPath string) (sshAuthzFleetPlan,
 		why = friendly(rerr)
 	}
 	if _, err := os.Lstat(fleetsPath); err == nil {
-		return sshAuthzFleetPlan{}, &client.ProblemError{Status: 503, Title: "cannot refresh the fleet set",
+		return sshAuthzFleetPlan{}, &client.ProblemError{Status: 503, Type: localActionable, Title: "cannot refresh the fleet set",
 			Detail: "your roster could not be read (" + why + "), so " + fleetsPath + " was left as it is rather than " +
 				"narrowed. Run this again when `whisper whale status` lists your fleet, or name the fleets with --fleet"}
 	}
@@ -675,17 +743,30 @@ func sshAuthzFleetsContent(zones []string) string {
 // wrongly owned file. It then reads the file back through check's own reader, so install never
 // leaves a file check would refuse. It returns how to put back what was there before.
 func writeSSHAuthzFleets(path, content, cmdUser string) (func(), error) {
+	return writeSSHAuthzRootFile(path, content, cmdUser, "fleets file", "it links your agents' tenants",
+		"--fleet-file, such as "+sshAuthzFleetsPath, func(p string) error {
+			_, err := readSSHAuthzFleets(p)
+			return err
+		})
+}
+
+// writeSSHAuthzRootFile is the one atomic writer behind every file check consults: written,
+// owned by root and the check's group, mode 0640 and synced before the rename, then read back
+// through check's own reader (verify), and put back as it was when that read refuses it. what
+// names the file, why says why it must not be world-readable, and where names the flag that
+// moves it.
+func writeSSHAuthzRootFile(path, content, cmdUser, what, why, where string, verify func(string) error) (func(), error) {
 	gid, err := sshAuthzGroupOf(cmdUser)
 	if err != nil {
 		return nil, fmt.Errorf("cannot find the group of %q, the account sshd runs the check as, so %s cannot be made "+
-			"readable to it without making it readable to everyone (it links your agents' tenants): %v. Name the account "+
-			"with --command-user", cmdUser, path, err)
+			"readable to it without making it readable to everyone (%s): %v. Name the account "+
+			"with --command-user", cmdUser, path, why, err)
 	}
 	prev, prevErr := os.ReadFile(path)
 	dir := filepath.Dir(path)
 	if why := sshAuthzPathUnsafe(dir); why != "" {
-		return nil, &client.ProblemError{Status: 409, Title: "check would not trust the fleets file there",
-			Detail: why + ". Name a root-owned place with --fleet-file, such as " + sshAuthzFleetsPath}
+		return nil, &client.ProblemError{Status: 409, Title: "check would not trust the " + what + " there",
+			Detail: why + ". Name a root-owned place with " + where}
 	}
 	put := func(b []byte) error {
 		tmp, err := os.CreateTemp(dir, ".whisper-ssh-authz-*.tmp")
@@ -729,9 +810,9 @@ func writeSSHAuthzFleets(path, content, cmdUser string) (func(), error) {
 	if err := put([]byte(content)); err != nil {
 		return nil, fmt.Errorf("cannot write %s: %w", path, err)
 	}
-	if _, err := readSSHAuthzFleets(path); err != nil {
+	if err := verify(path); err != nil {
 		restore()
-		return nil, &client.ProblemError{Status: 409, Title: "check would refuse the fleets file, so nothing was changed",
+		return nil, &client.ProblemError{Status: 409, Title: "check would refuse the " + what + ", so nothing was changed",
 			Detail: err.Error()}
 	}
 	return restore, nil
@@ -743,6 +824,9 @@ func sshAuthzCommandLine(bin string, pol whale.AuthzPolicy, f sshAuthzFlags) str
 	args := []string{bin, "whale", "ssh-authz", "check"}
 	if p := strings.TrimSpace(f.fleetFile); p != "" {
 		args = append(args, "--fleet-file", p)
+	}
+	if p := strings.TrimSpace(f.aclFile); p != "" {
+		args = append(args, "--acl-file", p)
 	}
 	for _, fl := range pol.Fleets {
 		args = append(args, "--fleet", strings.TrimSuffix(fl.Zone, "."))

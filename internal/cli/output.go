@@ -476,8 +476,11 @@ func isScopeRefusal(pe *client.ProblemError) bool {
 // instruction the operator needs, so no generic status wording ever replaces it. The agent-404
 // nudge used to overwrite these purely because their text mentioned "agent", and the
 // "your key was not accepted" line overwrote a 403 that `whale ssh` raises when a node closes
-// the connection before its sshd speaks, which has nothing to do with the API key.
-const localActionable = "WHISPER_LOCAL_ACTIONABLE"
+// the connection before its sshd speaks, which has nothing to do with the API key, and
+// the generic 503 "busy" wording overwrote the local refusals of `whale serve` and
+// `ssh-authz install`. The client package owns the value so its envelope can tell a
+// local problem from a server one.
+const localActionable = client.LocalActionableType
 
 // problemMentionsAgent reports whether a problem is about an agent identity (so
 // a 404 renders as the account nudge) rather than some other missing resource
@@ -554,17 +557,25 @@ func cobraNoArgs(cmd *cobra.Command, args []string) error {
 // offering it as a command would send the person into an error, so the note says where it runs.
 func runCoverageNote(goos, enforceForm string) string {
 	const covered = "Covers TCP via *_PROXY only; UDP (own DNS, NTP, QUIC) and direct dials leave from this host's own address."
-	if goos == "linux" {
+	switch goos {
+	case "linux":
 		return covered + " Everything from the /128: " + enforceForm
+	case "windows":
+		return covered + " The proxy as the only way out, direct dials refused: " + enforceForm
 	}
-	return covered + " --enforce, which sends everything from the /128, needs Linux."
+	return covered + " --enforce, which sends everything from the /128, needs Linux or Windows."
 }
 
 // runEnforceForm is the --enforce spelling of the command the person ran, for the coverage note:
 // `whisper claude` gets `whisper claude --enforce`, anything else `whisper run --enforce -- <name>`.
-func runEnforceForm(name string, viaClaude bool) string {
-	if viaClaude {
-		return "sudo whisper claude --enforce"
+// Linux needs sudo; Windows needs an elevated terminal, which no prefix can give.
+func runEnforceForm(goos, name string, viaClaude bool) string {
+	prefix, suffix := "sudo ", ""
+	if goos == "windows" {
+		prefix, suffix = "", " (from an elevated terminal)"
 	}
-	return "sudo whisper run --enforce -- " + name + " ..."
+	if viaClaude {
+		return prefix + "whisper claude --enforce" + suffix
+	}
+	return prefix + "whisper run --enforce -- " + name + " ..." + suffix
 }

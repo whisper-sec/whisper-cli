@@ -5,7 +5,10 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -72,9 +75,45 @@ func enforcedEnv(base []string, user, home, runtimeDir, addr string) []string {
 // `--enforce` with. The agent is not started: asking for enforcement and silently getting
 // the proxy variables instead would be the worst possible answer.
 func enforceUnsupported(goos string) error {
-	return usageErr("--enforce runs the agent in its own network namespace, which needs Linux; it is not "+
+	return usageErr("--enforce needs Linux (a network namespace) or Windows (filtering-platform rules); it is not "+
 		"available on %s yet, so the command was not started. Without --enforce, `whisper run` sets the proxy "+
 		"variables, which carry the TCP of every tool that honours them; UDP and direct dials leave from this host's own address", goos)
+}
+
+// windowsEnforcedEnv is an enforced agent's environment on Windows. There the local
+// proxy IS the agent's only door, so, unlike on Linux, the proxy variables are set rather than
+// dropped, and NO_PROXY is removed: a host listed there would be dialled directly, which the
+// filters refuse, while through the proxy it is reached from the /128. The /128 is marked for
+// `whisper ip`, and WHISPER_RUN names this run for the host sensor.
+func windowsEnforcedEnv(base []string, endpoint, addr string, runPID int) []string {
+	out := make([]string, 0, len(base)+12)
+	for _, kv := range proxyInjectedEnv(base, endpoint) {
+		k, _, _ := strings.Cut(kv, "=")
+		if strings.EqualFold(k, "NO_PROXY") || strings.EqualFold(k, enforcedAddrEnv) || strings.EqualFold(k, "WHISPER_RUN") {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return append(out, enforcedAddrEnv+"="+addr, "WHISPER_RUN="+strconv.Itoa(runPID))
+}
+
+// proxyPortOf is the loopback port of the local proxy endpoint (socks5h://127.0.0.1:<port>), the
+// one port an enforced agent on Windows may reach. Anything that is not exactly an IPv4 loopback
+// endpoint with a port is refused: a filter that permits a door the proxy does not stand behind
+// would be a hole.
+func proxyPortOf(endpoint string) (uint16, error) {
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Host == "" {
+		return 0, fmt.Errorf("the local proxy endpoint %q is not a URL", endpoint)
+	}
+	if u.Hostname() != "127.0.0.1" {
+		return 0, fmt.Errorf("the local proxy listens on %s, not 127.0.0.1, so it cannot be the agent's only door", u.Hostname())
+	}
+	p, err := strconv.ParseUint(u.Port(), 10, 16)
+	if err != nil || p == 0 {
+		return 0, fmt.Errorf("the local proxy endpoint %q names no port", endpoint)
+	}
+	return uint16(p), nil
 }
 
 // enforcedRenewErr is a failed enforced renewal: it reads as the friendly phrase the tunnel logs,

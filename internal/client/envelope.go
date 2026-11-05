@@ -170,6 +170,11 @@ func decodeOuterRow(raw json.RawMessage, columns []string) outerRow {
 // back as a plain reason string, not a structured problem), or null/empty (nil).
 // Postel: never let an unexpected - but perfectly legible - error-field shape get
 // silently dropped in favour of a generic "control plane reported failure".
+// LocalActionableType marks a ProblemError the CLI constructed itself, whose Detail is already
+// the instruction the operator needs. decodeProblem strips it from anything that arrives over
+// the network.
+const LocalActionableType = "WHISPER_LOCAL_ACTIONABLE"
+
 func decodeProblem(raw json.RawMessage) *ProblemError {
 	s := strings.TrimSpace(string(raw))
 	if s == "" || s == "null" {
@@ -177,6 +182,11 @@ func decodeProblem(raw json.RawMessage) *ProblemError {
 	}
 	var p ProblemError
 	if json.Unmarshal(raw, &p) == nil && (p.Detail != "" || p.Title != "" || p.Type != "") {
+		// The marker the CLI puts on a problem it built itself is never accepted off the wire,
+		// so a reply cannot choose to be rendered as one of ours.
+		if p.Type == LocalActionableType {
+			p.Type = ""
+		}
 		return &p
 	}
 	// The front door emits {"code":"NOT_FOUND","message":"agent 'x' not found"} rather than

@@ -27,18 +27,21 @@ import (
 // rather than from an empty document, because a tenant with no document at all and a
 // tenant whose document failed to read back are different states.
 type ACLSummary struct {
-	Published   bool     `json:"published"`
-	Hash        string   `json:"hash,omitempty"`
-	Version     string   `json:"version,omitempty"`
-	Artifact    string   `json:"artifact,omitempty"`
-	Default     string   `json:"default,omitempty"`
-	Nodes       string   `json:"nodes,omitempty"`
-	Clauses     string   `json:"clauses,omitempty"`
-	ConnectOnly string   `json:"clauses_connect_only,omitempty"`
-	Refusals    string   `json:"refusals,omitempty"`
-	LastRefusal string   `json:"last_refusal,omitempty"`
-	Notes       []string `json:"notes,omitempty"`
-	Document    string   `json:"document,omitempty"`
+	Published   bool   `json:"published"`
+	Hash        string `json:"hash,omitempty"`
+	Version     string `json:"version,omitempty"`
+	Artifact    string `json:"artifact,omitempty"`
+	Default     string `json:"default,omitempty"`
+	Nodes       string `json:"nodes,omitempty"`
+	Clauses     string `json:"clauses,omitempty"`
+	ConnectOnly string `json:"clauses_connect_only,omitempty"`
+	Refusals    string `json:"refusals,omitempty"`
+	LastRefusal string `json:"last_refusal,omitempty"`
+	// SSH is whether the document's ssh block is in force: enforced, none, or
+	// invalid_stored (stored before the ssh grammar existed and failing it, so enforced nowhere).
+	SSH      string   `json:"ssh,omitempty"`
+	Notes    []string `json:"notes,omitempty"`
+	Document string   `json:"document,omitempty"`
 }
 
 // ACLSummaryFrom reads the whale.acl.* cells out of an op:policy key/value result.
@@ -82,6 +85,8 @@ func ACLSummaryFrom(pairs [][2]string) ACLSummary {
 			s.LastRefusal = v
 		case "whale.acl.document":
 			s.Document = v
+		case "whale.acl.ssh":
+			s.SSH = v
 		default:
 			if rest, ok := strings.CutPrefix(k, "whale.acl.note."); ok {
 				n, err := strconv.Atoi(rest)
@@ -146,11 +151,16 @@ type ACLTestVerdict struct {
 	Port    string `json:"port,omitempty"`
 	Verdict string `json:"verdict"`
 	Why     string `json:"why,omitempty"`
+	// The ssh half, set when the question named a local account: admit, deny, or
+	// ungoverned when the document has no ssh block.
+	SSHUser string `json:"ssh_user,omitempty"`
+	SSH     string `json:"ssh,omitempty"`
+	SSHWhy  string `json:"ssh_why,omitempty"`
 }
 
 // Denied reports whether this verdict refuses the flow. It reads the word rather than a
 // boolean because the control plane emits the word, and a boolean here would be a second
 // spelling of the same fact.
 func (v ACLTestVerdict) Denied() bool {
-	return strings.EqualFold(strings.TrimSpace(v.Verdict), "deny")
+	return strings.EqualFold(strings.TrimSpace(v.Verdict), "deny") || strings.EqualFold(strings.TrimSpace(v.SSH), "deny")
 }

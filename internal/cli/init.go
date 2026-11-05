@@ -833,7 +833,7 @@ func printInitSummary(p projcfg.Paths, cfg projcfg.Config, sres projcfg.Settings
 	// The settings.local.json wiring is the same TCP-only proxy `whisper run` uses, so the
 	// summary says what leaves from the /128 and what does not, rather than "all its traffic".
 	fmt.Fprintf(w, "\n→ run `claude` in this dir and its proxied (TCP) traffic, subagents included, leaves from %s\n", cfg.Agent)
-	fmt.Fprintf(w, "  %s\n", runCoverageNote(runtime.GOOS, runEnforceForm("claude", true)))
+	fmt.Fprintf(w, "  %s\n", runCoverageNote(runtime.GOOS, runEnforceForm(runtime.GOOS, "claude", true)))
 }
 
 // printInitEnvToolSummary prints the result of an env-proxy `init <tool>`: identity/port/files,

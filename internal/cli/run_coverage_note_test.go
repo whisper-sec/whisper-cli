@@ -30,7 +30,7 @@ var runCoverageMustSay = []string{"TCP", "*_PROXY", "UDP", "this host's own addr
 
 func TestRunCoverageNote_NamesTheGapAndTheWayAround(t *testing.T) {
 	for _, goos := range []string{"linux", "darwin", "windows", "freebsd"} {
-		note := runCoverageNote(goos, runEnforceForm("python3", false))
+		note := runCoverageNote(goos, runEnforceForm(goos, "python3", false))
 		for _, want := range runCoverageMustSay {
 			if !strings.Contains(note, want) {
 				t.Errorf("%s: the coverage note must say %q, got %q", goos, want, note)
@@ -45,20 +45,28 @@ func TestRunCoverageNote_NamesTheGapAndTheWayAround(t *testing.T) {
 	}
 	// On Linux --enforce is a command the person can run, so the note gives it to them whole,
 	// spelled as the command they ran.
-	if n := runCoverageNote("linux", runEnforceForm("python3", false)); !strings.Contains(n, "sudo whisper run --enforce -- python3") {
+	if n := runCoverageNote("linux", runEnforceForm("linux", "python3", false)); !strings.Contains(n, "sudo whisper run --enforce -- python3") {
 		t.Errorf("linux run: the note must give the runnable --enforce form, got %q", n)
 	}
-	if n := runCoverageNote("linux", runEnforceForm("claude", true)); !strings.Contains(n, "sudo whisper claude --enforce") {
+	if n := runCoverageNote("linux", runEnforceForm("linux", "claude", true)); !strings.Contains(n, "sudo whisper claude --enforce") {
 		t.Errorf("linux claude: the note must give `whisper claude --enforce`, got %q", n)
 	}
-	// Elsewhere it must not offer a command that only refuses: it says --enforce needs Linux.
-	for _, goos := range []string{"darwin", "windows"} {
-		n := runCoverageNote(goos, runEnforceForm("python3", false))
-		if strings.Contains(n, "sudo whisper") {
+	// On Windows it is runnable too, from an elevated terminal, with no sudo to type.
+	if n := runCoverageNote("windows", runEnforceForm("windows", "python3", false)); !strings.Contains(n, "whisper run --enforce -- python3") ||
+		!strings.Contains(n, "elevated terminal") || strings.Contains(n, "sudo") {
+		t.Errorf("windows run: the note must give the elevated --enforce form without sudo, got %q", n)
+	}
+	if n := runCoverageNote("windows", runEnforceForm("windows", "claude", true)); !strings.Contains(n, "whisper claude --enforce (from an elevated terminal)") {
+		t.Errorf("windows claude: got %q", n)
+	}
+	// Elsewhere it must not offer a command that only refuses: it says where --enforce runs.
+	for _, goos := range []string{"darwin", "freebsd"} {
+		n := runCoverageNote(goos, runEnforceForm(goos, "python3", false))
+		if strings.Contains(n, "sudo whisper") || strings.Contains(n, "whisper run --enforce") {
 			t.Errorf("%s: the note offers --enforce as runnable where it is refused: %q", goos, n)
 		}
-		if !strings.Contains(n, "Linux") {
-			t.Errorf("%s: the note must say --enforce needs Linux, got %q", goos, n)
+		if !strings.Contains(n, "Linux or Windows") {
+			t.Errorf("%s: the note must say --enforce needs Linux or Windows, got %q", goos, n)
 		}
 	}
 }

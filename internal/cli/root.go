@@ -19,6 +19,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/spf13/cobra"
 
@@ -39,7 +40,7 @@ import (
 // In a release's source tree the fallback is that release, so a plain build of a release tag
 // reports it, and a tag whose source reports any other version names source that was never
 // released under it.
-const versionFallback = "0.249.0"
+const versionFallback = "0.250.0"
 
 var Version = versionFallback
 
@@ -282,8 +283,25 @@ func Execute() int {
 	if want, ok := exitCodeOf(err); ok {
 		code = want
 	}
-	fmt.Fprintf(os.Stderr, "whisper: %s\n", friendly(err))
+	fmt.Fprintf(os.Stderr, "whisper: %s\n", terminalSafe(friendly(err)))
 	return code
+}
+
+// terminalSafe is the last thing every error line passes before it reaches a terminal. Much of
+// it is the control plane's own sentence printed as it came, and JSON can carry a real ESC, so a
+// reply could otherwise move the cursor, retitle the window, plant a hyperlink or reorder the
+// text with a bidi override. Newlines and tabs stay (multi-line guidance is ours); every other
+// control or format character becomes a space.
+func terminalSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' {
+			return r
+		}
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+			return ' '
+		}
+		return r
+	}, s)
 }
 
 // migrateLegacyConfigDir moves the pre-2026-08 state directory ~/.config/whisper-ns to its

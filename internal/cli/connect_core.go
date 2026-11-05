@@ -779,6 +779,10 @@ type egressSession struct {
 	// keys are the WireGuard and identity keys this session came up with, kept so a renewal
 	// re-adds the same peer and proves the same identity. In memory only, never written out.
 	keys *connectKeys
+	// pinKeyMissing is set by `whale serve`'s connect when this host holds no key the agent's
+	// published TLSA pins (none at all, or one the server kept only as a device binding), which
+	// is the one reason the in-tunnel listener cannot start that an adopt fixes.
+	pinKeyMissing bool
 	// accepts / acceptScope are the ports this session's tunnel opened on its /128 and who they
 	// admit (connect_accept.go), recorded so status can say so. Empty for every session that
 	// was not asked to accept anything.

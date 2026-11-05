@@ -54,7 +54,8 @@ func TestEnforcedEnvDropsProxiesAndSudoAndRestoresTheUser(t *testing.T) {
 
 func TestEnforceIsRefusedWithASentenceWhereThereAreNoNamespaces(t *testing.T) {
 	err := enforceUnsupported("darwin")
-	if err == nil || !strings.Contains(err.Error(), "needs Linux") || !strings.Contains(err.Error(), "not started") {
+	if err == nil || !strings.Contains(err.Error(), "needs Linux") || !strings.Contains(err.Error(), "Windows") ||
+		!strings.Contains(err.Error(), "not started") {
 		t.Fatalf("unsupported platform error: %v", err)
 	}
 }

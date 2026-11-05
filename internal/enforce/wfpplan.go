@@ -11,10 +11,9 @@ import (
 )
 
 // wfpplan.go is the Windows enforcement written down as data: which filters exist, on which
-// layers, with which conditions and weights. Decisions 2, 3 and 6 of the design record settle
-// those. The Windows code only translates this plan into FWPM structures, so the
-// plan itself is tested on every platform and the part that could be wrong in a way no
-// compiler sees is the part that is tested most.
+// layers, with which conditions and weights. The Windows code only translates this
+// plan into FWPM structures, so the plan itself is tested on every platform and the part that
+// could be wrong in a way no compiler sees is the part that is tested most.
 
 // Layer names the ALE layer a filter sits on.
 type Layer int
@@ -93,8 +92,7 @@ func AgentPlan(proxyPort uint16) ([]FilterSpec, error) {
 
 // HostICMPPlan refuses ICMP echo requests sent by SYSTEM: the Windows ICMP API sends every
 // caller's echo as the System process, so this is the only filter that can stop the agent's
-// ping, and it stops everyone's for the run, which is what Decision 6 of the design record
-// chose.
+// ping, and it stops everyone's for the run, which is the price the design accepted.
 func HostICMPPlan() []FilterSpec {
 	return []FilterSpec{
 		{Name: "refuse ICMP API echo (IPv4) while an agent is enforced", Layer: LayerConnectV4,

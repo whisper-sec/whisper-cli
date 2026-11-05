@@ -545,3 +545,61 @@ func TestCellStringNumbersEitherDecoding(t *testing.T) {
 		}
 	}
 }
+
+// --user asks about a login. The ssh half decides it alongside the port, and a server
+// that answered only the port must not exit 0 as though the login were allowed.
+func TestWhaleACLTestUserAsksTheSshViewAndRefusesAnUnansweredLogin(t *testing.T) {
+	header := `["whale-acltest",{"src":"tag:ops","dst":"tag:db:22","state":"ok","note":"n"}],`
+	allow := `"proto":"any","port":22,"verdict":"allow","why":"clause grants[0]"`
+	cases := []struct {
+		name, row string
+		fails     bool
+		want      string
+	}{
+		{"admitted", `["whale-acltest",{"src":"2a04:2a01::11","src_name":"ops-01","dst":"2a04:2a01::21",` + allow +
+			`,"ssh_user":"root","ssh":"admit","ssh_why":"ssh rule ssh[0] admits it as root"}]`, false, "ADMIT as root"},
+		{"refused", `["whale-acltest",{"src":"2a04:2a01::11","src_name":"ops-01","dst":"2a04:2a01::21",` + allow +
+			`,"ssh_user":"root","ssh":"deny","ssh_why":"no ssh rule admits this source to that node"}]`, true, "DENY as root"},
+		{"an older server", `["whale-acltest",{"src":"2a04:2a01::11","src_name":"ops-01","dst":"2a04:2a01::21",` + allow + `}]`,
+			true, ""},
+	}
+	for _, c := range cases {
+		f := &aclFixture{policy: aclPublishedRows, acltest: header + c.row}
+		srv := f.server(t)
+		out, _, err := runWhaleACL(t, srv, "whale", "acl", "test", "tag:ops", "tag:db:22", "--user", "root")
+		srv.Close()
+		if (err != nil) != c.fails {
+			t.Fatalf("%s: err = %v", c.name, err)
+		}
+		if c.want != "" && !strings.Contains(out, c.want) {
+			t.Fatalf("%s: out =\n%s", c.name, out)
+		}
+		if c.name == "an older server" && !strings.Contains(err.Error(), "network half only") {
+			t.Fatalf("%s: err = %v", c.name, err)
+		}
+	}
+}
+
+// The --explain note follows what the control plane reports about the ssh block, and keeps
+// the old "not compiled" sentence only for a control plane that reports nothing.
+func TestSSHNoteSaysWhatTheControlPlaneReportsAboutTheSshBlock(t *testing.T) {
+	doc := `["whale.acl.document","{\"ssh\":[{\"src\":[\"tag:ops\"],\"dst\":[\"tag:db\"],\"users\":[\"root\"]}]}"]`
+	for state, want := range map[string]string{
+		"enforced":       "also requires an ssh rule naming you",
+		"invalid_stored": "cannot be enforced as it stands",
+		"":               "does not compile it yet",
+	} {
+		rows := `["whale.acl.hash","sha256:abc"],` + doc
+		if state != "" {
+			rows += `,["whale.acl.ssh","` + state + `"]`
+		}
+		env, err := client.DecodeEnvelope(carried("policy",
+			`"ok":true,"status":200,"result":{"columns":["key","value"],"rows":[`+rows+`]},"error":null`), 200)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := whaleSSHNoteFor("where", env); !strings.Contains(got, want) {
+			t.Fatalf("state %q: note = %q", state, got)
+		}
+	}
+}

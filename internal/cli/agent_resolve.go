@@ -169,16 +169,35 @@ func choiceMatchesSelector(ch agentChoice, sel string) bool {
 	if sel == "" {
 		return false
 	}
-	if ch.name == sel || ch.addr == sel || ch.id == sel {
+	if ch.name == sel || ch.addr == sel || sameAgentID(ch.id, sel) {
 		return true
 	}
 	if ch.name != "" && strings.EqualFold(ch.name, sel) {
 		return true
 	}
-	if ch.id != "" && strings.EqualFold(ch.id, sel) {
+	if ch.id != "" && strings.EqualFold(agentIDCore(ch.id), agentIDCore(sel)) {
 		return true
 	}
 	return sameIP(ch.addr, sel)
+}
+
+// agentIDCore is an agent id without its optional "agent-" prefix. The control plane spells one
+// id two ways: op:register prints agent-<hex>, and an agent key's own listing carries the bare
+// <hex> (an owner's listing carries the prefixed form). Both name the same agent, so a selector
+// in either spelling must match a listing in either spelling.
+func agentIDCore(id string) string {
+	id = strings.TrimSpace(id)
+	if len(id) > len("agent-") && strings.EqualFold(id[:len("agent-")], "agent-") {
+		return id[len("agent-"):]
+	}
+	return id
+}
+
+// sameAgentID reports whether a and b are the same agent id, written with or without the
+// "agent-" prefix. An empty id names nothing.
+func sameAgentID(a, b string) bool {
+	ca, cb := agentIDCore(a), agentIDCore(b)
+	return ca != "" && ca == cb
 }
 
 // selectAgent finds the ONE agent sel names, for every surface that turns a selector into an
@@ -198,7 +217,7 @@ func selectAgent(choices []agentChoice, sel string) (ch agentChoice, ok bool, er
 	var exact, folded []agentChoice
 	for _, c := range choices {
 		switch {
-		case c.name == sel || c.id == sel || c.addr == sel || sameIP(c.addr, sel):
+		case c.name == sel || sameAgentID(c.id, sel) || c.addr == sel || sameIP(c.addr, sel):
 			exact = appendDistinctAgent(exact, c)
 		case choiceMatchesSelector(c, sel):
 			folded = appendDistinctAgent(folded, c)
@@ -221,7 +240,7 @@ func selectAgent(choices []agentChoice, sel string) (ch agentChoice, ok bool, er
 // one agent twice (by /128, else by id) is not two agents answering to one name.
 func appendDistinctAgent(set []agentChoice, c agentChoice) []agentChoice {
 	for _, have := range set {
-		if (c.addr != "" && sameIP(have.addr, c.addr)) || (c.addr == "" && have.addr == "" && c.id != "" && have.id == c.id) {
+		if (c.addr != "" && sameIP(have.addr, c.addr)) || (c.addr == "" && have.addr == "" && sameAgentID(have.id, c.id)) {
 			return set
 		}
 	}

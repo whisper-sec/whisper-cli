@@ -48,7 +48,8 @@ func isProjectNotFound(err error) bool {
 // address, on every tier, wireguard included, because the wireguard tier's tunnel sits behind
 // the same proxy. The run says so under its success line (runCoverageNote).
 // `--enforce` (run_enforce_linux.go) covers all of it: the agent runs in a network namespace
-// whose only way out is its own /128, so there is nothing to ignore.
+// whose only way out is its own /128, so there is nothing to ignore. On Windows
+// (run_enforce_windows.go) the proxy becomes the only door: everything else is refused.
 
 func newRunCmd() *cobra.Command {
 	var agent, agentFile, tier, runAs string
@@ -62,13 +63,17 @@ func newRunCmd() *cobra.Command {
 			"Example:  whisper run curl https://example.com\n" +
 			"          whisper run git clone https://github.com/you/repo\n" +
 			"          whisper run --tier wireguard curl https://example.com   (TCP via the proxy)\n" +
-			"          sudo whisper run --enforce -- python3 agent.py          (Linux: no way around it)\n\n" +
+			"          sudo whisper run --enforce -- python3 agent.py          (Linux: no way around it)\n" +
+			"          whisper run --enforce -- python agent.py   (Windows, elevated: the proxy is the only door)\n\n" +
 			"Without --enforce the proxy carries TCP from curl/git/Node and every tool that\n" +
 			"honours the standard *_PROXY env, on every tier. UDP (a program's own DNS lookups,\n" +
 			"NTP, QUIC) and programs that dial directly leave from this host's own address.\n" +
 			"--enforce covers everything: the command runs in its own network namespace whose only\n" +
 			"way out is a WireGuard tunnel from its /128, so a program that ignores the proxy\n" +
-			"variables and dials an address directly still leaves from that /128, or is refused.\n\n" +
+			"variables and dials an address directly still leaves from that /128, or is refused.\n" +
+			"On Windows (from an elevated terminal) --enforce runs the command de-elevated in a\n" +
+			"logon session of its own whose only permitted connection is the local proxy: a direct\n" +
+			"dial is refused, and ICMP echo is refused on the host while it runs.\n\n" +
 			"Which agent: --agent <name|id|/128>, or --create --name <name> for a new one, or\n" +
 			"--name <name> for the agent of that name. Else the project's .whisper/config, then\n" +
 			"this host's saved agent, then a `whisper connect` already running here, then the\n" +
@@ -124,7 +129,8 @@ func newClaudeCmd() *cobra.Command {
 			"Use --tier wireguard for a routed Whisper /128 over a userspace WireGuard tunnel.\n" +
 			"Either way Claude Code reaches it through the proxy, which carries TCP: UDP and\n" +
 			"programs that dial directly leave from this host's own address. On Linux,\n" +
-			"sudo whisper claude --enforce sends everything from the /128.\n\n" +
+			"sudo whisper claude --enforce sends everything from the /128; on Windows, from an\n" +
+			"elevated terminal, whisper claude --enforce refuses every connection but the proxy.\n\n" +
 			"It picks the agent exactly as `whisper run` does (--agent, --create, --name), and\n" +
 			"never one of your account's existing agents you did not name.",
 		Args:               cobra.ArbitraryArgs,
@@ -173,7 +179,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string, viaC
 	// person reads "verified".
 	if !g.quiet {
 		writeSuccessLine(io.Discard, os.Stderr, sess, false)
-		fmt.Fprintln(os.Stderr, runCoverageNote(runtime.GOOS, runEnforceForm(name, viaClaude)))
+		fmt.Fprintln(os.Stderr, runCoverageNote(runtime.GOOS, runEnforceForm(runtime.GOOS, name, viaClaude)))
 	}
 
 	child := exec.Command(name, childArgs...)
@@ -374,7 +380,7 @@ var enforceSeccomp string
 // addEnforceFlags adds --enforce, --user and --seccomp to run and claude, which share them exactly.
 func addEnforceFlags(cmd *cobra.Command, enforced *bool, runAs *string) {
 	cmd.Flags().BoolVar(enforced, "enforce", false,
-		"Linux, as root: run in a network namespace whose only way out is this agent's /128 (fail closed)")
+		"Linux, as root: run in a network namespace whose only way out is this agent's /128; Windows, elevated: refuse every connection but the local proxy (fail closed)")
 	cmd.Flags().StringVar(runAs, "user", "", "with --enforce: the account the command runs as (default: the account that ran sudo)")
 	cmd.Flags().StringVar(&enforceSeccomp, "seccomp", "",
 		"with --enforce: default (refuse vsock sockets and io_uring), strict (also new user namespaces), or off")
