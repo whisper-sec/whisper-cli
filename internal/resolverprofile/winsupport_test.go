@@ -226,3 +226,40 @@ func findLine(t *testing.T, script, marker string) string {
 	t.Fatalf("no line containing %q in:\n%s", marker, script)
 	return ""
 }
+
+// Add-DnsClientNrptRule adds a rule beside any existing one rather than
+// replacing it, so the second `whisper resolver` on Server 2022 left two
+// identical "." rules. The apply now clears exactly our tagged rules before it
+// adds, which makes a re-apply converge on one rule per namespace.
+func TestT2ApplyWinNrptReapplyConverges(t *testing.T) {
+	r := t2winDoHProfile().Render(Host{})
+	script := r.ApplyScript()
+	clear := "Get-DnsClientNrptRule | Where-Object Comment -eq 'whisper-resolver' | Remove-DnsClientNrptRule -Force"
+	ci := strings.Index(script, clear)
+	ai := strings.Index(script, "Add-DnsClientNrptRule -Namespace")
+	if ci < 0 || ai < 0 {
+		t.Fatalf("apply must clear our tagged rules and then add one:\n%s", script)
+	}
+	if ci > ai {
+		t.Fatalf("our tagged rules must be cleared BEFORE the add, or a re-apply removes the rule it just made:\n%s", script)
+	}
+	if strings.Count(script, "Add-DnsClientNrptRule -Namespace") != 1 {
+		t.Fatalf("one namespace must render exactly one NRPT add:\n%s", script)
+	}
+	// Nothing but our own rules is ever selected for removal.
+	for _, line := range strings.Split(script, "\n") {
+		if strings.Contains(line, "Remove-DnsClientNrptRule") && !strings.Contains(line, "Where-Object Comment -eq 'whisper-resolver'") {
+			t.Fatalf("a removal that is not filtered to our comment would delete an admin's rule: %s", line)
+		}
+	}
+}
+
+// The adaptation for a build without NRPT DoH must leave the clearing step intact
+// (it carries no -DohTemplate), so old and new builds both converge.
+func TestT2ApplyWinNrptClearSurvivesOldBuildAdaptation(t *testing.T) {
+	r := t2winDoHProfile().Render(Host{})
+	adapted := adaptWinScript(r.ApplyScript(), winCaps{})
+	if !strings.Contains(adapted, "Get-DnsClientNrptRule | Where-Object Comment -eq 'whisper-resolver' | Remove-DnsClientNrptRule -Force") {
+		t.Fatalf("the old-build adaptation dropped the clearing step:\n%s", adapted)
+	}
+}

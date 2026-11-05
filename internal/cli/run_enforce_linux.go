@@ -110,6 +110,9 @@ func invokerFile(t enforceTarget, rootPath, leaf string) string {
 	if _, err := os.Lstat(rootPath); err == nil {
 		return ""
 	}
+	if !filepath.IsAbs(t.home) {
+		return "" // no invoker (not run through sudo): root's own files are the only ones
+	}
 	p := filepath.Join(t.home, ".config", "whisper", leaf)
 	if ownedRegularFile(p, int(t.uid)) {
 		return p
@@ -142,172 +145,17 @@ func runEnforced(agent, agentFile, tier, flagUser, name string, childArgs []stri
 	}
 	dir, _ := os.Getwd()
 
-	keyFile := g.keyFile
-	if keyFile == "" && g.key == "" && g.bearer == "" && os.Getenv("WHISPER_API_KEY") == "" {
-		keyFile = invokerFile(target, client.DefaultKeyFile(), "key")
-	}
-	c, err := resolveClientFrom(true, false, keyFile)
-	if err != nil {
-		return err
-	}
-	identityBorrow = func(handle string) (*idkey.Keypair, bool) {
-		p := filepath.Join(target.home, ".config", "whisper", "identity", filepath.Base(idkey.PathFor(handle)))
-		if !ownedRegularFile(p, int(target.uid)) {
-			return nil, false
-		}
-		kp, lerr := idkey.LoadFile(p)
-		return kp, lerr == nil
-	}
-	if agentFile == "" && strings.TrimSpace(agent) == "" {
-		agentFile = invokerFile(target, client.DefaultAgentFile(), "agent")
-	}
-	// The one selection rule (agent_pick.go): --agent, --create/--name, the project (when no
-	// agent file was found for the invoker), the invoker's saved agent. Never an existing agent the
-	// person did not name: an enforced run replaces that agent's peer. It does not make one on its
-	// own either, because it runs as root and root's saved agent file is not the one the invoker's
-	// next command reads; the refusal names `whisper run` as the user, --agent and --name.
-	pick, err := pickAgent(c, agentPickOpts{
-		agent: agent, agentFile: agentFile, create: g.create, name: g.name,
-		useProject: true, noCreate: true, noSave: true, command: "whisper run --enforce",
-		trustFile: invokerFile(target, defaultProjectTrustFile(), projectTrustLeaf),
+	up, err := bringUpEnforced(enforcedBringUp{
+		target: target, agent: agent, agentFile: agentFile,
+		command: "whisper run --enforce", notDone: "the agent was not started",
+		start: enforce.StartTunnel,
 	})
 	if err != nil {
 		return err
 	}
-	// An enforced run is always WireGuard, so a project config the invoking user never vouched
-	// for is asked about on a terminal and refused in a script. Root remembers nothing.
-	if _, gerr := projectGate(&pick, tierWireGuard, stdGuidedIO(), isInteractive(), false, "", "whisper run --enforce"); gerr != nil {
-		return gerr
-	}
-	sel := pick.sel
-	if note := peerReplacementNote(pick, tierWireGuard); note != "" && !g.quiet {
-		fmt.Fprintln(os.Stderr, note)
-	}
-	// One enforced run per /128 on this host, and no `whisper connect` beside it. The lock is
-	// taken BEFORE op:connect whenever the /128 is already known, because op:connect itself replaces
-	// whatever peer the box holds for it; a selector that only resolves inside op:connect is locked
-	// right after it, still before any tunnel or namespace exists.
-	var agentLock *enforce.AgentLock
-	defer func() { agentLock.Release() }()
-	if a, perr := netip.ParseAddr(sel); perr == nil {
-		if agentLock, err = enforce.LockExclusive(a); err != nil {
-			return usageErr("%s", err.Error())
-		}
-	}
-	// The box holds one peer per /128. Connecting here would replace a live `whisper connect`'s
-	// peer and kill its tunnel, so that is refused with the fix rather than done quietly.
-	cxr, cancelr := ctx()
-	_, live := findLiveSession(cxr, c, sel)
-	cancelr()
-	if live {
-		return usageErr("this agent is already connected by a running `whisper connect` on this host, and an " +
-			"enforced agent needs a tunnel of its own. Name another agent with --agent (`whisper create <name>` " +
-			"makes one), or stop that connect first")
-	}
-
-	logf := func(format string, args ...any) {
-		if !g.quiet {
-			fmt.Fprintf(os.Stderr, format+"\n", args...)
-		}
-	}
-	// From the connect on, a signal must not kill the CLI before it lets the /128 go: the peer it
-	// asked the box for is exclusive, and would refuse the agent's next connect until the reaper.
-	// Until the agent exists a signal ends the run through the same path as any other failure; the
-	// connect itself is not cut short, so its outcome is always known.
-	early := armEnforceSignals()
-	defer early.stop()
-
-	base := enforcedConnectBase(sel)
-	cx, cancel := ctx()
-	env, keys, err := connectTierEnvelope(cx, c, base, tierWireGuard, sel)
-	cancel()
-	if err != nil {
-		return err
-	}
-	// The run holds the /128 from here, and lets it go however it ends. release runs from
-	// this one deferred call on every return, and explicitly before os.Exit; it stops the tunnel
-	// itself, after deciding through it whether the peer is still this run's.
-	holdAddr := ""
-	if a, perr := netip.ParseAddr(sel); perr == nil {
-		holdAddr = a.String() // an answer that does not parse still leaves the named /128 to let go
-	}
-	hold := newEnforcedHold(c, base, keys, holdAddr, ctx, logf)
-	hold.noteGrant(env.Result)
-	stopTunnel := func() {}
-	defer func() { hold.release(stopTunnel) }()
-	ce, err := parseConnectEnvelope(env.Result)
-	if err != nil {
-		return err
-	}
-	hold.addr = ce.address
-	if !hold.granted.Load() {
-		logf("%s", notExclusiveNote(ce.address))
-	}
-	if err := early.interrupted(); err != nil {
-		return err
-	}
-	if !ce.isWireGuard() {
-		return &client.ProblemError{Status: 502, Detail: "the control plane did not return a WireGuard tunnel, so the agent was not started"}
-	}
-	if agentLock == nil {
-		if a, perr := netip.ParseAddr(ce.address); perr == nil {
-			if agentLock, err = enforce.LockExclusive(a); err != nil {
-				return usageErr("%s", err.Error())
-			}
-		}
-	}
-	var wgKey *wgtun.Keypair
-	if keys != nil {
-		wgKey = keys.wg
-	}
-	cfg, err := wireGuardConfig(ce, wgKey)
-	if err != nil {
-		return err
-	}
-	resolvers := wgtun.DNSServers(ce.wgDNS, ce.wgQuick)
-	if len(resolvers) == 0 {
-		return &client.ProblemError{Status: 502, Detail: "the control plane named no in-tunnel resolver, so the agent " +
-			"would have no DNS; it was not started"}
-	}
-	prefix := cfg.NAT64Prefix
-	if !prefix.IsValid() {
-		prefix, _ = wgtun.NAT64Prefix()
-	}
-	// Renew registers THIS device's key for the same agent again, for a tunnel that was dead
-	// long enough for the box to forget its peer. It is not a fresh connect: a fresh connect
-	// mints a new WireGuard key, which the running device does not hold.
-	// The periodic signed check-in a held session makes (checkIn) runs on the tunnel's own
-	// goroutine, so it never overlaps the tunnel's renewal of a dead peer.
-	tun, err := enforce.StartTunnel(cfg, enforce.Policy{Resolvers: resolvers, NAT64: prefix},
-		enforce.Options{Logf: logf, Renew: hold.renew, CheckInEvery: checkInEvery, Jitter: renewJitter})
-	if err != nil {
-		return &client.ProblemError{Status: 502, Detail: strings.TrimPrefix(err.Error(), "enforce: ")}
-	}
-	stopTunnel = tun.Stop
-
-	vcx, vcancel := context.WithTimeout(early.ctx, 45*time.Second)
-	observed, verr := echoInsideRetry(vcx, tun.NS, "ip6")
-	v4, v4err := echoInsideRetry(vcx, tun.NS, "ip4")
-	vcancel()
-	if err := early.interrupted(); err != nil {
-		return err
-	}
-	if verr != nil || !sameIP(observed, ce.address) {
-		why := "the echo saw " + observed
-		if verr != nil {
-			why = verr.Error()
-		}
-		return &client.ProblemError{Status: 502, Detail: "the tunnel came up but its egress did not verify as " +
-			ce.address + " (" + why + "), so the agent was not started"}
-	}
-	label := firstNonBlank(displayName(env.Result), ce.address)
-	v4note := "IPv4 leaves through Whisper's NAT64"
-	if v4err == nil && v4 != "" {
-		v4note += " as " + v4
-	} else {
-		v4note = "IPv4 through the tunnel did not answer, so IPv4 destinations will be refused (never leaked)"
-	}
-	logf("Enforced as %s - %s ✓ verified from inside the agent's namespace; %s", label, ce.address, v4note)
+	defer up.close()
+	ce, hold, tun, logf, early := up.ce, up.hold, up.tun, up.logf, up.early
+	logf("Enforced as %s - %s ✓ verified from inside the agent's namespace; %s", up.label, ce.address, up.v4note)
 
 	spec := enforce.Spec{
 		Path:      path,
@@ -317,7 +165,7 @@ func runEnforced(agent, agentFile, tier, flagUser, name string, childArgs []stri
 		UID:       target.uid,
 		GID:       target.gid,
 		Groups:    target.groups,
-		Resolvers: addrStrings(resolvers),
+		Resolvers: addrStrings(up.resolvers),
 		Seccomp:   seccompMode,
 	}
 	if seccompMode == enforce.SeccompOff {
@@ -365,6 +213,237 @@ func runEnforced(agent, agentFile, tier, flagUser, name string, childArgs []stri
 	return nil
 }
 
+// enforcedBringUp is what an enforced run and a containment pass to bringUpEnforced.
+type enforcedBringUp struct {
+	target           enforceTarget // whose key and agent files are read, when root's own has none
+	agent, agentFile string
+	command          string // how the command names itself in a refusal
+	notDone          string // what a failure says was not done
+	interruptNote    string // what an interruption says was not done; empty keeps the run's wording
+	start            func(wgtun.Config, enforce.Policy, enforce.Options) (*enforce.Tunnel, error)
+}
+
+// enforcedUp is an enforced tunnel that is up and verified: the connect, the hold at the box, the
+// per-/128 lock and the tunnel. `whisper run --enforce` puts a new agent behind it and `whisper
+// contain` a running one; neither starts until this has verified the egress through the tunnel.
+type enforcedUp struct {
+	c      *client.Client
+	ce     connectEnvelope
+	hold   *enforcedHold
+	tun    *enforce.Tunnel
+	lock   *enforce.AgentLock
+	early  *enforceSignals
+	logf   func(string, ...any)
+	label  string
+	v4note string
+	// resolvers are the in-tunnel resolvers the box named, the only DNS destinations.
+	resolvers []netip.Addr
+}
+
+// close lets everything go in the order it was taken: the /128 at the box (which stops the
+// tunnel itself, after deciding through it whether the peer is still this run's), the early
+// signal handler, then the lock. Safe on a partly built value and more than once.
+func (u *enforcedUp) close() {
+	if u == nil {
+		return
+	}
+	if u.hold != nil {
+		stop := func() {}
+		if u.tun != nil {
+			stop = u.tun.Stop
+		}
+		u.hold.release(stop)
+	} else if u.tun != nil {
+		u.tun.Stop()
+	}
+	if u.early != nil {
+		u.early.stop()
+	}
+	u.lock.Release()
+}
+
+// bringUpEnforced is steps 1 to 4 of an enforced run (see the top of this file): the key and the
+// agent, the lock, the connect, the tunnel through o.start, and the egress verified through it.
+// On any failure everything it took is let go again before it returns.
+func bringUpEnforced(o enforcedBringUp) (_ *enforcedUp, err error) {
+	target := o.target
+	u := &enforcedUp{}
+	ok := false
+	defer func() {
+		if !ok {
+			u.close()
+		}
+	}()
+	keyFile := g.keyFile
+	if keyFile == "" && g.key == "" && g.bearer == "" && os.Getenv("WHISPER_API_KEY") == "" {
+		keyFile = invokerFile(target, client.DefaultKeyFile(), "key")
+	}
+	c, err := resolveClientFrom(true, false, keyFile)
+	if err != nil {
+		return nil, err
+	}
+	identityBorrow = func(handle string) (*idkey.Keypair, bool) {
+		p := filepath.Join(target.home, ".config", "whisper", "identity", filepath.Base(idkey.PathFor(handle)))
+		if !ownedRegularFile(p, int(target.uid)) {
+			return nil, false
+		}
+		kp, lerr := idkey.LoadFile(p)
+		return kp, lerr == nil
+	}
+	agent, agentFile := o.agent, o.agentFile
+	if agentFile == "" && strings.TrimSpace(agent) == "" {
+		agentFile = invokerFile(target, client.DefaultAgentFile(), "agent")
+	}
+	// The one selection rule (agent_pick.go): --agent, --create/--name, the project (when no
+	// agent file was found for the invoker), the invoker's saved agent. Never an existing agent the
+	// person did not name: an enforced run replaces that agent's peer. It does not make one on its
+	// own either, because it runs as root and root's saved agent file is not the one the invoker's
+	// next command reads; the refusal names `whisper run` as the user, --agent and --name.
+	pick, err := pickAgent(c, agentPickOpts{
+		agent: agent, agentFile: agentFile, create: g.create, name: g.name,
+		useProject: true, noCreate: true, noSave: true, command: o.command,
+		trustFile: invokerFile(target, defaultProjectTrustFile(), projectTrustLeaf),
+	})
+	if err != nil {
+		return nil, err
+	}
+	// An enforced run is always WireGuard, so a project config the invoking user never vouched
+	// for is asked about on a terminal and refused in a script. Root remembers nothing.
+	if _, gerr := projectGate(&pick, tierWireGuard, stdGuidedIO(), isInteractive(), false, "", o.command); gerr != nil {
+		return nil, gerr
+	}
+	sel := pick.sel
+	if note := peerReplacementNote(pick, tierWireGuard); note != "" && !g.quiet {
+		fmt.Fprintln(os.Stderr, note)
+	}
+	// One enforced run per /128 on this host, and no `whisper connect` beside it. The lock is
+	// taken BEFORE op:connect whenever the /128 is already known, because op:connect itself replaces
+	// whatever peer the box holds for it; a selector that only resolves inside op:connect is locked
+	// right after it, still before any tunnel or namespace exists.
+	if a, perr := netip.ParseAddr(sel); perr == nil {
+		if u.lock, err = enforce.LockExclusive(a); err != nil {
+			return nil, usageErr("%s", err.Error())
+		}
+	}
+	// The box holds one peer per /128. Connecting here would replace a live `whisper connect`'s
+	// peer and kill its tunnel, so that is refused with the fix rather than done quietly.
+	cxr, cancelr := ctx()
+	_, live := findLiveSession(cxr, c, sel)
+	cancelr()
+	if live {
+		return nil, usageErr("this agent is already connected by a running `whisper connect` on this host, and an " +
+			"enforced agent needs a tunnel of its own. Name another agent with --agent (`whisper create <name>` " +
+			"makes one), or stop that connect first")
+	}
+
+	logf := func(format string, args ...any) {
+		if !g.quiet {
+			fmt.Fprintf(os.Stderr, format+"\n", args...)
+		}
+	}
+	// From the connect on, a signal must not kill the CLI before it lets the /128 go: the peer it
+	// asked the box for is exclusive, and would refuse the agent's next connect until the reaper.
+	// Until the agent exists a signal ends the run through the same path as any other failure; the
+	// connect itself is not cut short, so its outcome is always known.
+	early := armEnforceSignals()
+	early.notDone = o.interruptNote
+	u.early, u.logf = early, logf
+
+	base := enforcedConnectBase(sel)
+	cx, cancel := ctx()
+	env, keys, err := connectTierEnvelope(cx, c, base, tierWireGuard, sel)
+	cancel()
+	if err != nil {
+		return nil, err
+	}
+	// The run holds the /128 from here, and lets it go however it ends: close releases it
+	// on a failure here, and the caller's deferred close() (or an explicit release before os.Exit)
+	// afterwards. It stops the tunnel itself, after deciding through it whether the peer is still this run's.
+	holdAddr := ""
+	if a, perr := netip.ParseAddr(sel); perr == nil {
+		holdAddr = a.String() // an answer that does not parse still leaves the named /128 to let go
+	}
+	hold := newEnforcedHold(c, base, keys, holdAddr, ctx, logf)
+	hold.noteGrant(env.Result)
+	u.hold = hold
+	ce, err := parseConnectEnvelope(env.Result)
+	if err != nil {
+		return nil, err
+	}
+	hold.addr = ce.address
+	if !hold.granted.Load() {
+		logf("%s", notExclusiveNote(ce.address))
+	}
+	if err := early.interrupted(); err != nil {
+		return nil, err
+	}
+	if !ce.isWireGuard() {
+		return nil, &client.ProblemError{Status: 502, Detail: "the control plane did not return a WireGuard tunnel, so " + o.notDone}
+	}
+	if u.lock == nil {
+		if a, perr := netip.ParseAddr(ce.address); perr == nil {
+			if u.lock, err = enforce.LockExclusive(a); err != nil {
+				return nil, usageErr("%s", err.Error())
+			}
+		}
+	}
+	var wgKey *wgtun.Keypair
+	if keys != nil {
+		wgKey = keys.wg
+	}
+	cfg, err := wireGuardConfig(ce, wgKey)
+	if err != nil {
+		return nil, err
+	}
+	resolvers := wgtun.DNSServers(ce.wgDNS, ce.wgQuick)
+	if len(resolvers) == 0 {
+		return nil, &client.ProblemError{Status: 502, Detail: "the control plane named no in-tunnel resolver, so there " +
+			"would be no DNS; " + o.notDone}
+	}
+	prefix := cfg.NAT64Prefix
+	if !prefix.IsValid() {
+		prefix, _ = wgtun.NAT64Prefix()
+	}
+	// Renew registers THIS device's key for the same agent again, for a tunnel that was dead
+	// long enough for the box to forget its peer. It is not a fresh connect: a fresh connect
+	// mints a new WireGuard key, which the running device does not hold.
+	// The periodic signed check-in a held session makes (checkIn) runs on the tunnel's own
+	// goroutine, so it never overlaps the tunnel's renewal of a dead peer.
+	tun, err := o.start(cfg, enforce.Policy{Resolvers: resolvers, NAT64: prefix},
+		enforce.Options{Logf: logf, Renew: hold.renew, CheckInEvery: checkInEvery, Jitter: renewJitter})
+	if err != nil {
+		return nil, &client.ProblemError{Status: 502, Detail: strings.TrimPrefix(err.Error(), "enforce: ")}
+	}
+	u.tun = tun
+
+	vcx, vcancel := context.WithTimeout(early.ctx, 45*time.Second)
+	observed, verr := echoInsideRetry(vcx, tun.NS, "ip6")
+	v4, v4err := echoInsideRetry(vcx, tun.NS, "ip4")
+	vcancel()
+	if err := early.interrupted(); err != nil {
+		return nil, err
+	}
+	if verr != nil || !sameIP(observed, ce.address) {
+		why := "the echo saw " + observed
+		if verr != nil {
+			why = verr.Error()
+		}
+		return nil, &client.ProblemError{Status: 502, Detail: "the tunnel came up but its egress did not verify as " +
+			ce.address + " (" + why + "), so " + o.notDone}
+	}
+	u.label = firstNonBlank(displayName(env.Result), ce.address)
+	u.v4note = "IPv4 leaves through Whisper's NAT64"
+	if v4err == nil && v4 != "" {
+		u.v4note += " as " + v4
+	} else {
+		u.v4note = "IPv4 through the tunnel did not answer, so IPv4 destinations will be refused (never leaked)"
+	}
+	u.c, u.ce, u.resolvers = c, ce, resolvers
+	ok = true
+	return u, nil
+
+}
+
 // enforceSignals holds INT, TERM, HUP and QUIT from the connect until the agent exists, so a signal
 // in that time ends the run through its ordinary teardown instead of killing the CLI with the /128
 // still held at the box. ctx is cancelled by the first one.
@@ -376,6 +455,8 @@ type enforceSignals struct {
 	done     chan struct{}
 	finished chan struct{}
 	stopOnce sync.Once
+	// notDone is what an interruption says was not done; empty keeps the enforced run's wording.
+	notDone string
 }
 
 func armEnforceSignals() *enforceSignals {
@@ -422,6 +503,9 @@ func (s *enforceSignals) interrupted() error {
 		return nil
 	}
 	sig := syscall.Signal(n)
+	if s.notDone != "" {
+		return &exitCodeError{code: 128 + int(n), msg: "interrupted (" + sig.String() + ") before it was done, so " + s.notDone}
+	}
 	return &exitCodeError{code: 128 + int(n), msg: "interrupted (" + sig.String() + ") before the agent started, so it was not started"}
 }
 

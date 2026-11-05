@@ -50,12 +50,13 @@ func newWhaleSSHProxyCmd() *cobra.Command {
 			if err != nil {
 				return usageErr("port %v", err)
 			}
-			conn, err := whaleSSHProxyDial(args[0], port, firstNonBlank(strings.TrimSpace(name), args[0]))
+			label := firstNonBlank(strings.TrimSpace(name), args[0])
+			conn, from, err := whaleSSHProxyDial(args[0], port, label)
 			if err != nil {
 				return err
 			}
 			defer conn.Close()
-			return whaleSSHProxySplice(conn, os.Stdin, os.Stdout, firstNonBlank(strings.TrimSpace(name), args[0]), port)
+			return whaleSSHProxySplice(conn, os.Stdin, os.Stdout, label, port, from)
 		},
 	}
 	cmd.Flags().StringVar(&name, "name", "", "the node as the user named it, for messages")
@@ -108,8 +109,9 @@ var whaleSSHDirectDial = func(ctx context.Context, address string) (net.Conn, er
 var errProxyRefused = errors.New("refused")
 
 // whaleSSHProxyDial makes the connection and, when it fails, returns the sentence that names
-// the fix.
-func whaleSSHProxyDial(host string, port int, name string) (net.Conn, error) {
+// the fix. from is the /128 the dial left from, or "" when this host had no routed session and
+// dialled from its own address.
+func whaleSSHProxyDial(host string, port int, name string) (net.Conn, string, error) {
 	cx, cancel := context.WithTimeout(context.Background(), whaleSSHDialTimeout)
 	defer cancel()
 	target := net.JoinHostPort(strings.Trim(host, "[]"), strconv.Itoa(port))
@@ -122,9 +124,9 @@ func whaleSSHProxyDial(host string, port int, name string) (net.Conn, error) {
 		conn, err = whaleSSHDirectDial(cx, target)
 	}
 	if err == nil {
-		return conn, nil
+		return conn, from, nil
 	}
-	return nil, whaleSSHDialProblem(name, port, from, err, cx.Err() != nil)
+	return nil, from, whaleSSHDialProblem(name, port, from, err, cx.Err() != nil)
 }
 
 // whaleSSHDialProblem is the message for a dial that failed. refused means the node's side
@@ -146,14 +148,20 @@ func whaleSSHDialProblem(name string, port int, from string, err error, timedOut
 	}
 	detail := fmt.Sprintf("%s did not answer on port %d within %s. Either it is not connected, or it does not "+
 		"accept %d on its /128 (%s), or it does not admit this host.", name, port, whaleSSHDialTimeout, port, fix)
-	if from == "" {
-		detail += " This host holds no routed Whisper connection, so the dial left from its own address rather " +
-			"than from a /128 in your fleet, and a node that admits only its fleet does not answer that. " +
-			"Run `whisper connect` here first."
-	} else {
-		detail += " It was dialled from this host's " + from + "."
+	return &client.ProblemError{Status: 504, Title: "no answer", Detail: detail + whaleSSHFromNote(from)}
+}
+
+// whaleSSHFromNote says where the dial left from. With no routed session record the dial used
+// this host's own address, which a node that admits only its fleet turns away, and the usual
+// cause is either no connection here at all or a resident one whose record is missing.
+func whaleSSHFromNote(from string) string {
+	if from != "" {
+		return " It was dialled from this host's " + from + "."
 	}
-	return &client.ProblemError{Status: 504, Title: "no answer", Detail: detail}
+	return " This host has no record of a routed Whisper connection, so the dial left from its own address " +
+		"rather than from a /128 in your fleet, and a node that admits only its fleet does not answer that. " +
+		"Run `whisper connect` here first; if a connection is already running (a service or another terminal), " +
+		"restart it so it writes its session record, and check with `whisper status`."
 }
 
 // isConnRefused reports a refused direct dial on every platform: Windows reports it as
@@ -261,8 +269,9 @@ func socks5Connect(ctx context.Context, proxyPort int, target string) (net.Conn,
 // half-close and ending when the far side does.
 // A connection the far end closes before saying anything at all is a node whose accept rules
 // turned this host away (an sshd always speaks first), and that is said, because ssh's own
-// reading of it is "Connection closed by UNKNOWN port 65535".
-func whaleSSHProxySplice(conn net.Conn, in io.Reader, out io.Writer, name string, port int) error {
+// reading of it is "Connection closed by UNKNOWN port 65535". The problem is marked
+// localActionable so it is never rendered as an API-key refusal: the key played no part.
+func whaleSSHProxySplice(conn net.Conn, in io.Reader, out io.Writer, name string, port int, from string) error {
 	var got int64
 	go func() {
 		_, _ = io.Copy(conn, in)
@@ -274,11 +283,13 @@ func whaleSSHProxySplice(conn net.Conn, in io.Reader, out io.Writer, name string
 	n, _ := io.Copy(out, conn)
 	got = n
 	if got == 0 {
-		return &client.ProblemError{Status: 403, Title: "closed before the service spoke", Detail: fmt.Sprintf(
-			"%s took the connection on port %d and closed it before the service behind it said a word. Either its "+
-				"accept rules do not admit this host (it admits its own fleet unless told otherwise with "+
-				"`--accept-from` or `--accept-public`), or nothing answers behind that port on the node. Its log "+
-				"says which, naming this host's address.", name, port)}
+		return &client.ProblemError{Status: 403, Type: localActionable, Title: "closed before the service spoke",
+			Detail: fmt.Sprintf(
+				"%s took the connection on port %d and closed it before the service behind it said a word; that is "+
+					"the node turning this connection away, not a problem with your API key. Either its accept rules "+
+					"do not admit this host (it admits its own fleet unless told otherwise with `--accept-from` or "+
+					"`--accept-public`), or nothing answers behind that port on the node. Its log says which, naming "+
+					"this host's address.", name, port) + whaleSSHFromNote(from)}
 	}
 	return nil
 }

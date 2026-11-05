@@ -284,6 +284,41 @@ func TestInstallWriteIsIdempotentAndRefreshes(t *testing.T) {
 	}
 }
 
+// The banner states the real scope: with --allow and --user the snippet admits
+// only the allowlisted agents, as only the named accounts, and the banner says so rather than
+// "every active agent among them may log in".
+func TestInstallBannerStatesTheNarrowedScope(t *testing.T) {
+	stubInstall(t, 1000, "/usr/local/bin/whisper", nil)
+	stubRoster(t, roster())
+	_, stderr, err := runAuthz(t, "install")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "every active agent among them may log in, as any local account except root") {
+		t.Fatalf("the default banner = %s", stderr)
+	}
+	_, stderr, err = runAuthz(t, "install", "--allow", "db-01", "--allow", "db-02", "--user", "deploy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stderr, "every active agent") {
+		t.Fatalf("a narrowed install still claims every agent: %s", stderr)
+	}
+	for _, want := range []string{"only the allowlisted agent(s) among them (db-01, db-02) may log in",
+		"as the local account(s) deploy and no other"} {
+		if !strings.Contains(stderr, want) {
+			t.Fatalf("banner = %s, want %q", stderr, want)
+		}
+	}
+	_, stderr, err = runAuthz(t, "install", "--user", "deploy", "--user", "ops")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(stderr, "every active agent among them may log in, as the local account(s) deploy, ops and no other") {
+		t.Fatalf("a --user-only banner = %s", stderr)
+	}
+}
+
 // A refresh that cannot read the roster keeps the file rather than narrowing it.
 func TestARefreshThatCannotReadTheRosterKeepsTheFile(t *testing.T) {
 	bin := rootOwnedBinary(t)
@@ -315,7 +350,8 @@ func TestInstallFallsBackToTheNodesOwnTenantAndSaysSo(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(out, "check --fleet tself.agents.whisper.online --") || !strings.Contains(stderr, "only this node's own tenant") {
+	if !strings.Contains(out, "check --fleet tself.agents.whisper.online --") || !strings.Contains(stderr, "only this node's own tenant") ||
+		!strings.Contains(stderr, "every active agent in it may log in") {
 		t.Fatalf("out=%s stderr=%s", out, stderr)
 	}
 }

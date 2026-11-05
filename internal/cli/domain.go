@@ -214,7 +214,7 @@ func termSafe(s string) string {
 	}, s)
 }
 
-// renderDomainVerdict prints the four links of the chain and, when they all hold, the one line
+// renderDomainVerdict prints the links of the chain and, when they all hold, the one line
 // that says so. A failure's sentence is printed by Execute, once.
 func renderDomainVerdict(d *client.DomainVerdict) {
 	rows := [][]string{
@@ -223,8 +223,11 @@ func renderDomainVerdict(d *client.DomainVerdict) {
 		{"delegated_to_whisper", triState(d.Checks.DelegatedToWhisper)},
 		{"ds_matches_key", triState(d.Checks.DSMatchesKey)},
 		{"validates_from_root", triState(d.Checks.ValidatesFromRoot)},
-		{"served_by_every_node", triState(d.Checks.ServedByEveryNode)},
 	}
+	if d.Checks.ChildKeyReported {
+		rows = append(rows, []string{"child_key_validates", triState(d.Checks.ChildKeyValidates)})
+	}
+	rows = append(rows, []string{"served_by_every_node", triState(d.Checks.ServedByEveryNode)})
 	if len(d.Nameservers) > 0 {
 		rows = append(rows, []string{"nameservers", termSafe(strings.Join(d.Nameservers, ", "))})
 	}

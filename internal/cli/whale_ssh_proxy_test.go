@@ -23,6 +23,7 @@ import (
 
 	xssh "golang.org/x/crypto/ssh"
 
+	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/whale"
 )
 
@@ -104,13 +105,13 @@ func TestARefusedDialNamesTheOneCommandThatFixesIt(t *testing.T) {
 func TestATimedOutDialNamesAllThreeCausesAndTheSource(t *testing.T) {
 	msg := whaleSSHDialProblem("db-01", 22, "", context.DeadlineExceeded, true).Error()
 	for _, must := range []string{"did not answer", "not connected", "whisper connect --accept 22",
-		"does not admit this host", "holds no routed Whisper connection", "Run `whisper connect` here first"} {
+		"does not admit this host", "no record of a routed Whisper connection", "Run `whisper connect` here first"} {
 		if !strings.Contains(msg, must) {
 			t.Errorf("missing %q: %s", must, msg)
 		}
 	}
 	msg = whaleSSHDialProblem("db-01", 22, "2a04:2a01::7", context.DeadlineExceeded, true).Error()
-	if !strings.Contains(msg, "dialled from this host's 2a04:2a01::7") || strings.Contains(msg, "holds no routed") {
+	if !strings.Contains(msg, "dialled from this host's 2a04:2a01::7") || strings.Contains(msg, "no record of a routed") {
 		t.Errorf("with a session the source is named instead: %s", msg)
 	}
 	// A refusal that arrives after the budget is still a timeout to the person waiting.
@@ -128,7 +129,7 @@ func TestTheProxyDialReportsAClosedPortAsNotAccepting(t *testing.T) {
 	ln, _ := net.Listen("tcp", "127.0.0.1:0")
 	port := ln.Addr().(*net.TCPAddr).Port
 	ln.Close()
-	_, err := whaleSSHProxyDial("127.0.0.1", port, "db-01")
+	_, _, err := whaleSSHProxyDial("127.0.0.1", port, "db-01")
 	if err == nil || !strings.Contains(err.Error(), "db-01 is not accepting") {
 		t.Fatalf("err = %v", err)
 	}
@@ -265,10 +266,50 @@ func TestSOCKS5ConnectCarriesBytesAndReadsAFailure(t *testing.T) {
 func TestTheProxySpliceSaysWhenANodeTurnsTheCallerAway(t *testing.T) {
 	a, b := net.Pipe()
 	go func() { b.Close() }() // the node accepted and closed without a word
-	err := whaleSSHProxySplice(a, strings.NewReader(""), io.Discard, "db-01", 22)
+	err := whaleSSHProxySplice(a, strings.NewReader(""), io.Discard, "db-01", 22, "2a04:2a01:9::50")
 	if err == nil || !strings.Contains(err.Error(), "before the service behind it said a word") ||
 		!strings.Contains(err.Error(), "--accept-from") || !strings.Contains(err.Error(), "nothing answers behind that port") {
 		t.Fatalf("err = %v", err)
+	}
+}
+
+// The node closing before sshd speaks is not an API-key refusal. Before the fix the
+// rendered line was "your key was not accepted - run: whisper login" while whoami worked.
+func TestTheProxySpliceRefusalIsNeverRenderedAsABadKey(t *testing.T) {
+	a, b := net.Pipe()
+	go func() { b.Close() }()
+	err := whaleSSHProxySplice(a, strings.NewReader(""), io.Discard, "db-01", 22, "2a04:2a01:9::50")
+	line := friendly(err)
+	if strings.Contains(line, "whisper login") || strings.Contains(line, "key was not accepted") {
+		t.Fatalf("rendered as a key problem: %q", line)
+	}
+	for _, want := range []string{"before the service behind it said a word", "not a problem with your API key",
+		"dialled from this host's 2a04:2a01:9::50"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("line = %q, want it to contain %q", line, want)
+		}
+	}
+}
+
+// With no session record the dial left from the host's own address; the line says so, and says
+// what to do, including the resident-connection case seen live.
+func TestTheProxySpliceNamesAMissingSessionRecord(t *testing.T) {
+	a, b := net.Pipe()
+	go func() { b.Close() }()
+	line := friendly(whaleSSHProxySplice(a, strings.NewReader(""), io.Discard, "db-01", 22, ""))
+	for _, want := range []string{"no record of a routed Whisper connection", "left from its own address",
+		"Run `whisper connect` here first", "restart it so it writes its session record"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("line = %q, want it to contain %q", line, want)
+		}
+	}
+}
+
+// A real 403 from the control plane still gets the login nudge: the exemption is ours alone.
+func TestARemote403StillGetsTheLoginNudge(t *testing.T) {
+	pe := &client.ProblemError{Status: 403, Title: "closed before the service spoke", Detail: "forbidden"}
+	if got := friendly(pe); got != "your key was not accepted - run: whisper login" {
+		t.Fatalf("a server 403 rendered %q", got)
 	}
 }
 
@@ -290,7 +331,7 @@ func TestTheProxySpliceCarriesBothWaysAndPassesTheHalfClose(t *testing.T) {
 		t.Fatal(err)
 	}
 	var out bytes.Buffer
-	if err := whaleSSHProxySplice(conn, strings.NewReader("hello"), &out, "db-01", 22); err != nil {
+	if err := whaleSSHProxySplice(conn, strings.NewReader("hello"), &out, "db-01", 22, ""); err != nil {
 		t.Fatalf("splice: %v", err)
 	}
 	if out.String() != "SSH-2.0-OpenSSH_9.9\r\nbye:5" {

@@ -44,7 +44,7 @@ func verifyDomainServer(t *testing.T, wantPath string, status int, header map[st
 // and keeps a check that was never reached (null) apart from one that failed (false).
 func TestVerifyDomainVerified(t *testing.T) {
 	body := `{"domain":"example.org","is_whisper_domain":true,"state":"verified","verdict":"delegated, signed and served",` +
-		`"checks":{"delegated_to_whisper":true,"ds_matches_key":true,"validates_from_root":true,"served_by_every_node":true},` +
+		`"checks":{"delegated_to_whisper":true,"ds_matches_key":true,"validates_from_root":true,"child_key_validates":true,"served_by_every_node":true},` +
 		`"nameservers":["ns1.whisper.online.","ns2.whisper.online."],"ds":["12345 13 2 abcd"],` +
 		`"detail":"","checked_at":1792627200,"settled":true}`
 	srv := verifyDomainServer(t, "/verify-domain/example.org", 200, nil, body)
@@ -67,11 +67,15 @@ func TestVerifyDomainVerified(t *testing.T) {
 	ch := v.Checks
 	for name, p := range map[string]*bool{
 		"delegated_to_whisper": ch.DelegatedToWhisper, "ds_matches_key": ch.DSMatchesKey,
-		"validates_from_root": ch.ValidatesFromRoot, "served_by_every_node": ch.ServedByEveryNode,
+		"validates_from_root": ch.ValidatesFromRoot, "child_key_validates": ch.ChildKeyValidates,
+		"served_by_every_node": ch.ServedByEveryNode,
 	} {
 		if p == nil || !*p {
 			t.Fatalf("check %s = %v, want true", name, p)
 		}
+	}
+	if !ch.ChildKeyReported {
+		t.Fatal("child_key_validates was sent; ChildKeyReported must say so")
 	}
 	if len(v.Nameservers) != 2 || len(v.DS) != 1 || v.CheckedAt != 1792627200 {
 		t.Fatalf("nameservers/ds/checked_at = %v / %v / %d", v.Nameservers, v.DS, v.CheckedAt)
@@ -100,7 +104,8 @@ func TestVerifyDomainUnreachedChecksStayNil(t *testing.T) {
 	if p := v.Checks.DelegatedToWhisper; p == nil || *p {
 		t.Fatalf("delegated_to_whisper = %v, want a present false", p)
 	}
-	if v.Checks.DSMatchesKey != nil || v.Checks.ValidatesFromRoot != nil || v.Checks.ServedByEveryNode != nil {
+	if v.Checks.DSMatchesKey != nil || v.Checks.ValidatesFromRoot != nil || v.Checks.ServedByEveryNode != nil ||
+		v.Checks.ChildKeyValidates != nil || v.Checks.ChildKeyReported {
 		t.Fatalf("an unreached check must stay nil, got %+v", v.Checks)
 	}
 	if v.Settled != nil {
@@ -235,5 +240,31 @@ func TestVerifyDomainTruncatedBody(t *testing.T) {
 	}
 	if status != 200 {
 		t.Fatalf("status = %d, want the 200 the server sent before it stopped", status)
+	}
+}
+
+// TestVerifyDomainChildKeyNullIsReportedFalseIsPresent keeps the three states of the fifth check
+// apart: a null the server sent is "not checked", a false is a check that failed, and the
+// two are both reported, unlike a key the server never sent.
+func TestVerifyDomainChildKeyNullIsReportedFalseIsPresent(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want *bool
+	}{{"null", nil}, {"false", new(bool)}} {
+		body := `{"domain":"example.org","is_whisper_domain":false,"state":"pending",` +
+			`"checks":{"delegated_to_whisper":true,"ds_matches_key":true,"validates_from_root":true,"child_key_validates":` + tc.raw + `}}`
+		srv := verifyDomainServer(t, "/verify-domain/example.org", 200, nil, body)
+		v, _, _, err := New(Config{VerifyURL: srv.URL, HTTPClient: srv.Client()}).VerifyDomain(context.Background(), "example.org")
+		srv.Close()
+		if err != nil {
+			t.Fatalf("%s: %v", tc.raw, err)
+		}
+		if !v.Checks.ChildKeyReported {
+			t.Fatalf("%s: a key the server sent must count as reported", tc.raw)
+		}
+		got := v.Checks.ChildKeyValidates
+		if (got == nil) != (tc.want == nil) || (got != nil && *got != *tc.want) {
+			t.Fatalf("%s: child_key_validates = %v, want %v", tc.raw, got, tc.want)
+		}
 	}
 }

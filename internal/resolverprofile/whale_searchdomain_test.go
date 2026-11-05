@@ -172,3 +172,28 @@ func TestDohModeAlsoInstallsTheSearchDomainOnEveryOS(t *testing.T) {
 		t.Fatal("the windows DoH plan must install the search domain too")
 	}
 }
+
+// Measured on Server 2022: when our suffix is the only entry, the filtered
+// pipeline is $null, and Set-DnsClientGlobalSetting -SuffixSearchList $null does
+// nothing at all while reporting success, so the revert left our suffix behind.
+// Both the apply and the revert must hand the cmdlet an array, never a bare pipeline.
+func TestWindowsSuffixListIsAlwaysPassedAsAnArray(t *testing.T) {
+	for _, mode := range []Mode{ModeDoH, ModeDNS53} {
+		p := Profile{Mode: mode, OS: "windows", DohTemplate: "https://doh.whisper.online/tok/dns-query",
+			ResolverIPs: []string{wbIP}, SearchDomains: []string{wbSuffix}}
+		r := p.Render(Host{})
+		seen := 0
+		for _, s := range append(append([]Step{}, r.Apply...), r.Revert...) {
+			if !strings.Contains(s.Shell, "Set-DnsClientGlobalSetting -SuffixSearchList") {
+				continue
+			}
+			seen++
+			if !strings.Contains(s.Shell, "-SuffixSearchList @(") {
+				t.Fatalf("%s: the suffix list must be wrapped in @(...) so an empty result clears the list: %s", mode, s.Shell)
+			}
+		}
+		if seen != 2 {
+			t.Fatalf("%s: want one suffix-list step in apply and one in revert, saw %d", mode, seen)
+		}
+	}
+}

@@ -126,7 +126,8 @@ func newWhaleSSHAuthzCmd() *cobra.Command {
 			"Anything less, including a lookup that times out or an unsigned answer, prints\n" +
 			"nothing and sshd says \"Permission denied\". sshd reads authorized_keys before it\n" +
 			"runs the command, so keys you added by hand keep working. root is never admitted\n" +
-			"unless you name it with --user root. Every decision goes to the auth log.\n\n" +
+			"unless you name it with --user root. Every decision goes to the auth log (on\n" +
+			"macOS the unified log: log show --predicate 'eventMessage CONTAINS \"whisper-ssh-authz\"').\n\n" +
 			"  install   print the sshd_config snippet, or write it with --write (as root)\n" +
 			"  check     the AuthorizedKeysCommand itself",
 		Args: cobra.NoArgs,
@@ -593,7 +594,7 @@ func planSSHAuthzFleets(f *sshAuthzFlags, fleetsPath string) (sshAuthzFleetPlan,
 			return sshAuthzFleetPlan{}, fmt.Errorf("the fleet set read from your roster does not parse: %v", err)
 		}
 		return sshAuthzFleetPlan{file: fleetsPath, content: content, count: len(zones),
-			notes: []string{fmt.Sprintf("your roster holds %d agent tenant(s); every active agent among them may log in", len(zones))}}, nil
+			notes: []string{fmt.Sprintf("your roster holds %d agent tenant(s); %s", len(zones), sshAuthzScope(f, "among them"))}}, nil
 	}
 	why := "it lists no hosted agent"
 	if rerr != nil {
@@ -614,7 +615,22 @@ func planSSHAuthzFleets(f *sshAuthzFlags, fleetsPath string) (sshAuthzFleetPlan,
 	// nothing to put in it, so the command line names only the node's own tenant.
 	f.fleet, f.fleetFile = []string{fleet}, ""
 	return sshAuthzFleetPlan{notes: []string{"your roster could not be read (" + why + "), so only this node's own tenant, " +
-		strings.TrimSuffix(fleet, ".") + ", may log in; with a key on this host, run install again to admit the rest of your agents"}}, nil
+		strings.TrimSuffix(fleet, ".") + ", is admitted: " + sshAuthzScope(f, "in it") +
+		"; with a key on this host, run install again to admit the rest of your agents"}}, nil
+}
+
+// sshAuthzScope says who the snippet really admits, in the words of the flags it carries: every
+// active agent of the fleets, or only the --allow list, and as any account but root, or only the
+// --user accounts. where places the agents ("among them", "in it").
+func sshAuthzScope(f *sshAuthzFlags, where string) string {
+	s := "every active agent " + where + " may log in"
+	if allow := nonBlank(f.allow); len(allow) > 0 {
+		s = "only the allowlisted agent(s) " + where + " (" + strings.Join(allow, ", ") + ") may log in, and only while active"
+	}
+	if users := nonBlank(f.users); len(users) > 0 {
+		return s + ", as the local account(s) " + strings.Join(users, ", ") + " and no other"
+	}
+	return s + ", as any local account except root (uid 0)"
 }
 
 // sshAuthzRosterZones is the sorted, de-duplicated set of hosted tenant zones the roster's

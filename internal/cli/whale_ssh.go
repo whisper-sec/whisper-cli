@@ -400,6 +400,14 @@ func dialWhaleSSH(cx context.Context, v whaleSSHVerification, user string, port 
 	// when it holds a routed session and names the fix when the node is not accepting. A user
 	// who routes ssh themselves (-J, ProxyJump, ProxyCommand, on the command line or in their
 	// ssh config) keeps their route.
+	// The key ssh-authz admits is this host's Whisper identity key, which ssh never looks for
+	// on its own; offer it unless the user named a key themselves.
+	_, from := whaleSSHVia()
+	idArgs, idNote := whaleSSHIdentityArgs(sshOptions, from)
+	args = append(args, idArgs...)
+	if idNote != "" && !printOnly {
+		whaleNote("%s", idNote)
+	}
 	if wantSSHProxyCommand(sshPath, sshOptions, host) {
 		pc := fmt.Sprintf("%s %s proxy --name %s %%h %%p", sshArgQuote(sshTokenEscape(self)), sshVerb,
 			sshArgQuote(sshTokenEscape(firstNonBlank(v.Target, v.FQDN))))
@@ -644,20 +652,7 @@ func sshOptionsRoute(opts []string) bool {
 const sshArgFlags = "BbcDEeFIiJLlmOoPpQRSWw"
 
 // sshBundleHasJump reports whether one argument is a flag bundle containing -J.
-func sshBundleHasJump(s string) bool {
-	if len(s) < 2 || s[0] != '-' || s[1] == '-' {
-		return false
-	}
-	for _, c := range s[1:] {
-		if c == 'J' {
-			return true
-		}
-		if strings.ContainsRune(sshArgFlags, c) {
-			return false
-		}
-	}
-	return false
-}
+func sshBundleHasJump(s string) bool { return sshBundleHas(s, 'J') }
 
 // sshConfigRoutes asks ssh itself whether its configuration (~/.ssh/config, -F, Include)
 // routes this destination already, by reading `ssh -G`, the effective configuration. A seam

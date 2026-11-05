@@ -37,12 +37,35 @@ type DomainVerdict struct {
 	RetryAfter string `json:"-"`
 }
 
-// DomainChecks are the four links of a bring-your-own domain's chain.
+// DomainChecks are the links of a bring-your-own domain's chain, in the order the server checks them.
 type DomainChecks struct {
 	DelegatedToWhisper *bool `json:"delegated_to_whisper"`
 	DSMatchesKey       *bool `json:"ds_matches_key"`
 	ValidatesFromRoot  *bool `json:"validates_from_root"`
-	ServedByEveryNode  *bool `json:"served_by_every_node"`
+	// ChildKeyValidates is true when the public resolvers that attested the DS also validate the
+	// apex's own DNSKEY, false while they do not yet, and nil when the chain never got that far.
+	ChildKeyValidates *bool `json:"child_key_validates"`
+	ServedByEveryNode *bool `json:"served_by_every_node"`
+	// ChildKeyReported is false when the server predates child_key_validates and never sent the key,
+	// so the check is absent rather than "not checked".
+	ChildKeyReported bool `json:"-"`
+}
+
+// UnmarshalJSON decodes the checks and records whether the server reported child_key_validates at
+// all: a null is "not checked", a missing key is a server that does not know the check.
+func (c *DomainChecks) UnmarshalJSON(b []byte) error {
+	type plain DomainChecks
+	var p plain
+	if err := json.Unmarshal(b, &p); err != nil {
+		return err
+	}
+	var keys map[string]json.RawMessage
+	if err := json.Unmarshal(b, &keys); err != nil {
+		return err
+	}
+	_, p.ChildKeyReported = keys["child_key_validates"]
+	*c = DomainChecks(p)
+	return nil
 }
 
 // VerifyDomain asks the public, KEYLESS verify-domain endpoint about a bring-your-own domain apex.

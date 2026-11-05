@@ -42,7 +42,14 @@ type Namespace struct {
 	Inode     uint64 // the namespace's inode, which init checks itself against
 	HostInode uint64 // the host namespace's, which init checks it is NOT in
 	Dev       tun.Device
+	// host is set when the device lives in the HOST namespace instead (hostroute_linux.go): there
+	// is no namespace to enter, fd is -1, and a socket reaches the device only by carrying the
+	// route's mark.
+	host *HostRoute
 }
+
+// HostRoute returns the routing of a host-namespace device, or nil for an agent namespace.
+func (n *Namespace) HostRoute() *HostRoute { return n.host }
 
 // nsInode returns the inode of the calling thread's network namespace.
 func nsInode() (uint64, error) {
@@ -203,6 +210,9 @@ func (n *Namespace) DialContext(ctx context.Context, network, addr string) (net.
 	if _, perr := netip.ParseAddr(host); perr != nil {
 		return nil, errors.New("enforce: dial inside the namespace needs an IP literal")
 	}
+	if n.host != nil {
+		return n.host.dial(ctx, network, addr, host)
+	}
 	var c net.Conn
 	err = n.run(func() error {
 		var d net.Dialer
@@ -237,6 +247,9 @@ func (n *Namespace) Close() {
 	}
 	if n.Dev != nil {
 		n.Dev.Close()
+	}
+	if n.host != nil {
+		n.host.removeRules()
 	}
 	if n.fd >= 0 {
 		unix.Close(n.fd)

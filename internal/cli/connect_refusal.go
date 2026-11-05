@@ -282,7 +282,7 @@ func proveIdentityAfterCheck(c *client.Client, err error) error {
 		return err
 	}
 	return &identityGoneError{selector: check.addr, problem: &client.ProblemError{
-		Status: 404, Type: localActionable404,
+		Status: 404, Type: localActionable,
 		Detail: "the egress check failed (" + strings.TrimRight(friendly(check.cause), ".") +
 			"), and your account no longer has the agent " + check.addr +
 			" this session was bound to, so this device has no identity to connect as"}}

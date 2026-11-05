@@ -601,6 +601,12 @@ func (p Profile) renderWindows() Rendered {
 	r.Apply = []Step{
 		{Shell: "$ips = @((Resolve-DnsName " + dohHost + " -Type A -ErrorAction SilentlyContinue).IPAddress) + @((Resolve-DnsName " + dohHost + " -Type AAAA -ErrorAction SilentlyContinue).IPAddress) | Where-Object { $_ }"},
 		{Shell: "foreach ($srv in $ips) { Add-DnsClientDohServerAddress -ServerAddress $srv -DohTemplate " + tpl + " -AllowFallbackToUdp $false -AutoUpgrade $true -ErrorAction SilentlyContinue | Out-Null }"},
+		// Add-DnsClientNrptRule never replaces a rule, it adds another one beside it, so
+		// running `whisper resolver` twice left two identical "." rules on the machine
+		// (seen on Server 2022 during the per-OS proof). Clearing exactly our tagged
+		// rules first makes a re-apply converge on one rule per namespace, with the
+		// current server list, and never touches a rule somebody else made.
+		{Shell: "Get-DnsClientNrptRule | Where-Object Comment -eq " + psQuote(windowsNrptComment) + " | Remove-DnsClientNrptRule -Force"},
 	}
 	for _, ns := range p.matchDomains() {
 		r.Apply = append(r.Apply, Step{Shell: "Add-DnsClientNrptRule -Namespace " + psQuote(ns) + " -NameServers $ips -DohTemplate " + tpl + " -Comment " + psQuote(windowsNrptComment)})
@@ -631,11 +637,17 @@ func (p Profile) windowsSearchApply() []Step {
 	}
 	add := "@(" + strings.Join(quoted, ", ") + ")"
 	return []Step{{Shell: "$cur = @((Get-DnsClientGlobalSetting).SuffixSearchList); " +
-		"Set-DnsClientGlobalSetting -SuffixSearchList ($cur + " + add + " | Where-Object { $_ } | Select-Object -Unique)"}}
+		"Set-DnsClientGlobalSetting -SuffixSearchList @($cur + " + add + " | Where-Object { $_ } | Select-Object -Unique)"}}
 }
 
 // windowsSearchRevert removes EXACTLY the suffixes we added and leaves every other
 // entry alone - the same discipline as the NRPT comment tag: undo ours, nothing else.
+//
+// The filtered list is wrapped in @(...) on purpose. When ours was the only suffix,
+// the pipeline yields $null rather than an empty array, and
+// Set-DnsClientGlobalSetting -SuffixSearchList $null is a silent no-op: measured on
+// Server 2022, the revert reported success and left our suffix behind, in the
+// commonest case there is. @ turns "nothing left" into a real empty list.
 func (p Profile) windowsSearchRevert() []Step {
 	sd := p.searchDomains()
 	if len(sd) == 0 {
@@ -647,7 +659,7 @@ func (p Profile) windowsSearchRevert() []Step {
 	}
 	ours := "@(" + strings.Join(quoted, ", ") + ")"
 	return []Step{{Shell: "$cur = @((Get-DnsClientGlobalSetting).SuffixSearchList); " +
-		"Set-DnsClientGlobalSetting -SuffixSearchList ($cur | Where-Object { " + ours + " -notcontains $_ })"}}
+		"Set-DnsClientGlobalSetting -SuffixSearchList @($cur | Where-Object { " + ours + " -notcontains $_ })"}}
 }
 
 // psQuote single-quotes a value for PowerShell (its no-interpolation quoting),

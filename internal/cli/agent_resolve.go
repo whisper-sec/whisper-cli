@@ -146,7 +146,7 @@ func staleSavedAgent(sel, agentFile string, choices []agentChoice) (string, erro
 	}
 	// Typed as identityGoneError so connect can say, in the record the panel reads, that the
 	// identity is PROVEN gone; it renders exactly as the problem it wraps.
-	return "", &identityGoneError{selector: sel, problem: &client.ProblemError{Status: 404, Type: localActionable404, Detail: fmt.Sprintf(
+	return "", &identityGoneError{selector: sel, problem: &client.ProblemError{Status: 404, Type: localActionable, Detail: fmt.Sprintf(
 		"the saved agent %s (from %s) is no longer in your account, so this device has no identity to bind. "+
 			"Pick this device's agent with 'whisper connect --agent {agent}' and keep it with 'whisper use {agent}', "+
 			"make a fresh one with 'whisper create --name {name}' and then 'whisper use {name}', "+

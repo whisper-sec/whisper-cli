@@ -310,6 +310,10 @@ func friendly(err error) string {
 // mapping is robust to detail-text changes. Liberal in what it accepts: any shape of these
 // problems collapses to the same friendly line, and an unknown problem is passed through.
 func mapProblem(pe *client.ProblemError) string {
+	// A problem we built locally already says what happened and what to do (see localActionable).
+	if pe.Type == localActionable {
+		return ""
+	}
 	switch pe.Status {
 	case 401, 403:
 		// A MISSING key (our own "no key" problem) keeps its own helpful detail (it names
@@ -350,13 +354,10 @@ func mapProblem(pe *client.ProblemError) string {
 		// "no config" 404s stay ProblemErrors on purpose - isProjectNotFound keys
 		// off Status 404 for `whisper run`'s fail-open - so the fix lives here in
 		// the rendering, not in the error construction.
-		// A 404 WE constructed locally already says what to do. Overriding it with
-		// the generic wording because its text happens to contain "agent" turned "you did
-		// not name an agent" into "that agent isn't in your account", which is a different
-		// and untrue statement. Ours wins; only a server-side agent lookup gets the nudge.
-		if pe.Type == localActionable404 {
-			return ""
-		}
+		// A 404 WE constructed locally (localActionable, handled above) already says what to do.
+		// Overriding it with the generic wording because its text happens to contain "agent"
+		// turned "you did not name an agent" into "that agent isn't in your account", which is a
+		// different and untrue statement. Ours wins; only a server-side agent lookup gets the nudge.
 		// A reversal with nothing on record (no disconnect or revoke of that agent to undo) is a 404
 		// about the AUDIT TRAIL, not the agent. The agent may be right there in the account, so the account
 		// nudge would be untrue; the service's sentence says what to do instead (connect it, or mint anew).
@@ -471,16 +472,18 @@ func isScopeRefusal(pe *client.ProblemError) bool {
 	return strings.Contains(s, "forbidden_scope") || strings.Contains(s, "required scope")
 }
 
+// localActionable marks a problem this CLI constructed itself, whose Detail is already the
+// instruction the operator needs, so no generic status wording ever replaces it. The agent-404
+// nudge used to overwrite these purely because their text mentioned "agent", and the
+// "your key was not accepted" line overwrote a 403 that `whale ssh` raises when a node closes
+// the connection before its sshd speaks, which has nothing to do with the API key.
+const localActionable = "WHISPER_LOCAL_ACTIONABLE"
+
 // problemMentionsAgent reports whether a problem is about an agent identity (so
 // a 404 renders as the account nudge) rather than some other missing resource
 // (a local config, a sensor path). Keyed on the problem's own text - the backend
 // agent-not-found 404 carries "agent ..." in its detail - so it is robust to
 // where the 404 came from.
-// localActionable404 marks a 404 this CLI constructed itself, whose Detail is already the
-// instruction the operator needs. The generic agent-404 wording used to overwrite these
-// purely because their text mentioned "agent".
-const localActionable404 = "WHISPER_LOCAL_ACTIONABLE"
-
 func problemMentionsAgent(pe *client.ProblemError) bool {
 	return strings.Contains(strings.ToLower(pe.Title+" "+pe.Type+" "+pe.Error()), "agent")
 }

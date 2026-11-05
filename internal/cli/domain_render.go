@@ -251,7 +251,7 @@ func renderDomainStatus(w io.Writer, res *client.Result, apex string) ([]*domain
 	}
 	domains := foldDomainStatus(res)
 	if len(domains) == 0 {
-		return nil, &client.ProblemError{Status: 404, Type: localActionable404,
+		return nil, &client.ProblemError{Status: 404, Type: localActionable,
 			Detail: fmt.Sprintf("%s is not a domain on this account - submit it first:  whisper domain submit %s",
 				apex, apex)}
 	}

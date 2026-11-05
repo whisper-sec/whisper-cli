@@ -7,6 +7,7 @@ package enforce
 
 import (
 	"errors"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -85,6 +86,16 @@ type Tunnel struct {
 // the first handshake has completed and the filter is open; on any failure everything it
 // made is gone and nothing was ever routable.
 func StartTunnel(cfg wgtun.Config, pol Policy, opts Options) (*Tunnel, error) {
+	return startTunnel(cfg, pol, opts, CreateNamespace)
+}
+
+// StartHostTunnel is StartTunnel with the device in the host namespace, routed only for
+// sockets carrying its mark (hostroute_linux.go). It is what a containment drives.
+func StartHostTunnel(cfg wgtun.Config, pol Policy, opts Options) (*Tunnel, error) {
+	return startTunnel(cfg, pol, opts, CreateHostDevice)
+}
+
+func startTunnel(cfg wgtun.Config, pol Policy, opts Options, place func(netip.Addr) (*Namespace, error)) (*Tunnel, error) {
 	logf := opts.Logf
 	if logf == nil {
 		logf = func(string, ...any) {}
@@ -102,7 +113,7 @@ func StartTunnel(cfg wgtun.Config, pol Policy, opts Options) (*Tunnel, error) {
 	cfg.ListenPort = 0
 	pol.Self = cfg.Address
 
-	ns, err := CreateNamespace(cfg.Address)
+	ns, err := place(cfg.Address)
 	if err != nil {
 		return nil, err
 	}

@@ -27,6 +27,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == InitArg {
 		RunInit()
 	}
+	if len(os.Args) > 1 && os.Args[1] == containHelperArg {
+		containHelper()
+	}
 	os.Exit(m.Run())
 }
 

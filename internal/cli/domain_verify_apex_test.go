@@ -21,11 +21,11 @@ const (
 	agentBody      = `{"is_whisper_agent":true,"fqdn":"demo.everwatch.io.","operator":"everwatch.io.","dane_ok":true,"jws_ok":true}`
 	verifiedDomain = `{"domain":"everwatch.io","is_whisper_domain":true,"state":"verified",` +
 		`"verdict":"everwatch.io is a verified Whisper bring-your-own domain: its parent delegates it to Whisper's nameservers",` +
-		`"checks":{"delegated_to_whisper":true,"ds_matches_key":true,"validates_from_root":true,"served_by_every_node":true},` +
+		`"checks":{"delegated_to_whisper":true,"ds_matches_key":true,"validates_from_root":true,"child_key_validates":true,"served_by_every_node":true},` +
 		`"nameservers":["ns1.whisper.online","ns2.whisper.online"],"ds":[],"detail":"","checked_at":1}`
 	notOursDomain = `{"domain":"example.com","is_whisper_domain":false,"state":"not_served",` +
 		`"verdict":"Whisper does not serve example.com as a bring-your-own domain.",` +
-		`"checks":{"delegated_to_whisper":null,"ds_matches_key":null,"validates_from_root":null,"served_by_every_node":null},` +
+		`"checks":{"delegated_to_whisper":null,"ds_matches_key":null,"validates_from_root":null,"child_key_validates":null,"served_by_every_node":null},` +
 		`"nameservers":[],"ds":[],"detail":"","checked_at":1}`
 	notApexDomain = `{"domain":"x.everwatch.io","is_whisper_domain":false,"state":"not_apex",` +
 		`"verdict":"x.everwatch.io is a name inside the bring-your-own domain everwatch.io, not its apex. Verify everwatch.io for the domain.",` +
@@ -96,7 +96,7 @@ func TestDomainVerify_AVerifiedApexIsAVerifiedDomain(t *testing.T) {
 	if !strings.Contains(stderr, "verified Whisper bring-your-own domain") {
 		t.Fatalf("stderr = %q, want the domain verdict", stderr)
 	}
-	for _, want := range []string{"delegated_to_whisper", "ds_matches_key", "validates_from_root", "served_by_every_node"} {
+	for _, want := range []string{"delegated_to_whisper", "ds_matches_key", "validates_from_root", "child_key_validates", "served_by_every_node"} {
 		if !strings.Contains(stdout, want) {
 			t.Fatalf("stdout = %q, want the %s row", stdout, want)
 		}
@@ -282,5 +282,84 @@ func TestDomainVerify_ANonJSONShedIsStillCouldNotTell(t *testing.T) {
 	_, _, err := runDomainVerify(t, srv.URL, false, "everwatch.io")
 	if code, ok := exitCodeOf(err); !ok || code != 3 {
 		t.Fatalf("err = %v, want exit 3 for a non-JSON 503", err)
+	}
+}
+
+// checkRows returns the FIELD -> VALUE rows of the rendered verdict table, in order.
+func checkRows(stdout string) [][2]string {
+	var rows [][2]string
+	for _, line := range strings.Split(stdout, "\n") {
+		f := strings.Fields(line)
+		if len(f) >= 2 && strings.Contains(f[0], "_") {
+			rows = append(rows, [2]string{f[0], strings.Join(f[1:], " ")})
+		}
+	}
+	return rows
+}
+
+// The fifth check, child_key_validates, sits between validates_from_root and
+// served_by_every_node in the server's order, and renders like the others.
+func TestDomainVerify_TheChildKeyCheckIsAFifthRowInOrder(t *testing.T) {
+	stub := &verifyStub{identity: notAnAgentBody, domain: verifiedDomain}
+	srv := stub.server(t)
+	defer srv.Close()
+	stdout, _, err := runDomainVerify(t, srv.URL, false, "everwatch.io")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	var names []string
+	for _, r := range checkRows(stdout) {
+		names = append(names, r[0])
+	}
+	want := "delegated_to_whisper ds_matches_key validates_from_root child_key_validates served_by_every_node"
+	if got := strings.Join(names, " "); got != want {
+		t.Fatalf("check rows = %q, want %q", got, want)
+	}
+}
+
+// A chain whose DS validates while the resolvers do not yet validate the apex DNSKEY says "no" on
+// that row, not "not checked", and a check the chain never reached says "not checked".
+func TestDomainVerify_TheChildKeyCheckIsTriState(t *testing.T) {
+	for _, tc := range []struct{ value, want string }{
+		{"false", "no"}, {"null", "not checked"}, {"true", "yes"},
+	} {
+		body := strings.Replace(verifiedDomain, `"child_key_validates":true`, `"child_key_validates":`+tc.value, 1)
+		body = strings.Replace(body, `"is_whisper_domain":true`, `"is_whisper_domain":false`, 1)
+		body = strings.Replace(body, `"state":"verified"`, `"state":"pending"`, 1)
+		stub := &verifyStub{identity: notAnAgentBody, domain: body}
+		srv := stub.server(t)
+		stdout, _, _ := runDomainVerify(t, srv.URL, false, "everwatch.io")
+		srv.Close()
+		var got string
+		for _, r := range checkRows(stdout) {
+			if r[0] == "child_key_validates" {
+				got = r[1]
+			}
+		}
+		if got != tc.want {
+			t.Fatalf("child_key_validates %s rendered %q, want %q\n%s", tc.value, got, tc.want, stdout)
+		}
+	}
+}
+
+// A server that predates the check never sends the key; the row is left out rather than shown as
+// "not checked", which would claim the server skipped a check it does not know.
+func TestDomainVerify_AServerWithoutTheChildKeyCheckShowsNoRow(t *testing.T) {
+	body := strings.Replace(verifiedDomain, `"child_key_validates":true,`, "", 1)
+	if body == verifiedDomain {
+		t.Fatal("fixture did not drop the key; the test would prove nothing")
+	}
+	stub := &verifyStub{identity: notAnAgentBody, domain: body}
+	srv := stub.server(t)
+	defer srv.Close()
+	stdout, _, err := runDomainVerify(t, srv.URL, false, "everwatch.io")
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if strings.Contains(stdout, "child_key_validates") {
+		t.Fatalf("an older server's verdict grew a row it never sent:\n%s", stdout)
+	}
+	if !strings.Contains(stdout, "served_by_every_node") {
+		t.Fatalf("the other rows must stay:\n%s", stdout)
 	}
 }
