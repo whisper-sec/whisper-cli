@@ -15,6 +15,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -223,6 +224,12 @@ type sessionSupervisor struct {
 	rebindsSeen int       // the tunnel's socket re-opens, as last seen
 	refused     string    // why the Whisper side refused a fresh session for good, "" if it has not
 	nextCheckIn time.Time // when the next signed check-in of a healthy session is due (checkIn)
+	// refusedNext is when a standing refusal is asked again. While refused, no other path (a
+	// yield to another holder, a busy port) may bring the next try forward of it.
+	refusedNext time.Time
+	// pinned is the port the holder started on. A service that moved off it to a free port
+	// goes back to it at its next fresh session, once it is free again.
+	pinned int
 
 	published string // what was last written into the record, so a write happens only on a change
 	since     time.Time
@@ -237,6 +244,7 @@ func newSessionSupervisor(sess *egressSession, logf func(string, ...any)) *sessi
 		if s.renew != nil && s.renew.port > 0 {
 			s.listen = s.renew.port
 		}
+		s.pinned = s.listen
 	}
 	return s
 }
@@ -265,6 +273,14 @@ func (s *sessionSupervisor) step(run context.Context) (done bool) {
 		if s.renew == nil || now.Before(s.nextTry) {
 			return false
 		}
+		if s.nextTry.Before(now) {
+			// The try is due, and may be long overdue: a host that slept past holderStaleAfter
+			// wakes with a between-sessions record that already reads as a dead holder's, so
+			// status says "not connected" and an --ensure may start a second holder. Say the try
+			// is now before making it, which keeps the record fresh for the whole attempt.
+			s.nextTry = now
+			s.publishHolder(firstNonBlank(s.holderState(), tunnelDown), s.refused, now)
+		}
 		if s.listen > 0 && probeWhisperProxy(s.listen) {
 			if done, wait := s.portTaken(now); done || wait {
 				return done
@@ -272,7 +288,7 @@ func (s *sessionSupervisor) step(run context.Context) (done bool) {
 		}
 		if s.yieldToAnotherHolder() {
 			// Waiting on another holder is still being alive: keep the record fresh.
-			s.nextTry = now.Add(renewBaseBackoff)
+			s.nextTry = s.notBeforeRefusal(now.Add(renewBaseBackoff))
 			s.publishHolder(firstNonBlank(s.holderState(), tunnelDown), s.refused, now)
 			return false
 		}
@@ -294,7 +310,7 @@ func (s *sessionSupervisor) step(run context.Context) (done bool) {
 		if !s.renewedAt.IsZero() && now.Sub(s.renewedAt) >= renewSettled {
 			s.backoff, s.nextTry, s.renewedAt = renewBaseBackoff, time.Time{}, time.Time{}
 		}
-		s.tried, s.latched, s.yielded, s.refused = false, false, false, ""
+		s.tried, s.latched, s.yielded, s.refused, s.refusedNext = false, false, false, "", time.Time{}
 		s.publish(tunnelUp, "", now)
 		return s.checkIn(run, now)
 	}
@@ -419,6 +435,14 @@ func (s *sessionSupervisor) renewNow(run context.Context, now time.Time, silent 
 		old.Stop()
 		s.sess = nil
 	}
+	if s.renew.supervised && s.pinned > 0 && s.listen > 0 && s.listen != s.pinned && loopbackPortFree(s.pinned) {
+		// A service that moved off its pinned port takes it back once it is free: the pinned
+		// port is what its config, and every tool pointed at it, name. Not while
+		// listen is 0, which is the move itself being decided: portTaken has just seen
+		// another proxy answer the pinned port.
+		s.say("whisper: 127.0.0.1:%d is free again, so this service is moving back to it.", s.pinned)
+		s.listen = s.pinned
+	}
 	bcx, bcancel := context.WithTimeout(run, renewBringUpTimeout)
 	defer bcancel()
 	fresh, err := s.renew.bringUp(bcx, res, name, s.listen)
@@ -463,7 +487,7 @@ func (s *sessionSupervisor) adopt(fresh *egressSession, now time.Time) {
 	s.sess = fresh
 	s.tier = fresh.tier
 	s.renewedAt = now
-	s.latched, s.unreached, s.refused = false, false, ""
+	s.latched, s.unreached, s.refused, s.refusedNext = false, false, "", time.Time{}
 	s.published = ""
 	if fresh.endpoint != s.endpoint {
 		// A service that moved to a free port: its old record names a port it no longer serves.
@@ -477,6 +501,9 @@ func (s *sessionSupervisor) adopt(fresh *egressSession, now time.Time) {
 	writeSessionRecord(fresh)
 	if fresh.recordPath != "" {
 		s.recordPath = fresh.recordPath
+	}
+	if s.renew != nil && s.renew.supervised {
+		markServiceRecord(s.recordPath)
 	}
 	if onEgressSession != nil {
 		onEgressSession(fresh)
@@ -501,6 +528,7 @@ func (s *sessionSupervisor) registerFailed(err error, now time.Time) bool {
 		// it for a live session, and an `--ensure` can start a replacement.
 		s.refused = refusalReason(err)
 		s.nextTry = now.Add(renewMaxBackoff)
+		s.refusedNext = s.nextTry
 		s.say("whisper: the Whisper side refused a fresh session for %s (%s). Asking again in %s; fix that, or restart this session.", s.addr, s.refused, roughDuration(renewMaxBackoff))
 		s.publishHolder(tunnelRefused, s.refused, now)
 		if old := s.sess; old != nil {
@@ -587,8 +615,18 @@ func (s *sessionSupervisor) scheduleRetry(now time.Time, unreached bool) time.Du
 		s.backoff = renewMaxBackoff
 	}
 	wait := b/2 + s.jitter(b/2+1)
-	s.nextTry = now.Add(wait)
-	return wait
+	s.nextTry = s.notBeforeRefusal(now.Add(wait))
+	return s.nextTry.Sub(now)
+}
+
+// notBeforeRefusal keeps a standing refusal's slow re-ask: while refused, the next try is never
+// earlier than the one the refusal scheduled. Without it a yield to another holder, or a
+// port found busy, brought a 15-minute re-ask forward to 30 seconds.
+func (s *sessionSupervisor) notBeforeRefusal(t time.Time) time.Time {
+	if s.refused != "" && t.Before(s.refusedNext) {
+		return s.refusedNext
+	}
+	return t
 }
 
 // publish writes the tunnel state into the held session's own record, only when it changes.
@@ -601,6 +639,7 @@ func (s *sessionSupervisor) publish(state, reason string, now time.Time) {
 		r.TunnelState, r.TunnelSince, r.TunnelReason = state, now.UTC(), reason
 		r.NoProxy, r.ReconnectingAt = false, time.Time{}
 		r.Renews = s.renew != nil
+		r.Service = r.Service || (s.renew != nil && s.renew.supervised)
 	}) {
 		s.published, s.since = key, now
 	}
@@ -624,6 +663,7 @@ func (s *sessionSupervisor) publishHolder(state, reason string, now time.Time) {
 		Addr: s.addr, Endpoint: s.endpoint, Tier: firstNonBlank(s.tier, "wireguard"),
 		Port: s.port(), PID: os.Getpid(), TunnelState: state, TunnelSince: since.UTC(),
 		TunnelReason: reason, ReconnectingAt: next, NoProxy: true, Renews: s.renew != nil,
+		Service: s.renew != nil && s.renew.supervised,
 	}
 	if rec.Port <= 0 || rec.Addr == "" || rec.Endpoint == "" {
 		return
@@ -648,7 +688,13 @@ func (s *sessionSupervisor) publishHolder(state, reason string, now time.Time) {
 	if err != nil {
 		return
 	}
-	if os.MkdirAll(filepath.Dir(s.recordPath), 0o700) != nil {
+	// The same directory modes writeSessionRecord uses: a machine registry a root service had to
+	// recreate 0700 would hide the service's record from every other user's `whisper status`.
+	dirMode := os.FileMode(0o700)
+	if filepath.Dir(s.recordPath) != filepath.Clean(sessionsDirFn()) {
+		dirMode = 0o755
+	}
+	if os.MkdirAll(filepath.Dir(s.recordPath), dirMode) != nil {
 		return
 	}
 	if writeFileAtomic(s.recordPath, b, mode) == nil {
@@ -694,14 +740,19 @@ func superviseUntilSignal(sess *egressSession, logf func(string, ...any)) {
 	defer stopTick()
 	run, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	stopping := holdsStopping()
 	go func() {
+		// A stop without a signal (the Windows SCM) cancels a renewal in flight too, or a
+		// renewal's 30 s connect and 45 s bring-up outlast the service's 10 s stop grace and
+		// the process exits without close.
 		select {
 		case <-sigs:
+			cancel()
+		case <-stopping:
 			cancel()
 		case <-run.Done():
 		}
 	}()
-	stopping := holdsStopping()
 	for {
 		select {
 		case <-run.Done():
@@ -883,6 +934,23 @@ func publishTunnelState(sess *egressSession, state string, since time.Time) bool
 	return updateOwnRecord(sess.recordPath, func(r *sessionRecord) {
 		r.TunnelState, r.TunnelSince = state, since.UTC()
 	})
+}
+
+// markServiceRecord marks this process's own record as the installed service's, so `whisper
+// service status` names the session the service holds, on whatever port it serves, rather than
+// whichever session answers the port its config pins.
+func markServiceRecord(path string) bool {
+	return updateOwnRecord(path, func(r *sessionRecord) { r.Service = true })
+}
+
+// loopbackPortFree reports whether nothing listens on 127.0.0.1:port right now.
+func loopbackPortFree(port int) bool {
+	l, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		return false
+	}
+	_ = l.Close()
+	return true
 }
 
 // writeFileAtomic writes b to path through a temporary file in the same directory and a rename.

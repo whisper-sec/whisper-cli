@@ -72,6 +72,10 @@ type sessionRecord struct {
 	// Renews is set by a holder that renews its session when the tunnel asks. Another holder
 	// of the same address waits for one of these, never for a session that cannot renew.
 	Renews bool `json:"renews,omitempty"`
+	// Service is set by the installed service's own daemon. `whisper service status` names the
+	// session marked so, on whatever port it serves; the port the config pins can be held by
+	// some other proxy after the service moved off it.
+	Service bool `json:"service,omitempty"`
 	// Accept / AcceptScope are the TCP ports this holder opened on its /128 and who may reach
 	// them. On disk because a node answering on a port is a fact about the HOST that
 	// `whisper whale status` must show from any shell, and above all a public one. Absent when

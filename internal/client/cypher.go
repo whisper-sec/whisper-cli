@@ -12,6 +12,8 @@
 package client
 
 import (
+	"encoding/json"
+	"math"
 	"sort"
 	"strconv"
 	"strings"
@@ -60,13 +62,17 @@ func QuoteCypherString(s string) string {
 }
 
 // Lit renders an arbitrary Go value as a Cypher literal:
-// - string -> a quoted, escaped string literal
-// - bool -> true / false
-// - int / int64 -> the decimal form
-// - float64 -> the shortest exact decimal form
-// - []T / []any -> a bracketed list of literals
-// - map[string]any -> a brace map literal (keys sorted for determinism)
-// - nil -> null
+//   - string -> a quoted, escaped string literal
+//   - bool -> true / false
+//   - int / int64 -> the decimal form
+//   - float64 / float32 -> the shortest exact decimal form (a NaN or an infinity has no
+//     Cypher literal, so it is quoted like any other value we cannot render as a number)
+//   - json.Number -> its literal text, byte for byte, when it is a JSON number; anything
+//     else carried in one is quoted
+//   - the other Go integer types -> the decimal form
+//   - []T / []any -> a bracketed list of literals
+//   - map[string]any -> a brace map literal (keys sorted for determinism)
+//   - nil -> null
 //
 // Conservative-emit: every leaf string flows through QuoteCypherString, so no value -
 // however hostile - can break out of the surrounding map/list.
@@ -85,9 +91,37 @@ func Lit(v any) string {
 		return strconv.Itoa(x)
 	case int64:
 		return strconv.FormatInt(x, 10)
+	case int8:
+		return strconv.FormatInt(int64(x), 10)
+	case int16:
+		return strconv.FormatInt(int64(x), 10)
+	case int32:
+		return strconv.FormatInt(int64(x), 10)
+	case uint:
+		return strconv.FormatUint(uint64(x), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(x), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(x), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(x), 10)
+	case uint64:
+		return strconv.FormatUint(x, 10)
 	case float64:
-		// 'g' with -1 precision yields the shortest representation that round-trips.
-		return strconv.FormatFloat(x, 'g', -1, 64)
+		return floatLit(x, 64)
+	case float32:
+		return floatLit(float64(x), 32)
+	case json.Number:
+		// A row decoded with UseNumber (client.decodeExact) carries every number as
+		// its literal text. Going through float64 would round an integer above 2^53, and the
+		// default branch below would quote it, turning a number into a string the control
+		// plane then compares as text. The literal is passed through only when it IS a JSON
+		// number, whose grammar is a subset of Cypher's numeric literals; a json.Number is a
+		// plain string type, so anything else in one is quoted and cannot inject.
+		if isJSONNumber(string(x)) {
+			return string(x)
+		}
+		return QuoteCypherString(string(x))
 	case []string:
 		parts := make([]string, len(x))
 		for i, e := range x {
@@ -107,6 +141,56 @@ func Lit(v any) string {
 		// quoted+escaped, so it can never inject. (Numbers boxed oddly, etc.)
 		return QuoteCypherString(toString(x))
 	}
+}
+
+// floatLit renders a float as the shortest decimal that round-trips at its own width.
+// NaN and the infinities have no Cypher literal (an unquoted NaN reads as an identifier),
+// so they are quoted rather than emitted as text the parser would reject.
+func floatLit(f float64, bits int) string {
+	if math.IsNaN(f) || math.IsInf(f, 0) {
+		return QuoteCypherString(strconv.FormatFloat(f, 'g', -1, bits))
+	}
+	// 'g' with -1 precision yields the shortest representation that round-trips.
+	return strconv.FormatFloat(f, 'g', -1, bits)
+}
+
+// isJSONNumber reports whether s is exactly one JSON number (RFC 8259 section 6): an
+// optional minus, an integer part with no leading zero, an optional fraction and an
+// optional exponent. Nothing else, so no whitespace, no plus sign, no hex, no NaN.
+func isJSONNumber(s string) bool {
+	i, n := 0, len(s)
+	digits := func() int {
+		start := i
+		for i < n && s[i] >= '0' && s[i] <= '9' {
+			i++
+		}
+		return i - start
+	}
+	if i < n && s[i] == '-' {
+		i++
+	}
+	switch {
+	case i < n && s[i] == '0':
+		i++
+	case digits() == 0:
+		return false
+	}
+	if i < n && s[i] == '.' {
+		i++
+		if digits() == 0 {
+			return false
+		}
+	}
+	if i < n && (s[i] == 'e' || s[i] == 'E') {
+		i++
+		if i < n && (s[i] == '+' || s[i] == '-') {
+			i++
+		}
+		if digits() == 0 {
+			return false
+		}
+	}
+	return i == n
 }
 
 // CypherMap renders a map as a Cypher map literal: {k1:v1,k2:v2}. Keys are emitted in

@@ -128,16 +128,21 @@ func deepenegress_socksRep(rep byte) []byte {
 	return []byte{0x05, rep, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
 }
 
-// deepenegress_closedPort binds an ephemeral loopback port, releases it, and
-// returns the now-closed address - a deterministic connection-refused target.
+// deepenegress_closedPort returns a loopback address that refuses every dial, deterministically.
+//
+// It used to bind an ephemeral port, close it and hand the number back. Under load another
+// process can bind that port before the dial, which then succeeds, and the "refused" subtests saw a
+// live peer instead (the non-407 case got nil back from Dial). Port 0 can never be listened on (a
+// bind to 0 means "pick one for me"), so a connect to 127.0.0.1:0 is refused by the kernel on every
+// run and no other process can change that.
 func deepenegress_closedPort(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("probe listen: %v", err)
+	const addr = "127.0.0.1:0"
+	c, err := net.DialTimeout("tcp", addr, time.Second)
+	if err == nil {
+		_ = c.Close()
+		t.Fatalf("%s accepted a connection; the refused-dial subtests need an address that refuses", addr)
 	}
-	addr := ln.Addr().String()
-	_ = ln.Close()
 	return addr
 }
 
@@ -669,9 +674,12 @@ func TestDeepenEgress_UpstreamErrorMapping(t *testing.T) {
 	// debugging a parser.
 	t.Run("egress holds the CONNECT past the deadline", func(t *testing.T) {
 		u := newUpstream(t, deepenegress_holdingTLSEgress(t))
-		u.dialTO = 300 * time.Millisecond
+		// The egress holds forever, so any deadline proves the property; it has to be long enough
+		// for the TLS handshake, which the same deadline also bounds. 300ms was not on a loaded box:
+		// once in 60 runs the handshake itself ran out and the error named it instead.
+		u.dialTO = 2 * time.Second
 		_, err := u.Dial(context.Background(), "example.com:443")
-		assertClean(t, err, "the Whisper egress did not answer the CONNECT for example.com:443 within 300ms")
+		assertClean(t, err, "the Whisper egress did not answer the CONNECT for example.com:443 within 2s")
 	})
 	t.Run("egress answers with something that is not HTTP", func(t *testing.T) {
 		u := newUpstream(t, deepenegress_garbageTLSEgress(t))

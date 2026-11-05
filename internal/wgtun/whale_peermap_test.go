@@ -206,6 +206,11 @@ type peerSide struct {
 	udpPort int
 }
 
+// peerSideKeepalive is the far side's keepalive in seconds. The tests that watch a promoted path
+// set DirectDeadAfter to three of these, the production ratio (directDeadAfter is four of
+// directKeepalive), so one late keepalive on a loaded box does not read as a dead path.
+const peerSideKeepalive = 1
+
 func startPeerSide(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr) *peerSide {
 	t.Helper()
 	kp, err := GenerateKeypair()
@@ -223,7 +228,11 @@ func startPeerSide(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr)
 	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
 	udpPort := freeUDPPort(t)
 	uapi := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", kp.PrivateKeyHex, udpPort)
-	uapi += fmt.Sprintf("public_key=%s\nallowed_ip=%s/128\n", clientPubHex, clientTunnelIP.String())
+	// The far side keeps the session warm the way a real agent that has armed us does (it sets
+	// directKeepalive on its direct peer), at a test cadence. Its keepalives are what keep a
+	// promoted path promoted between WireGuard's two-minute rekeys.
+	uapi += fmt.Sprintf("public_key=%s\nallowed_ip=%s/128\npersistent_keepalive_interval=%d\n",
+		clientPubHex, clientTunnelIP.String(), peerSideKeepalive)
 	if err := dev.IpcSet(uapi); err != nil {
 		t.Fatalf("peer IpcSet: %v", err)
 	}
@@ -254,7 +263,7 @@ func TestDirectPeer_PromotesOnARealHandshakeAndFallsBackToTheRelayWhenItDies(t *
 	tun, err := Start(cfg, Options{
 		HealthInterval:  100 * time.Millisecond,
 		DeadAfter:       30 * time.Second,
-		DirectDeadAfter: 700 * time.Millisecond, // far below the 20s default so the test is quick
+		DirectDeadAfter: 3 * peerSideKeepalive * time.Second, // far below the 20s default so the test is quick
 	})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
@@ -313,6 +322,87 @@ func TestDirectPeer_PromotesOnARealHandshakeAndFallsBackToTheRelayWhenItDies(t *
 	}
 	if !boxStillHasDefaultRoute(t, tun) {
 		t.Fatal("the box peer lost ::/0 during the fallback")
+	}
+}
+
+// TestDirectPeer_AHealthyPathOutlivesDirectDeadAfter is the product half. WireGuard writes
+// last_handshake_time only on a handshake, which a live session repeats every two minutes, and the
+// direct path used to be aged by that timestamp alone: a healthy pair was withdrawn to the relay
+// directDeadAfter after every handshake (measured: promoted, then relayed 3.0 s later with the far
+// side alive). The far side's keepalives are the liveness evidence between rekeys, so the path must
+// stay direct for several windows while they arrive.
+func TestDirectPeer_AHealthyPathOutlivesDirectDeadAfter(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping the direct-path timing test in -short")
+	}
+	kp, _ := GenerateKeypair()
+	clientPubHex, _ := keyBase64ToHex(kp.PublicKeyBase64)
+	clientIP := mustAddr(t, "2a04:2a01:4::9")
+	peerIP := mustAddr(t, "2a04:2a01:4::7")
+	box := startServerSide(t, clientPubHex, clientIP, 7012)
+	other := startPeerSide(t, clientPubHex, clientIP)
+	cfg, err := FromWgQuick(box.pubB64, netip.AddrPortFrom(mustAddr(t, "::1"), uint16(box.udpPort)).String(),
+		clientIP.String(), box.serverIP.String(), "", "", kp.PrivateKeyHex)
+	if err != nil {
+		t.Fatalf("FromWgQuick: %v", err)
+	}
+	dead := 3 * peerSideKeepalive * time.Second
+	tun, err := Start(cfg, Options{HealthInterval: 100 * time.Millisecond, DeadAfter: 30 * time.Second, DirectDeadAfter: dead})
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(tun.Stop)
+	peer := Peer{
+		Address:      peerIP,
+		PublicKeyHex: other.pubHex,
+		Endpoint:     netip.AddrPortFrom(mustAddr(t, "::1"), uint16(other.udpPort)).String(),
+		Path:         "direct-local",
+	}
+	if err := tun.SetDirectPeers([]Peer{peer}); err != nil {
+		t.Fatalf("SetDirectPeers: %v", err)
+	}
+	if !waitFor(3*time.Second, func() bool { return tun.PathTo(peerIP) == "direct-local" }) {
+		t.Fatalf("no direct path after a real handshake (state: %+v)", tun.DirectPeers())
+	}
+	// Two and a half windows, sampled: long past the point where the handshake's own age said dead.
+	for until := time.Now().Add(dead * 5 / 2); time.Now().Before(until); time.Sleep(100 * time.Millisecond) {
+		if got := tun.PathTo(peerIP); got != "direct-local" {
+			t.Fatalf("a healthy direct path was withdrawn while the far side kept talking: %q (state: %+v)",
+				got, tun.DirectPeers())
+		}
+	}
+	if !routedTo(t, tun, other.pubHex, peerIP) {
+		t.Fatal("the tunnel reports a direct path the device is not routing")
+	}
+}
+
+func TestParseReceivedDump_ReadsEachPeersOwnCounter(t *testing.T) {
+	box := strings.Repeat("22", 32)
+	peer := strings.Repeat("33", 32)
+	silent := strings.Repeat("44", 32)
+	dump := "private_key=" + strings.Repeat("11", 32) + "\n" +
+		"listen_port=51820\n" +
+		"public_key=" + box + "\n" +
+		"rx_bytes=9000\n" +
+		"tx_bytes=7\n" +
+		"public_key=" + peer + "\n" +
+		"endpoint=192.168.122.31:51820\n" +
+		"rx_bytes=148\n" +
+		"public_key=" + silent + "\n" +
+		"rx_bytes=not-a-number\n"
+	got := parseReceivedDump(dump)
+	if got[box] != 9000 || got[peer] != 148 {
+		t.Fatalf("each section must carry its own rx_bytes, and tx_bytes must not leak in: %v", got)
+	}
+	if v, ok := got[silent]; !ok || v != 0 {
+		t.Fatalf("an unparseable counter reads as nothing received, not as a missing peer: %v", got)
+	}
+	if len(parseReceivedDump("")) != 0 {
+		t.Fatal("an empty dump has no peers")
+	}
+	// rx_bytes before any public_key= belongs to no peer.
+	if len(parseReceivedDump("rx_bytes=5\n")) != 0 {
+		t.Fatal("a counter outside a peer section was attributed to a peer")
 	}
 }
 

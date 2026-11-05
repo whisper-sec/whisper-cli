@@ -63,13 +63,16 @@ import (
 const (
 	// directKeepalive is the PersistentKeepalive for a direct peer, in seconds. Shorter than
 	// the 25s we use towards the box, because this is the timer the promote/demote decision
-	// rides on: a handshake attempt every 5 seconds means a path that dies is noticed and
-	// withdrawn within directDeadAfter rather than within a minute. On a LAN this is one small
+	// rides on: the far side's keepalive every 5 seconds (it arms us with the same value) is the
+	// evidence a promoted path is alive between WireGuard's two-minute rekeys, so a path that dies
+	// is noticed and withdrawn within directDeadAfter rather than within a minute. (A keepalive is
+	// not a handshake: a live session handshakes only on rekey,.) On a LAN this is one small
 	// packet every five seconds; the latency it buys back is three orders of magnitude larger.
 	directKeepalive = 5
 
-	// directDeadAfter is how long a promoted peer may go without a handshake before its /128 is
-	// withdrawn and the box carries it again. Four keepalives.
+	// directDeadAfter is how long a promoted peer may go with neither a new handshake nor a single
+	// authenticated packet from it before its /128 is withdrawn and the box carries it again. Four
+	// of the far side's keepalives.
 	directDeadAfter = 20 * time.Second
 
 	// directRearmAfter is how long a peer whose punch train has been SPENT waits before another
@@ -280,7 +283,15 @@ type PeerState struct {
 type directPeer struct {
 	peer     Peer
 	promoted bool
-	lastSeen time.Time // last handshake we observed with this peer
+	// lastSeen is when this node last OBSERVED evidence that the path works: a new handshake, or,
+	// while promoted, more authenticated bytes from the peer. It is the observation time, not the
+	// handshake's own timestamp: WireGuard writes last_handshake_time only on a handshake,
+	// which with a live session is every two minutes, so a timestamp-aged window both demoted a
+	// healthy path directDeadAfter after each handshake and, read one late tick after a handshake
+	// on a loaded box, refused to promote a path that had just been proven.
+	lastSeen time.Time
+	lastHS   time.Time // the newest handshake timestamp read from the device for this peer
+	rx       uint64    // rx_bytes at the last read
 	armedAt  time.Time // when we last kicked a handshake attempt
 	demotes  int
 	// punch is the traversal train for this peer: which candidate endpoint the next attempt
@@ -433,7 +444,15 @@ func (t *Tunnel) demoteDirectPeer(p Peer) error {
 // existing health monitor rather than from a second goroutine: there is already a loop that
 // reads the device on a timer, and one loop that does both is easier to reason about than two
 // that could disagree about what the device said.
-func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time) {
+//
+// What counts as evidence is deliberately asymmetric. PROMOTION needs a handshake newer than
+// any seen before: that is the one thing that proves our packets reach the peer AND its answers
+// reach us, and it is what keeps a /128 from being routed at a peer that never answered. STAYING
+// promoted also accepts authenticated bytes from the peer: its keepalives (directKeepalive, every
+// five seconds from a far side that has armed us) are what prove a live session between the
+// two-minute rekeys. Either is stamped with the time this pass observed it, so a late tick cannot
+// age a handshake out before the monitor has seen it.
+func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, received map[string]uint64) {
 	t.mu.Lock()
 	if len(t.direct) == 0 {
 		t.mu.Unlock()
@@ -451,9 +470,15 @@ func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time) 
 	}
 	var todo []action
 	for key, d := range t.direct {
-		hs, ok := seen[key]
-		if ok && !hs.IsZero() {
-			d.lastSeen = hs
+		if hs, ok := seen[key]; ok && hs.After(d.lastHS) {
+			d.lastHS = hs
+			d.lastSeen = now
+		}
+		if rx, ok := received[key]; ok && rx > d.rx {
+			d.rx = rx
+			if d.promoted {
+				d.lastSeen = now
+			}
 		}
 		fresh := !d.lastSeen.IsZero() && now.Sub(d.lastSeen) < orDur(t.directDead, directDeadAfter)
 		switch {

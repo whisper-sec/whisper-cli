@@ -48,7 +48,7 @@ func (t *Tunnel) monitor() {
 		case <-t.stop:
 			return
 		case <-tick.C:
-			handshakes, ok := t.readHandshakes()
+			handshakes, received, ok := t.readPeers()
 			now := time.Now()
 			last := handshakes[t.cfg.ServerPublicKeyHex]
 			if ok {
@@ -57,7 +57,7 @@ func (t *Tunnel) monitor() {
 				t.mu.Unlock()
 				// the same device read decides the direct-peer promote/demote. One
 				// loop, one observation - two loops could disagree about what the device said.
-				t.reconcileDirectPeers(now, handshakes)
+				t.reconcileDirectPeers(now, handshakes, received)
 			}
 			// Healthy: a handshake within deadAfter. Reset the backoff and move on.
 			if ok && !last.IsZero() && now.Sub(last) < t.deadAfter {
@@ -125,6 +125,42 @@ func (t *Tunnel) readHandshakes() (map[string]time.Time, bool) {
 		return nil, false
 	}
 	return parseHandshakeDump(dump), true
+}
+
+// readPeers is readHandshakes plus each peer's rx_bytes, from the SAME dump, for the monitor:
+// the direct-path decision needs both and must not read the device twice.
+func (t *Tunnel) readPeers() (map[string]time.Time, map[string]uint64, bool) {
+	dump, err := t.dev.IpcGet()
+	if err != nil {
+		return nil, nil, false
+	}
+	return parseHandshakeDump(dump), parseReceivedDump(dump), true
+}
+
+// parseReceivedDump reads each peer's rx_bytes, keyed by its hex public key: the bytes of every
+// AUTHENTICATED packet the device has taken from that peer (handshake messages and transport
+// packets, keepalives included). Like parseHandshakeDump it keys on public_key= boundaries and
+// reads one numeric field, so nothing secret is retained.
+func parseReceivedDump(dump string) map[string]uint64 {
+	out := map[string]uint64{}
+	var cur string
+	for _, line := range strings.Split(dump, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "public_key":
+			cur = strings.TrimSpace(v)
+			out[cur] = 0
+		case "rx_bytes":
+			if cur != "" {
+				n, _ := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
+				out[cur] = n
+			}
+		}
+	}
+	return out
 }
 
 // parseHandshakeDump is the parse itself, separated from the device read so it can be tested

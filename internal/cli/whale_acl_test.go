@@ -516,3 +516,32 @@ func TestSSHNoteReadsTheDocumentTheControlPlaneReallySends(t *testing.T) {
 		t.Fatal("no document at all is not an ssh block")
 	}
 }
+
+// The same cell, whichever way the envelope was decoded. A UseNumber decoder hands
+// cellString a json.Number, which prints as the literal the control plane sent; the default
+// decoder hands it a float64, whose whole values print as integers only where int64 holds
+// them exactly (1e19 used to print as -9223372036854775808).
+func TestCellStringNumbersEitherDecoding(t *testing.T) {
+	cases := []struct {
+		in   any
+		want string
+	}{
+		{json.Number("22"), "22"},
+		{json.Number("18446744073709551617"), "18446744073709551617"},
+		{json.Number("2.5"), "2.5"},
+		{float64(22), "22"},
+		{float64(-3), "-3"},
+		{2.5, "2.5"},
+		{float64(1 << 52), "4503599627370496"},
+		{1e19, "1e+19"},
+		{-1e19, "-1e+19"},
+		{nil, ""},
+		{"tcp", "tcp"},
+		{true, "true"},
+	}
+	for _, c := range cases {
+		if got := cellString(c.in); got != c.want {
+			t.Errorf("cellString(%T(%v)) = %q, want %q", c.in, c.in, got, c.want)
+		}
+	}
+}

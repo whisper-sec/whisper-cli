@@ -12,10 +12,13 @@
  * which presents as "the server does not work" with nothing in any log. Every diagnostic
  * here goes to stderr, deliberately and without exception.
  *
- * TRUST. The binary is fetched from the GitHub release tagged for THIS package version and
- * checked against the `.sha256` published beside it, so a given version of this package
- * always resolves to the same bytes. The verified digest is recorded next to the binary and
- * re-checked on EVERY run, so a cached copy that no longer matches that digest is never run.
+ * TRUST. The binary is fetched from the GitHub release this package pins and checked against
+ * the sha256 digest written into this package's own package.json (`whisperCliDigests`) when
+ * it was published. An npm version is immutable, so a given version of this package always
+ * resolves to the same bytes, even if somebody later replaces an asset under the release tag:
+ * the replaced file does not match the pin and is refused. The `.sha256` published beside the
+ * asset is read only to explain a mismatch. The verified digest is recorded next to the binary
+ * and re-checked on EVERY run, so a cached copy that no longer matches it is never run.
  */
 
 const fs = require('fs');
@@ -33,6 +36,13 @@ const PKG = require('../package.json');
  */
 const CLI_VERSION = PKG.whisperCliVersion || PKG.version;
 const VERSION = CLI_VERSION;
+/*
+ * The per-asset digests of that release, pinned at publish time from its checksums.txt by
+ * pin-digests.js. A package without them (a local checkout, never a published one: the pack
+ * refuses it) falls back to the `.sha256` beside the asset, which proves the download arrived
+ * intact but not that the asset is the one that was released.
+ */
+const PINS = PKG.whisperCliDigests || null;
 const REPO = 'whisper-sec/whisper-cli';
 const BASE = `https://github.com/${REPO}/releases/download/v${CLI_VERSION}`;
 
@@ -66,6 +76,58 @@ const TARGETS = {
   'win32-x64': 'whisper-windows-amd64.exe',
   'win32-arm64': 'whisper-windows-arm64.exe',
 };
+
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/**
+ * The digest this package pins for an asset, or null when the package pins none. A package that
+ * pins digests but not THIS one, or pins something that is not a sha256, was packed wrong, and
+ * running an unpinned binary from it would be the exact hole the pins close, so that is fatal.
+ */
+function pinnedDigest(pins, asset) {
+  if (!pins) return null;
+  const d = typeof pins[asset] === 'string' ? pins[asset].toLowerCase() : '';
+  if (!HEX64.test(d)) {
+    die(
+      `this package pins no valid sha256 for ${asset}, so the download cannot be verified.`,
+      `  Nothing was executed. Please report this at https://github.com/${REPO}/issues`
+    );
+  }
+  return d;
+}
+
+/**
+ * Judge downloaded bytes against the pin. Returns null when they match, or the message and the
+ * hint to die with. `published` is the `.sha256` beside the asset, fetched only now, to say
+ * WHICH way it went wrong: a published checksum that names the bytes we got means the asset was
+ * replaced under the tag after this package was published; one that names the pin means the
+ * bytes were damaged or substituted on the way here.
+ */
+function judgePinned(got, pinned, published) {
+  if (got === pinned) return null;
+  let why;
+  if (published === got) {
+    why =
+      `  The release now publishes a checksum for these new bytes, so the asset was REPLACED\n` +
+      `  after this package version was published. This package will only run the bytes it pins.`;
+  } else if (published === pinned) {
+    why = `  The release still publishes the pinned digest, so the download was damaged or substituted on the way.`;
+  } else {
+    why = `  The checksum published beside the asset matches neither.`;
+  }
+  return [
+    'CHECKSUM MISMATCH - refusing to run the downloaded binary.',
+    `  pinned by this package  ${pinned}\n  downloaded             ${got}\n` +
+      (published ? `  published beside it    ${published}\n` : '') +
+      `${why}\n  Nothing was executed. Please report this at https://github.com/${REPO}/issues`,
+  ];
+}
+
+/** The first field of a "<hex>  <name>" checksum file, lowercased; '' when it is not a digest. */
+function parseSum(txt) {
+  const d = String(txt).trim().split(/\s+/)[0].toLowerCase();
+  return HEX64.test(d) ? d : '';
+}
 
 function assetName() {
   const key = `${process.platform}-${process.arch}`;
@@ -131,9 +193,11 @@ async function ensureBinary() {
   // execution inside a process holding WHISPER_API_KEY in its environment. On a laptop that
   // path is private; under a shared XDG_CACHE_HOME or on CI it is not, and the check costs
   // about a tenth of a second.
+  const pinned = pinnedDigest(PINS, asset);
   if (fs.existsSync(exe) && fs.existsSync(stamp)) {
     const recorded = fs.readFileSync(stamp, 'utf8').trim().slice(0, 64);
-    if (/^[0-9a-f]{64}$/.test(recorded) && sha256(fs.readFileSync(exe)) === recorded) {
+    // With a pin, the cached copy must be the pinned bytes, not merely the bytes recorded.
+    if (HEX64.test(recorded) && (!pinned || recorded === pinned) && sha256(fs.readFileSync(exe)) === recorded) {
       return exe;
     }
     note('the cached binary no longer matches its recorded digest; fetching a clean copy');
@@ -149,23 +213,32 @@ async function ensureBinary() {
   }
 
   note(`fetching the Whisper CLI ${VERSION} for ${process.platform}-${process.arch} (first run only)`);
-  const [bin, sumTxt] = await Promise.all([
-    fetchOrDie(`${BASE}/${asset}`, 'the binary'),
-    fetchOrDie(`${BASE}/${asset}.sha256`, 'its checksum'),
-  ]);
-
-  // "<hex>  <name>" - take the first field and nothing else.
-  const want = String(sumTxt).trim().split(/\s+/)[0].toLowerCase();
+  const bin = await fetchOrDie(`${BASE}/${asset}`, 'the binary');
   const got = sha256(bin);
-  if (!/^[0-9a-f]{64}$/.test(want)) {
-    die('the published checksum is not a sha256 digest, so the download cannot be verified.');
-  }
-  if (got !== want) {
-    die(
-      'CHECKSUM MISMATCH - refusing to run the downloaded binary.',
-      `  expected ${want}\n  got      ${got}\n` +
-        `  Nothing was executed. Please report this at https://github.com/${REPO}/issues`
-    );
+  if (pinned) {
+    if (got !== pinned) {
+      // Best effort: the explanation must never mask the refusal, so a failed fetch is ''.
+      let published = '';
+      try {
+        const res = await fetch(`${BASE}/${asset}.sha256`, { redirect: 'follow', signal: AbortSignal.timeout(20_000) });
+        if (res.ok) published = parseSum(await res.text());
+      } catch (_) {
+        published = '';
+      }
+      die(...judgePinned(got, pinned, published));
+    }
+  } else {
+    const want = parseSum(await fetchOrDie(`${BASE}/${asset}.sha256`, 'its checksum'));
+    if (!want) {
+      die('the published checksum is not a sha256 digest, so the download cannot be verified.');
+    }
+    if (got !== want) {
+      die(
+        'CHECKSUM MISMATCH - refusing to run the downloaded binary.',
+        `  expected ${want}\n  got      ${got}\n` +
+          `  Nothing was executed. Please report this at https://github.com/${REPO}/issues`
+      );
+    }
   }
 
   // 0o700 on the directory too, not just the file: a group-writable cache directory hands the
@@ -181,11 +254,26 @@ async function ensureBinary() {
   return exe;
 }
 
+/**
+ * The CLI arguments for what the caller typed. The server is the default, so everything is
+ * passed to `whisper mcp`, with one exception: `--version` asks which CLI this package runs,
+ * and `whisper mcp --version` is an unknown flag (#1624). That one goes straight to the CLI.
+ * `--help` keeps the prefix on purpose: `whisper mcp --help` is the help for the server, which
+ * is what someone running whisper-mcp is asking for.
+ */
+function cliArgs(argv) {
+  if (argv.length === 1 && argv[0] === '--version') return ['--version'];
+  return ['mcp', ...argv];
+}
+
 async function main() {
+  const argv = process.argv.slice(2);
+  const args = cliArgs(argv);
+  if (args[0] === '--version') {
+    // Not the MCP stream, so stdout is right here: this is what a person or a script reads.
+    process.stdout.write(`whisper-mcp ${PKG.version} (runs the Whisper CLI ${CLI_VERSION})\n`);
+  }
   const exe = await ensureBinary();
-  // Default to the MCP server; anything the caller passes is appended, so
-  // `npx @whisper-security/whisper-mcp --help` and the bare form both do the right thing.
-  const args = ['mcp', ...process.argv.slice(2)];
 
   const child = spawn(exe, args, { stdio: 'inherit', env: process.env });
 
@@ -211,4 +299,9 @@ async function main() {
   });
 }
 
-main().catch((e) => die(e && e.stack ? e.stack : String(e)));
+// Required as a module (by pin-digests.js and the tests) it only exports; run, it runs.
+if (require.main === module) {
+  main().catch((e) => die(e && e.stack ? e.stack : String(e)));
+} else {
+  module.exports = { TARGETS, HEX64, cliArgs, judgePinned, parseSum, pinnedDigest };
+}

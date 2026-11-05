@@ -182,6 +182,11 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 		sess.renew = renewerFor(c, args, sess, false, sel)
 		sess.renew.supervised = supervised
 	}
+	if supervised {
+		// Mark the record as the service's, so `whisper service status` names this session
+		// on the port it actually serves, wherever that is.
+		markServiceRecord(sess.recordPath)
+	}
 
 	// Refresh the pidfile with OUR pid (the spawn wrote the parent-observed child pid; this is
 	// the authoritative one and lets `whisper status` / teardown find the live daemon).

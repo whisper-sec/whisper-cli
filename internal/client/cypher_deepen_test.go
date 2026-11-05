@@ -27,9 +27,10 @@ func TestDeepenClientLitQuotesUnknownTypesConservatively(t *testing.T) {
 		// []byte renders as its string content, escaped (backslash doubled FIRST so a
 		// trailing backslash can never escape the closing quote).
 		{"bytes with backslash", []byte(`a\b`), `'a\\b'`},
-		// An unknown scalar (uint is deliberately NOT in the Lit switch) degrades to an
-		// EMPTY quoted string - conservative-emit: never a raw, unescaped rendering.
-		{"unknown scalar", uint(7), `''`},
+		// An unknown scalar degrades to an EMPTY quoted string - conservative-emit: never a
+		// raw, unescaped rendering. This used uint, until every Go integer type got its
+		// decimal form; a complex number has no Cypher literal and never will.
+		{"unknown scalar", complex(1, 2), `''`},
 		// The fallback composes inside a map literal too.
 		{"stringer in a map", map[string]any{"k": deepenclient_stringer{"x'y"}}, `{k:'x\'y'}`},
 	}

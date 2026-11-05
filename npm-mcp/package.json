@@ -31,6 +31,10 @@
   "bin": {
     "whisper-mcp": "bin/whisper-mcp.js"
   },
+  "scripts": {
+    "prepack": "node pin-digests.js --check",
+    "test": "node --test test/wrapper.test.js"
+  },
   "files": [
     "bin/whisper-mcp.js",
     "README.md",
@@ -41,5 +45,18 @@
   },
   "publishConfig": {
     "access": "public"
+  },
+  "whisperCliDigests": {
+    "whisper-darwin-amd64": "480e463bf5ddca346e2438238bd1412990fc923fec9072fc9e98a307c293f887",
+    "whisper-darwin-arm64": "78b7f60f2ea1b7a83c5a913579688bac47e65b6ab76f68544cd1ed889d820f40",
+    "whisper-linux-386": "cc7b6a94a5f3dbb65f461c599ba2f5a6a1bcabe10d01b23e07aa5197f9b554ce",
+    "whisper-linux-amd64": "65057226a4ae71aa4383d49e6d19442ffe4117806f1cfe2c49066a1983fe41dd",
+    "whisper-linux-arm": "b7e60c960b22097ac51c131c12f9a9a5e1e947cd81f14f7ca4518b643bd1b4f3",
+    "whisper-linux-arm64": "b964350a9331702c2755da2c10bfdc295d26f39106d102fa734204aa37203fc0",
+    "whisper-linux-mips": "d28172a1eb2da419343d395ba9b736e10b6017c3ceaa39ed48cf471b69a86b4f",
+    "whisper-linux-mipsle": "83f2b09b9c56399458231dcf50ab0ed5cbf18a6a19ebbad141c4cf3103b2c17c",
+    "whisper-linux-riscv64": "729de8d9687397a33d29a58709bd8100bab4f81772b81077b0239226959e3ff3",
+    "whisper-windows-amd64.exe": "229f529081feb4785be89fabbc35b47f79e3776eab4e35e63459e66e7b2c6e77",
+    "whisper-windows-arm64.exe": "de0795375ed353b63ad0102645dfd4e3addc214c2c4788f437af34486888a621"
   }
 }

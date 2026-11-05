@@ -382,7 +382,7 @@ func TestPunch_ADeadDirectPathFallsBackAndIsPunchedAgain(t *testing.T) {
 	tun, err := Start(cfg, Options{
 		HealthInterval:  100 * time.Millisecond,
 		DeadAfter:       30 * time.Second,
-		DirectDeadAfter: 700 * time.Millisecond,
+		DirectDeadAfter: 3 * peerSideKeepalive * time.Second, // three far-side keepalives
 		PunchEvery:      150 * time.Millisecond,
 		PathStateDir:    t.TempDir(),
 	})

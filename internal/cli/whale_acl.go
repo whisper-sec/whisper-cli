@@ -5,9 +5,12 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -263,19 +266,28 @@ func whaleACLTestRows(env *client.Envelope) (state, note string, verdicts []whal
 	return state, note, verdicts
 }
 
-// cellString renders one control-plane cell as text. JSON numbers arrive as float64, and
+// cellString renders one control-plane cell as text. JSON numbers arrive as float64 from
+// the default decoder and as json.Number from one that keeps them exact (UseNumber), and
 // a port printed as "22" rather than "22.000000" is the whole reason this exists.
+//
+// The json.Number case is the decoder switching to exact numbers: its literal is
+// the text the control plane sent, so it is printed as-is rather than through a float64
+// that would round anything above 2^53. The float64 case formats a whole number as an
+// integer only inside the range where int64 can hold it exactly; outside that range the
+// conversion is implementation-defined in Go, and 1e19 printed as -9223372036854775808.
 func cellString(v any) string {
 	switch x := v.(type) {
 	case nil:
 		return ""
 	case string:
 		return x
+	case json.Number:
+		return x.String()
 	case float64:
-		if x == float64(int64(x)) {
-			return fmt.Sprintf("%d", int64(x))
+		if x == math.Trunc(x) && math.Abs(x) < 1<<53 {
+			return strconv.FormatInt(int64(x), 10)
 		}
-		return fmt.Sprintf("%v", x)
+		return strconv.FormatFloat(x, 'g', -1, 64)
 	default:
 		return fmt.Sprintf("%v", x)
 	}

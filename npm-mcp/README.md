@@ -47,11 +47,14 @@ investigation procedures).
 
 ## What this package does
 
-It resolves the `whisper` binary for your platform from the GitHub release tagged for
-this exact package version, checks it against the `.sha256` published beside it, caches it,
-and runs `whisper mcp`. The verified digest is recorded beside the binary and re-checked on
-every run, so a given version of this package always resolves to the same bytes and a cached
-copy that no longer matches the digest we recorded is never executed.
+It resolves the `whisper` binary for your platform from the GitHub release this package
+pins, checks it against the sha256 digest written into this package when it was published,
+caches it, and runs `whisper mcp`. An npm version cannot change, so a given version of this
+package always resolves to the same bytes: an asset replaced under the release tag later does
+not match the pin and is refused, never run. The verified digest is recorded beside the binary
+and re-checked on every run, so a cached copy that no longer matches it is never executed.
+
+`npx @whisper-security/whisper-mcp --version` prints this package's version and the CLI's.
 
 Already have the CLI (`brew install whisper-sec/tap/whisper`, `apt install whisper`,
 `scoop install whisper`)? Then `whisper mcp` is the same server and you do not need this

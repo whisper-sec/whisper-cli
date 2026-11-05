@@ -183,6 +183,8 @@ type statusSession struct {
 	ReconnectingAt time.Time `json:"reconnecting_at,omitempty"`
 	// Serving is false for a holder between sessions: alive, but nothing answers its port.
 	Serving bool `json:"-"`
+	// Service marks the installed service's own session.
+	Service bool `json:"-"`
 	// Accept / AcceptScope are the ports this session opened on its /128 and who they admit,
 	// read from the holder's record so any shell sees them.
 	Accept      []acceptRecord `json:"accept,omitempty"`
@@ -303,6 +305,7 @@ func liveStatusSessions() []statusSession {
 			TunnelReason:   rec.TunnelReason,
 			ReconnectingAt: rec.ReconnectingAt,
 			Serving:        !rec.NoProxy,
+			Service:        rec.Service,
 			Accept:         rec.Accept,
 			AcceptScope:    rec.AcceptScope,
 			AcceptFrom:     rec.AcceptFrom,
