@@ -4,10 +4,6 @@ module github.com/whisper-sec/whisper-cli
 
 go 1.26.10
 
-// v1.0.0 was published by mistake; the 0.x line continues.
-// v1.0.1 exists only to carry these retractions.
-retract [v1.0.0, v1.0.1]
-
 require (
 	github.com/charmbracelet/bubbles v1.0.0
 	github.com/charmbracelet/bubbletea v1.3.10
