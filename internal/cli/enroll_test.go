@@ -41,7 +41,7 @@ func TestEnrollIsRegisteredOnTheRootCommand(t *testing.T) {
 // hits an already-bound host. It must be free (no control-plane call) and must not re-bind.
 func TestEnrollOnAnAlreadyBoundHostIsFreeAndIdempotent(t *testing.T) {
 	testenv.HermeticHome(t)
-	addr := netip.MustParseAddr("2a04:2a01:400:1:aaaa:bbbb:cccc:dddd")
+	addr := netip.MustParseAddr("2a04:2a01:9:1:aaaa:bbbb:cccc:dddd")
 	if err := client.WriteBoundFile(client.DefaultBoundFile(), "register", addr, "host.whisper.online", "ag_bound"); err != nil {
 		t.Fatalf("seed: %v", err)
 	}

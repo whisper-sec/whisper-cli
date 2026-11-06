@@ -378,6 +378,13 @@ func mapProblem(pe *client.ProblemError) string {
 		if isPinPublishRetry(pe) {
 			return ""
 		}
+		// So does a replication primary that did not answer. Its sentence says whether anything was changed, to
+		// retry the SAME request unchanged (the server dedupes on the arguments, so a varied retry is a new
+		// request), and, when the primary already holds the agent, which agent and how long the key is kept.
+		// "busy, try again" drops all three, and the first is the one that keeps a retry from creating a second agent.
+		if isPrimaryUnreachable(pe) {
+			return ""
+		}
 		return "Whisper is busy right now - please try again in a moment"
 	}
 	if pe.Type == "EGRESS_DISABLED" {
@@ -394,6 +401,12 @@ func isNothingToReverse(pe *client.ProblemError) bool {
 
 // isPinPublishRetry reports the service's retryable identity-pin answers, PIN_PUBLISH_FAILED and
 // PIN_PUBLISH_INCOMPLETE, for an account key and an agent key alike.
+// isPrimaryUnreachable reports the service's PRIMARY_UNREACHABLE answers: a secondary whose replication primary did
+// not answer, or did not answer whole. Each carries its own sentence on what was changed and how to retry.
+func isPrimaryUnreachable(pe *client.ProblemError) bool {
+	return pe.Type == "PRIMARY_UNREACHABLE" || pe.Title == "PRIMARY_UNREACHABLE"
+}
+
 func isPinPublishRetry(pe *client.ProblemError) bool {
 	for _, code := range []string{pe.Type, pe.Title} {
 		if code == "PIN_PUBLISH_FAILED" || code == "PIN_PUBLISH_INCOMPLETE" {

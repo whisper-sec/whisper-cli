@@ -202,14 +202,20 @@ func writeSessionRecord(sess *egressSession) {
 		// address that is public DNS, and a loopback port any local user can see in
 		// `ss -lnt` already.
 		dirMode os.FileMode
+		machine bool
 	}{
-		{sessionsDirFn(), 0o600, 0o700},
-		{machineSessionsDirFn(), 0o644, 0o755},
+		{sessionsDirFn(), 0o600, 0o700, false},
+		{machineSessionsDirFn(), 0o644, 0o755, true},
 	} {
 		if strings.TrimSpace(dst.dir) == "" {
 			continue
 		}
 		if err := os.MkdirAll(dst.dir, dst.dirMode); err != nil {
+			continue
+		}
+		// On Windows the mode above restricts nothing: the directory gets a protected DACL, and a
+		// record goes only into a directory whose DACL we could set.
+		if err := hardenSessionsDir(dst.dir, dst.machine); err != nil {
 			continue
 		}
 		path := filepath.Join(dst.dir, name)
@@ -512,6 +518,13 @@ func findProvenSession(cx context.Context, c *client.Client, sel string, require
 			// running is reused with a warning: refusing it would fail every run while the echo is down, and a
 			// fresh session would replace that holder's tunnel. Anything else stops the run.
 			if pidAlive(r.PID) {
+				// An alive pid is not proof it still holds this port. A known different owner means
+				// the record describes a port someone else now listens on: sweep it, never route
+				// through it. Unknown keeps the warning path below.
+				if owned, known := listenerOwnedByFn(r.Port, r.PID); known && !owned {
+					removeSessionRecordAt(r.path)
+					continue
+				}
 				if !g.quiet {
 					fmt.Fprintf(os.Stderr, "whisper: reusing the live session for %s on 127.0.0.1:%d (pid %d); "+
 						"its identity could not be checked just now (%v)\n", want, r.Port, r.PID, err)

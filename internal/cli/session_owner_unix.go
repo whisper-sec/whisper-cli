@@ -45,3 +45,7 @@ func pidAlive(pid int) bool {
 	err := syscall.Kill(pid, 0)
 	return err == nil || err == syscall.EPERM
 }
+
+// hardenSessionsDir is a no-op where MkdirAll's mode already restricts the directory; the Windows
+// half sets a protected DACL.
+func hardenSessionsDir(string, bool) error { return nil }

@@ -17,7 +17,7 @@ import (
 // checked either against the parser.
 func TestWriteBoundFileRoundTripsThroughTheReader(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nested", "bound")
-	addr := netip.MustParseAddr("2a04:2a01:400:1:a1b2:c3d4:e5f6:0718")
+	addr := netip.MustParseAddr("2a04:2a01:9:1:a1b2:c3d4:e5f6:0718")
 
 	if err := WriteBoundFile(path, "register", addr, "laptop.a1b2c3d4e5f60718.whisper.online.", "ag_demo"); err != nil {
 		t.Fatalf("write: %v", err)
@@ -75,7 +75,7 @@ func TestWriteBoundFileRefusesAnEmptyAddress(t *testing.T) {
 // here would splice two identities together and the reader takes the LAST address line).
 func TestWriteBoundFileTruncatesAPreviousLongerMarker(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "bound")
-	long := netip.MustParseAddr("2a04:2a01:400:1:aaaa:bbbb:cccc:dddd")
+	long := netip.MustParseAddr("2a04:2a01:9:1:aaaa:bbbb:cccc:dddd")
 	if err := WriteBoundFile(path, "register", long, "a-very-long-previous-name.whisper.online", "ag_previous_long"); err != nil {
 		t.Fatalf("first write: %v", err)
 	}

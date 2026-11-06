@@ -47,6 +47,9 @@ func stubProof(t *testing.T, observe func() (string, error)) (dir string, calls 
 	machineSessionsDirFn = func() string { return "" }
 	t.Cleanup(func() { machineSessionsDirFn = savedM })
 	stubProbe(t, true, nil)
+	savedL := listenerOwnedByFn
+	listenerOwnedByFn = func(int, int) (bool, bool) { return false, false } // unknown, unless a test says
+	t.Cleanup(func() { listenerOwnedByFn = savedL })
 	n := 0
 	calls = &n
 	savedO, savedD := observeEgress, directEgress
