@@ -118,9 +118,36 @@ func newSignVerifyCmd() *cobra.Command {
 }
 
 // verifyDetached is the DANE-pure verify: (1) the CMS signature is cryptographically valid over
-// the content, and (2) the signer cert's SPKI matches a DNSSEC-validated SMIMEA 3-1-1 pin under
-// the signer's mailbox. Trust comes ONLY from the DNSSEC chain (no public CA). Fails CLOSED.
+// the content, (2) the signer cert's SPKI matches a DNSSEC-validated SMIMEA 3-1-1 pin under the
+// signer's mailbox, and (3) a signer leaf from the Whisper Agent CA belongs to the mailbox's
+// current allocation. Trust comes ONLY from the DNSSEC chain (no public CA). Fails CLOSED.
 func verifyDetached(content, der []byte, resolver string) error {
+	res := trustverify.NewNetResolver(strings.TrimSpace(resolver))
+	return verifyDetachedWith(content, der, validatorSignDNS{
+		v: trustverify.NewValidator(res, trustverify.IANARootAnchors(), time.Now()),
+	})
+}
+
+// signDNS is the DNSSEC half of `sign verify`: the SMIMEA pins at an owner, and the allocation
+// check of a signer leaf against the identity TXT at a name. One validator answers both.
+type signDNS interface {
+	SmimeaPins(owner string) ([][32]byte, error)
+	AllocationOf(leaf *x509.Certificate, name string) trustverify.AllocationFinding
+}
+
+type validatorSignDNS struct{ v *trustverify.Validator }
+
+func (d validatorSignDNS) SmimeaPins(owner string) ([][32]byte, error) {
+	return validateSmimeaPinsWith(d.v, owner)
+}
+
+func (d validatorSignDNS) AllocationOf(leaf *x509.Certificate, name string) trustverify.AllocationFinding {
+	cx, cancel := ctx()
+	defer cancel()
+	return d.v.CheckLeafAllocation(cx, leaf, name)
+}
+
+func verifyDetachedWith(content, der []byte, d signDNS) error {
 	p7, err := pkcs7.Parse(der)
 	if err != nil {
 		return fmt.Errorf("parse signature: %w", err)
@@ -146,7 +173,7 @@ func verifyDetached(content, der []byte, resolver string) error {
 	if err != nil {
 		return err
 	}
-	pins, err := validateSmimeaPins(owner, resolver)
+	pins, err := d.SmimeaPins(owner)
 	if err != nil {
 		return fmt.Errorf("SMIMEA (DNSSEC) for %s: %w", mailbox, err)
 	}
@@ -161,10 +188,27 @@ func verifyDetached(content, der []byte, resolver string) error {
 	if !matched {
 		return fmt.Errorf("signer key is NOT pinned by the DNSSEC SMIMEA for %s (untrusted signer)", mailbox)
 	}
+	// (3) the allocation: a previous holder of the identity may still hold a pinned key while a
+	// reallocation shares it, so an Agent CA signer leaf must name the mailbox's current
+	// allocation, read from the DNSSEC-validated whisper-id1 at the mailbox's domain. Any other
+	// signer certificate is the agent's own, judged by the pin alone.
+	domain := strings.TrimSuffix(mailbox[strings.LastIndex(mailbox, "@")+1:], ".")
+	alloc := d.AllocationOf(signer, domain)
+	switch {
+	case alloc.Pass:
+	case alloc.Superseded:
+		return fmt.Errorf("signed under a previous allocation of %s: %s", mailbox, alloc.Detail)
+	default:
+		return fmt.Errorf("the allocation of %s could not be proven: %s", mailbox, alloc.Detail)
+	}
+	allocNote := ""
+	if alloc.Applies {
+		allocNote = "\n         Allocation consistency check: " + alloc.Detail + "."
+	}
 	fmt.Fprintf(os.Stderr,
 		"whisper: VERIFIED - signature is valid and the signer key is DANE-anchored by the DNSSEC\n"+
-			"         SMIMEA for %s (spki sha256 %s). Trust: DNSSEC/SMIMEA, not a public S/MIME CA.\n",
-		mailbox, hex.EncodeToString(want[:8]))
+			"         SMIMEA for %s (spki sha256 %s). Trust: DNSSEC/SMIMEA, not a public S/MIME CA.%s\n",
+		mailbox, hex.EncodeToString(want[:8]), allocNote)
 	return nil
 }
 
@@ -245,11 +289,9 @@ func smimeaOwner(mailbox string) (string, error) {
 	return label + "._smimecert." + domain + ".", nil
 }
 
-// validateSmimeaPins DNSSEC-validates the SMIMEA RRset at owner from the IANA root IN-PROCESS and
+// validateSmimeaPinsWith DNSSEC-validates the SMIMEA RRset at owner from the IANA root IN-PROCESS and
 // returns every DANE-EE (3 1 1) pin (the 32-byte SHA-256 of the signer's SPKI).
-func validateSmimeaPins(owner, resolver string) ([][32]byte, error) {
-	res := trustverify.NewNetResolver(strings.TrimSpace(resolver))
-	v := trustverify.NewValidator(res, trustverify.IANARootAnchors(), time.Now())
+func validateSmimeaPinsWith(v *trustverify.Validator, owner string) ([][32]byte, error) {
 	cx, cancel := ctx()
 	defer cancel()
 	rrs, err := v.ValidateRRSet(cx, owner, dns.TypeSMIMEA)

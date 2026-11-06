@@ -63,6 +63,24 @@ type Config struct {
 	// service install --accept 22` writes it, and the supervised daemon reads it on every
 	// start, so the accepted ports survive a reboot. nil (the default) opens nothing.
 	Accept *AcceptConfig `json:"accept,omitempty"`
+
+	// Share is who a ROOT-run host service lets use its local forwarder without the session
+	// credential: `whisper service install --share-user` writes it, defaulting to the
+	// user who ran sudo. nil means the config predates it; an empty list means nobody but the
+	// service itself.
+	Share *ShareConfig `json:"share,omitempty"`
+}
+
+// ShareConfig is the host service's share list.
+type ShareConfig struct {
+	Users []ShareUser `json:"users"`
+}
+
+// ShareUser is one listed user: the name it was given as (for messages) and the principal it
+// resolved to at install, "u:<uid>" on unix or a SID on Windows, which is what is compared.
+type ShareUser struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
 }
 
 // AcceptConfig is the durable form of `whisper connect --accept`.

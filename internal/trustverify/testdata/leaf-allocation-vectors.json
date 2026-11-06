@@ -1,0 +1,319 @@
+[
+  {
+    "name": "names the current allocation",
+    "subject_serials": [
+      "alloc-1767225900000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "PASS"
+  },
+  {
+    "name": "names an earlier allocation",
+    "subject_serials": [
+      "alloc-1767225900000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767312300000
+    },
+    "expect": "ALLOCATION_MISMATCH"
+  },
+  {
+    "name": "names a later allocation",
+    "subject_serials": [
+      "alloc-1767312300000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "ALLOCATION_MISMATCH"
+  },
+  {
+    "name": "names an allocation, exact even when notBefore is long after",
+    "subject_serials": [
+      "alloc-1767225900000"
+    ],
+    "not_before_ms": 1769817600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900001
+    },
+    "expect": "ALLOCATION_MISMATCH"
+  },
+  {
+    "name": "names none, issued after the allocation began",
+    "subject_serials": [],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225700000
+    },
+    "expect": "PASS"
+  },
+  {
+    "name": "names none, issued before the allocation began",
+    "subject_serials": [],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767229200000
+    },
+    "expect": "ISSUED_BEFORE_ALLOCATION"
+  },
+  {
+    "name": "names none, allocation exactly at notBefore plus backdate plus one second",
+    "subject_serials": [],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225901000
+    },
+    "expect": "PASS"
+  },
+  {
+    "name": "names none, allocation one millisecond past notBefore plus backdate plus one second",
+    "subject_serials": [],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225901001
+    },
+    "expect": "ISSUED_BEFORE_ALLOCATION"
+  },
+  {
+    "name": "two allocation attributes with the same value",
+    "subject_serials": [
+      "alloc-1767225900000",
+      "alloc-1767225900000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "two allocation attributes, one current",
+    "subject_serials": [
+      "alloc-1767225900000",
+      "alloc-1767225900001"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "leading zero",
+    "subject_serials": [
+      "alloc-01767225900000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "zero",
+    "subject_serials": [
+      "alloc-0"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "20 digits",
+    "subject_serials": [
+      "alloc-12345678901234567890"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "19 digits past the int64 range",
+    "subject_serials": [
+      "alloc-9223372036854775808"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "19 digits at the int64 maximum",
+    "subject_serials": [
+      "alloc-9223372036854775807"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 9223372036854775807
+    },
+    "expect": "PASS"
+  },
+  {
+    "name": "plus sign",
+    "subject_serials": [
+      "alloc-+5"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 5
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "minus sign",
+    "subject_serials": [
+      "alloc--5"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 5
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "empty digits",
+    "subject_serials": [
+      "alloc-"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "a non-digit",
+    "subject_serials": [
+      "alloc-17672259x0000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "MALFORMED_ALLOCATION"
+  },
+  {
+    "name": "a non-allocation serialNumber beside a valid one",
+    "subject_serials": [
+      "device-4242",
+      "alloc-1767225900000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767225900000
+    },
+    "expect": "PASS"
+  },
+  {
+    "name": "a non-allocation serialNumber alone is ignored",
+    "subject_serials": [
+      "device-4242"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767229200000
+    },
+    "expect": "ISSUED_BEFORE_ALLOCATION"
+  },
+  {
+    "name": "the prefix is case-sensitive",
+    "subject_serials": [
+      "ALLOC-1767225900000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "known",
+      "alloc_ms": 1767229200000
+    },
+    "expect": "ISSUED_BEFORE_ALLOCATION"
+  },
+  {
+    "name": "no current identity",
+    "subject_serials": [
+      "alloc-1767225900000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "none",
+      "alloc_ms": 0
+    },
+    "expect": "NO_CURRENT_IDENTITY"
+  },
+  {
+    "name": "no current identity, leaf names none",
+    "subject_serials": [],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "none",
+      "alloc_ms": 0
+    },
+    "expect": "NO_CURRENT_IDENTITY"
+  },
+  {
+    "name": "no current identity outranks a malformed leaf",
+    "subject_serials": [
+      "alloc-01"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "none",
+      "alloc_ms": 0
+    },
+    "expect": "NO_CURRENT_IDENTITY"
+  },
+  {
+    "name": "allocation unknown",
+    "subject_serials": [
+      "alloc-1767225900000"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "unknown",
+      "alloc_ms": 0
+    },
+    "expect": "UNKNOWN_ALLOCATION"
+  },
+  {
+    "name": "allocation unknown outranks a malformed leaf",
+    "subject_serials": [
+      "alloc-01"
+    ],
+    "not_before_ms": 1767225600000,
+    "current": {
+      "kind": "unknown",
+      "alloc_ms": 0
+    },
+    "expect": "UNKNOWN_ALLOCATION"
+  }
+]

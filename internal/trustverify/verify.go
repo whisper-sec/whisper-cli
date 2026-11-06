@@ -134,7 +134,7 @@ func Verify(ctx context.Context, target string, opts Options) (*Report, error) {
 	}
 
 	// --- Step 2: DANE-EE -- the served cert must satisfy ANY published DNSSEC pin ---------
-	daneCheck := runDANE(ctx, opts, addr, fqdn, pins, rep)
+	daneCheck := runDANE(ctx, v, opts, addr, fqdn, pins, rep)
 	rep.Checks = append(rep.Checks, daneCheck)
 
 	// --- recover the DNSSEC-anchored signing keys (_whisper-identity/_whisper-ledger
@@ -302,7 +302,14 @@ func (v *Validator) proveName(ctx context.Context, addr netip.Addr) (string, err
 // runDANE performs the DANE-EE handshake + pin/SAN check and records the served SPKI.
 // pins carries EVERY published 3 1 1 association (a make-before-break rotation publishes two); the
 // served leaf need only match ANY of them.
-func runDANE(ctx context.Context, opts Options, addr netip.Addr, fqdn string, pins []TLSAPin, rep *Report) Check {
+//
+// A leaf the Whisper Agent CA issued, or one that names an allocation, is then held to the
+// identity's current allocation (CheckLeafAllocation): a previous holder of the /128 must not pass
+// for the new one. While a reallocation can hand the new holder the same key, this is a
+// consistency check on the DANE path, not the boundary; the pin is. Any other leaf is the agent's
+// own certificate and DANE-EE judges its SPKI alone.
+func runDANE(ctx context.Context, v *Validator, opts Options, addr netip.Addr, fqdn string, pins []TLSAPin,
+	rep *Report) Check {
 	check := Check{Name: "dane", TrustLevel: TrustDNSSECRoot,
 		Anchor: "DNSSEC-validated TLSA 3 1 1 pin (no public CA) -- RFC 6698/7671"}
 	hostport := netip.AddrPortFrom(addr, uint16(opts.Port)).String()
@@ -318,6 +325,16 @@ func runDANE(ctx context.Context, opts Options, addr netip.Addr, fqdn string, pi
 	check.Status = StatusPass
 	check.Detail = fmt.Sprintf("served leaf SPKI-SHA256 == a published TLSA pin (%d published); DNS-SAN=%s, IP-SAN=%s; issuer %q",
 		len(pins), trimDot(fqdn), addr, cert.Issuer.CommonName)
+	alloc := v.CheckLeafAllocation(ctx, cert, fqdn)
+	if !alloc.Applies {
+		return check
+	}
+	check.Anchor += "; plus an allocation consistency check on the DANE path (the leaf's subject" +
+		" serialNumber alloc- against the DNSSEC-validated whisper-id1 alloc=)"
+	if !alloc.Pass {
+		return fail(check, "allocation consistency check: "+alloc.Detail)
+	}
+	check.Detail += "; allocation consistency check: " + alloc.Detail
 	return check
 }
 

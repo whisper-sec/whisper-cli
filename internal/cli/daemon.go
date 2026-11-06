@@ -5,9 +5,11 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -85,14 +87,32 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 		// replace its peer, so a config that names no agent is refused, never guessed.
 		return errNoProjectAgent
 	}
-	{
+	for {
 		cxSel, cancelSel := ctx()
 		resolved, rerr := resolveAgentArg(c, cxSel, sel, false, "")
 		cancelSel()
-		if rerr != nil {
+		if rerr == nil {
+			sel = resolved
+			break
+		}
+		// A definitive refusal (no such agent, a key the control plane rejects) is held as a
+		// published "refused" state rather than a crash loop the service manager restarts
+		// forever, so `service install --now` and `service status` say why within seconds.
+		if !supervised {
 			return rerr
 		}
-		sel = resolved
+		// Transient (no route, the control plane unreachable): a supervised daemon keeps trying.
+		// Returning here used to leave the service "active" with no connection behind it until
+		// someone restarted it.
+		if classifyRenewErr(rerr) != renewFinal {
+			if stopped := holdDownFn(sel, cfg.Port, rerr); stopped {
+				return nil
+			}
+			continue
+		}
+		if stopped := holdRefusedFn(sel, cfg.Port, rerr); stopped {
+			return nil
+		}
 	}
 
 	args := map[string]any{}
@@ -109,6 +129,8 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 	if remove := daemonAcceptPlan(c, cfg, tier); remove != nil {
 		defer remove()
 	}
+	// Who besides this daemon may use its forwarder without the credential.
+	daemonSharePlan(cfg, supervised, p.ConfigFile)
 	// --tier wireguard: mint a local WG keypair (+ the identity keypair); only the public
 	// halves go to the server. No-op for socks5. (Same best-practice flow as every other
 	// connect surface.) The identity key's persistence handle is the RESOLVED selector, so a
@@ -148,8 +170,31 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 		if aerr == nil {
 			break
 		}
+		// A definitive refusal is not retried on the transient schedule; a supervised daemon
+		// publishes it and asks again on the slow one (holdRefused). Transient errors (no route,
+		// the control plane unreachable, a 5xx) keep the backoff below.
+		if supervised && classifyRenewErr(aerr) == renewFinal {
+			if stopped := holdRefusedFn(sel, cfg.Port, aerr); stopped {
+				return nil
+			}
+			attempt = -1
+			continue
+		}
 		if attempt >= len(daemonRetryBackoff) {
-			return aerr
+			if !supervised {
+				return aerr
+			}
+			// A supervised daemon never gives up on a transient fault: it publishes that it is
+			// down and why, and keeps asking on the slow schedule. Returning used to end the
+			// connection for good while the unit stayed "active".
+			if stopped := holdDownFn(sel, cfg.Port, aerr); stopped {
+				return nil
+			}
+			attempt = len(daemonRetryBackoff) - 1
+			if cfg.Port > 0 && probeWhisperProxy(cfg.Port) {
+				return nil
+			}
+			continue
 		}
 		time.Sleep(daemonRetryBackoff[attempt])
 		if cfg.Port > 0 && probeWhisperProxy(cfg.Port) {
@@ -240,13 +285,14 @@ func daemonConnectAttempt(c *client.Client, cfg projcfg.Config, keys *connectKey
 var holdDaemonUntilSignal = holdDaemonUntilSignalLive
 
 func holdDaemonUntilSignalLive(p projcfg.Paths, sess *egressSession) {
+	stopping := holdsStopping() // before the record is visible, so no stop can be missed
 	writeSessionRecord(sess)
 	defer removeOwnPIDFile(p.PIDFile)
 	// Watch the session until the signal, renewing a Tier 1 tunnel whose box has dropped it,
 	// then stop whatever session is current and clear its record. The supervisor also returns
 	// when another Whisper proxy has taken this port over, which for a daemon means the
 	// connection is already ensured.
-	superviseUntilSignal(sess, daemonLogf)
+	superviseUntilSignalFrom(sess, daemonLogf, stopping)
 }
 
 // removeOwnPIDFile removes the pidfile only while it still names this process. A daemon that
@@ -374,4 +420,98 @@ func daemonAcceptPlan(c *client.Client, cfg projcfg.Config, tier string) (remove
 	fcx, cancel := context.WithTimeout(context.Background(), acceptStartupBudget)
 	defer cancel()
 	return installAcceptPlan(newAcceptPlan(fcx, c, req, daemonLogf))
+}
+
+// refusedRetryEvery is how long a supervised daemon whose connect was definitively refused waits
+// before asking again. The refusal may be fixed meanwhile (the agent re-created, the key renewed),
+// so it does ask again, just not on the transient schedule. A var so tests run instantly.
+var refusedRetryEvery = 5 * time.Minute
+
+// holdRefusedFn is holdRefused; a seam for tests.
+var holdRefusedFn = holdRefused
+
+// downRetryEvery is how long a supervised daemon waits between attempts once the quick backoff
+// is spent on a transient fault. A var so tests run instantly.
+var downRetryEvery = 30 * time.Second
+
+// holdDownFn is holdDown; a seam for tests.
+var holdDownFn = holdDown
+
+// holdRefused publishes a "refused" holder record for this daemon's port, so `whisper service
+// status` and `service install --now` see the refusal and its reason at once, then waits for a
+// stop or the next try. It returns true when the daemon was asked to stop, with the record removed.
+func holdRefused(addr string, port int, err error) (stopped bool) {
+	reason := refusalReason(err)
+	daemonLogf("whisper: connection daemon: the Whisper side refused this connection (%s); asking again in %s. "+
+		"Fix the cause (the agent in the config, or the key), or `whisper service install --agent <id>`", reason, refusedRetryEvery)
+	return holdState(addr, port, tunnelRefused, reason, refusedRetryEvery)
+}
+
+// holdDown is holdRefused for a transient fault: published as "down", tried again sooner.
+func holdDown(addr string, port int, err error) (stopped bool) {
+	reason := refusalReason(err)
+	daemonLogf("whisper: connection daemon: could not connect (%s); trying again in %s", reason, downRetryEvery)
+	return holdState(addr, port, tunnelDown, reason, downRetryEvery)
+}
+
+func holdState(addr string, port int, state, reason string, wait time.Duration) (stopped bool) {
+	now := time.Now()
+	path := publishHolderRecord(addr, port, state, reason, now, now.Add(wait))
+	defer func() {
+		if path != "" && ownsSessionRecord(path) {
+			removeSessionRecordAt(path)
+		}
+	}()
+	stopping := holdsStopping()
+	sigs, stopSigs := superviseSignals()
+	defer stopSigs()
+	t := time.NewTimer(wait)
+	defer t.Stop()
+	select {
+	case <-sigs:
+		return true
+	case <-stopping:
+		return true
+	case <-t.C:
+		return false
+	}
+}
+
+// publishHolderRecord writes the record of a supervised holder that serves nothing yet: refused,
+// or down on a transient fault. Alive (its pid), between sessions (no proxy), and when it asks
+// next. The same registries, in the same order, as writeSessionRecord; no credential, since no
+// proxy runs.
+func publishHolderRecord(addr string, port int, state, reason string, since, next time.Time) string {
+	if strings.TrimSpace(addr) == "" || port <= 0 {
+		return ""
+	}
+	rec := sessionRecord{
+		Addr: addr, Endpoint: "socks5h://127.0.0.1:" + strconv.Itoa(port), Tier: "socks5", Port: port,
+		PID: os.Getpid(), TunnelState: state, TunnelSince: since.UTC(), TunnelReason: reason,
+		NoProxy: true, ReconnectingAt: next.UTC(), Service: true,
+	}
+	b, err := json.Marshal(rec)
+	if err != nil {
+		return ""
+	}
+	name := fmt.Sprintf("%s-%d.json", flattenAddr(addr), port)
+	type dst struct {
+		dir           string
+		mode, dirMode os.FileMode
+		machine       bool
+	}
+	dsts := []dst{{sessionsDirFn(), 0o600, 0o700, false}, {machineSessionsDirFn(), 0o644, 0o755, true}}
+	if geteuidFn() == 0 {
+		dsts[0], dsts[1] = dsts[1], dsts[0]
+	}
+	for _, d := range dsts {
+		if strings.TrimSpace(d.dir) == "" || os.MkdirAll(d.dir, d.dirMode) != nil || hardenSessionsDir(d.dir, d.machine) != nil {
+			continue
+		}
+		path := filepath.Join(d.dir, name)
+		if writeFileAtomic(path, b, d.mode) == nil {
+			return path
+		}
+	}
+	return ""
 }

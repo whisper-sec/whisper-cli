@@ -73,7 +73,7 @@ func runEnforced(agent, agentFile, tier, flagUser, name string, childArgs []stri
 	res, err := enforce.RunWindows(enforce.WindowsSpec{
 		Path:      path,
 		Args:      append([]string{name}, childArgs...),
-		Env:       windowsEnforcedEnv(os.Environ(), sess.endpoint, sess.addr, os.Getpid()),
+		Env:       windowsEnforcedEnv(os.Environ(), sess.useEndpoint(), sess.addr, os.Getpid()),
 		Dir:       dir,
 		ProxyPort: port,
 		Logf:      logf,

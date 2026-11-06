@@ -7,7 +7,7 @@
 //
 // The design, and it is the decisive, already-de-risked path:
 //
-//	user's tool ──socks5/http──▶ 127.0.0.1:<freeport> (this proxy, NO auth)
+//	user's tool ──socks5/http──▶ 127.0.0.1:<freeport> (this proxy; the holder's user, or the session credential)
 //	                                     │
 //	                            TLS to egress.whisper.online:443
 //	                                     │ HTTP CONNECT <target>
@@ -43,11 +43,14 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/peerid"
 )
 
 // Dialer opens ONE upstream byte-pipe to target ("host:port") on behalf of an accepted
@@ -104,6 +107,11 @@ type Proxy struct {
 	failMu  sync.Mutex
 	failWhy string
 	failAt  time.Time
+
+	// access is the admission rule (access.go); nil is the strictest state, owner only with no
+	// credential accepted. gate is the per-proxy admission bookkeeping.
+	access atomic.Pointer[Access]
+	gate   gate
 }
 
 // Endpoint is the load-bearing connection string: socks5h://127.0.0.1:<port>.
@@ -280,9 +288,12 @@ func startWithDialer(d Dialer, onStop func(), wantPort int) (*Proxy, error) {
 		onStop:   onStop,
 		dialer:   d,
 	}
+	p.gate.holder = peerid.Self()
+	p.gate.lookupFn = startLookup
 
 	p.wg.Add(1)
 	go p.serve()
+	p.selfTest()
 	return p, nil
 }
 
@@ -315,13 +326,35 @@ func listenLoopback(wantPort int) (net.Listener, error) {
 // the splice's io.Copy so Stop()'s wg.Wait() drains promptly instead of parking on an
 // idle-but-open tunnel. (The watcher exits the instant the handler finishes on its own,
 // via the per-conn done channel - no leak when a client closes normally.)
+//
+// Only a closed listener ends the loop. Any other Accept error (EMFILE when something has opened
+// connections until the holder ran out of descriptors, ECONNABORTED) is waited out with a
+// bounded backoff; exiting on it would let any local user end the session with a burst of
+// connections.
 func (p *Proxy) serve() {
 	defer p.wg.Done()
+	backoff := time.Duration(0)
 	for {
 		conn, err := p.ln.Accept()
 		if err != nil {
-			return // listener closed (Stop) - clean exit
+			if errors.Is(err, net.ErrClosed) || p.life.Err() != nil {
+				return // listener closed (Stop) - clean exit
+			}
+			if backoff == 0 {
+				backoff = 5 * time.Millisecond
+			} else if backoff *= 2; backoff > time.Second {
+				backoff = time.Second
+			}
+			p.logLimited(p.currentAccess(), "accept", "whisper: the local proxy on "+p.addr+
+				" cannot accept connections right now ("+err.Error()+"); retrying")
+			select {
+			case <-time.After(backoff):
+			case <-p.life.Done():
+				return
+			}
+			continue
 		}
+		backoff = 0
 		p.wg.Add(1)
 		go func() {
 			defer p.wg.Done()
@@ -342,38 +375,118 @@ func (p *Proxy) serve() {
 	}
 }
 
-// handle sniffs the local client's first byte: 0x05 ⇒ SOCKS5, anything else ⇒ treat
-// as HTTP (CONNECT). We never log the request line (it can name a sensitive target).
+// startLookup is the peer lookup new proxies use; a package var so tests can stand in for the
+// kernel and play another user's client.
+var startLookup = peerid.Lookup
+
+// admission is one connection's pre-auth bookkeeping: the slots it holds until it is admitted
+// or refused. release is idempotent.
+type admission struct {
+	p        *Proxy
+	conn     net.Conn
+	lim      *headLimit
+	unauthID peerid.ID
+	unauth   bool
+	done     bool
+}
+
+// admit ends the pre-auth phase: the deadline is cleared BEFORE the upstream dial (a slow dial
+// must not make the success reply miss a pre-auth deadline), the head limit is lifted so the
+// splice is unbounded, and the slots are given back so a long tunnel never counts against them.
+func (ad *admission) admit() {
+	_ = ad.conn.SetDeadline(time.Time{})
+	ad.lim.lift()
+	ad.release()
+}
+
+func (ad *admission) release() {
+	if ad.done {
+		return
+	}
+	ad.done = true
+	if ad.unauth {
+		ad.p.gate.leaveUnauth(ad.unauthID)
+	}
+	ad.p.gate.leavePreAuth()
+}
+
+// headLimit bounds what a client may send before it is admitted (the HTTP head, the SOCKS
+// greeting and request) and is lifted on admission, so the same bufio.Reader carries the tunnel
+// with nothing lost and nothing truncated. Only the connection's own goroutine touches it.
+type headLimit struct {
+	r       io.Reader
+	n       int64
+	lifted  bool
+	tripped bool
+}
+
+func (l *headLimit) Read(b []byte) (int, error) {
+	if l.lifted {
+		return l.r.Read(b)
+	}
+	if l.n <= 0 {
+		l.tripped = true
+		return 0, io.EOF
+	}
+	if int64(len(b)) > l.n {
+		b = b[:l.n]
+	}
+	n, err := l.r.Read(b)
+	l.n -= int64(n)
+	return n, err
+}
+
+func (l *headLimit) lift() { l.lifted = true }
+
+// handle admits or refuses one local client, then serves it. Access is read ONCE, here, so a
+// SetAccess mid-handshake cannot change the rule half way. The order is the security property:
+// a global pre-auth slot before anything else, the peer's identity from the exact tuple before a
+// byte is read or written, a per-principal cap for clients not admitted on identity, and an
+// absolute 10 s deadline over greeting, authentication and request. The protocol is sniffed from
+// the first byte: 0x05 is SOCKS5, anything else HTTP. We never log the request line (it can name
+// a sensitive target).
 func (p *Proxy) handle(ctx context.Context, conn net.Conn) {
-	br := bufio.NewReader(conn)
+	if !p.gate.enterPreAuth() {
+		return // over the pre-auth cap: closed unanswered, before any lookup or read
+	}
+	a := p.currentAccess()
+	_ = conn.SetDeadline(time.Now().Add(preAuthDeadline))
+	lim := &headLimit{r: conn, n: httpHeadLimit}
+	ad := &admission{p: p, conn: conn, lim: lim}
+	defer ad.release()
+	cls, id := peerOther, peerid.Unknown
+	if a.Mode != ShareAny { // ShareAny admits everyone, so it never pays for a lookup
+		cls, id = p.classify(conn, a)
+		// The per-principal cap is for principals that may be strangers. The holder's own user
+		// under a privileged holder (its children carry the credential) and every client of a
+		// forwarder that cannot name users are entitled clients sharing one bucket, so for them
+		// the global pre-auth cap is the bound, or a parallel agent's 33rd connection is reset.
+		sharedBucket := id == peerid.Unknown && !p.IdentityAvailable() ||
+			id != peerid.Unknown && id == p.gate.holder
+		if !cls.trusted() && !sharedBucket {
+			if !p.gate.enterUnauth(id) {
+				return
+			}
+			ad.unauth, ad.unauthID = true, id
+		}
+	}
+	br := bufio.NewReader(lim)
 	first, err := br.Peek(1)
 	if err != nil {
 		return
 	}
 	if first[0] == 0x05 {
-		p.handleSocks5(ctx, conn, br)
+		p.handleSocks5(ctx, conn, br, a, cls, id, ad)
 		return
 	}
-	p.handleHTTP(ctx, conn, br)
+	p.handleHTTP(ctx, conn, br, lim, a, cls, id, ad)
 }
 
 // --- SOCKS5 (RFC 1928) -------------------------------------------------------------
 
-func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reader) {
-	// Greeting: VER NMETHODS METHODS...
-	ver, err := br.ReadByte()
-	if err != nil || ver != 0x05 {
-		return
-	}
-	nMethods, err := br.ReadByte()
-	if err != nil {
-		return
-	}
-	if _, err := io.CopyN(io.Discard, br, int64(nMethods)); err != nil {
-		return
-	}
-	// We require NO auth from the LOCAL client (the bearer is OURS, upstream-only).
-	if _, err := conn.Write([]byte{0x05, 0x00}); err != nil {
+func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reader, a Access, cls peerClass, id peerid.ID, ad *admission) {
+	// Greeting and, when chosen, RFC 1929 (access.go). Refusals are answered there.
+	if !p.socksAuth(conn, br, a, cls, id) {
 		return
 	}
 
@@ -391,6 +504,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 		socks5Reply(conn, 0x08) // address type not supported
 		return
 	}
+	ad.admit()
 
 	up, err := p.dialer.Dial(ctx, target)
 	if err != nil {
@@ -433,6 +547,27 @@ func readSocks5Target(br *bufio.Reader, atyp byte) (string, bool) {
 		if _, err := io.ReadFull(br, b); err != nil {
 			return "", false
 		}
+		// The name goes verbatim into the upstream CONNECT line and Host header, the request that
+		// carries the agent's bearer, so a byte that could end a line or a field is refused: no
+		// control characters, no space, no DEL, and not empty. A ':' is accepted only as part of
+		// an IPv6 literal sent in this form (some clients do), which JoinHostPort brackets; any
+		// other ':' would let the name rewrite the port. net/http applies the same care to the
+		// HTTP path's Host.
+		if len(b) == 0 {
+			return "", false
+		}
+		colon := false
+		for _, c := range b {
+			if c <= 0x20 || c == 0x7f {
+				return "", false
+			}
+			colon = colon || c == ':'
+		}
+		if colon {
+			if a, err := netip.ParseAddr(string(b)); err != nil || !a.Is6() {
+				return "", false
+			}
+		}
 		host = string(b)
 	case 0x04: // IPv6
 		b := make([]byte, 16)
@@ -458,9 +593,19 @@ func socks5Reply(conn net.Conn, rep byte) {
 
 // --- HTTP CONNECT ------------------------------------------------------------------
 
-func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader) {
+func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader, lim *headLimit, a Access, cls peerClass, id peerid.ID, ad *admission) {
 	req, err := http.ReadRequest(br)
 	if err != nil {
+		if lim.tripped {
+			_, _ = io.WriteString(conn, "HTTP/1.1 431 Request Header Fields Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+		}
+		return
+	}
+	// Admission first, before the method and request checks, so a refused client learns only
+	// that it is refused. The Proxy-Authorization value is never forwarded: the upstream CONNECT
+	// is rebuilt from the target alone.
+	if !p.httpAuthorized(req.Header.Values("Proxy-Authorization"), a, cls, id) {
+		write407(conn, a)
 		return
 	}
 	if req.Method != http.MethodConnect {
@@ -474,6 +619,7 @@ func (p *Proxy) handleHTTP(ctx context.Context, conn net.Conn, br *bufio.Reader)
 		_, _ = io.WriteString(conn, "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
 		return
 	}
+	ad.admit()
 	up, err := p.dialer.Dial(ctx, target)
 	if err != nil {
 		// The 502 below is bodiless (a proxy must not put a page in a CONNECT reply), so the

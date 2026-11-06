@@ -257,7 +257,7 @@ async function ensureBinary() {
 /**
  * The CLI arguments for what the caller typed. The server is the default, so everything is
  * passed to `whisper mcp`, with one exception: `--version` asks which CLI this package runs,
- * and `whisper mcp --version` is an unknown flag (#1624). That one goes straight to the CLI.
+ * and `whisper mcp --version` is an unknown flag. That one goes straight to the CLI.
  * `--help` keeps the prefix on purpose: `whisper mcp --help` is the help for the server, which
  * is what someone running whisper-mcp is asking for.
  */

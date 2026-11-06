@@ -187,7 +187,7 @@ func fakeSOCKS(t *testing.T, rep byte, stall bool) int {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
-				buf := make([]byte, 3)
+				buf := make([]byte, 4)
 				if _, err := io.ReadFull(c, buf); err != nil {
 					return
 				}
@@ -434,7 +434,7 @@ func spliceSOCKS(t *testing.T, target string) int {
 			}
 			go func(c net.Conn) {
 				defer c.Close()
-				if _, err := io.ReadFull(c, make([]byte, 3)); err != nil {
+				if _, err := io.ReadFull(c, make([]byte, 4)); err != nil {
 					return
 				}
 				_, _ = c.Write([]byte{0x05, 0x00})

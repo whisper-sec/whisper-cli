@@ -26,12 +26,11 @@ import (
 // - KEY-GATED: submit a domain for onboarding and read its status/list - the control half
 // over op:domain.
 //
-// WebPKI is NOT available for a domain you bring. A browser-trusted leaf is issued today only
-// for apexes we operate, and no self-serve opt-in exists, so --webpki refuses with that
-// explanation rather than accepting the request. It used to send acme:true and print that a
-// leaf would be issued; the control plane reads no such argument, so the sentence was the
-// flag's only effect. A domain submitted without it verifies and gets its DANE-EE leaf, which
-// is the trust anchor either way.
+// WebPKI (a browser-trusted Let's Encrypt leaf beside the DANE-EE one) is an opt-in a control
+// plane offers only when its status says so: the `webpki` row is the capability witness. With
+// it, `domain webpki <apex> on` and `submit --webpki` turn it on; without it (an older control
+// plane, or one that has not enabled it yet) they refuse and say so, and send no opt-in. Turning
+// it off is always sent. The DANE-EE leaf is the trust anchor either way.
 func newDomainCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "domain",
@@ -42,15 +41,20 @@ func newDomainCmd() *cobra.Command {
 			"  domain verify <agent-fqdn>    KEYLESS - the DANE-EE + DNSSEC + JWS chain for an agent\n" +
 			"  domain submit <apex>          submit for onboarding (DANE-EE, the trust anchor)\n" +
 			"  domain status <apex>          the onboarding + trust state of your domain\n" +
+			"  domain webpki <apex> on|off   a browser-trusted Let's Encrypt leaf beside DANE-EE\n" +
 			"  domain list                   your submitted domains\n\n" +
-			"Trust is DANE-EE (no public CA). A browser-trusted WebPKI leaf is not offered for a\n" +
-			"domain you bring yet; --webpki refuses and says so.",
+			"Trust is DANE-EE. A browser-trusted WebPKI leaf is additive and opt-in, where the\n" +
+			"control plane offers it (its status shows a WebPKI row). Issuance is public in the\n" +
+			"Certificate Transparency logs.\n\n" +
+			"Exit codes: 3 from verify means it could not tell now (retry); 4 from webpki on or\n" +
+			"submit --webpki means this control plane does not offer the leaf (a retry cannot change it).",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			return usageErr("pick a subcommand: verify | submit | status | list (see `whisper domain --help`)")
+			return usageErr("pick a subcommand: verify | submit | status | webpki | list (see `whisper domain --help`)")
 		},
 	}
-	cmd.AddCommand(newDomainVerifyCmd(), newDomainSubmitCmd(), newDomainStatusCmd(), newDomainListCmd())
+	cmd.AddCommand(newDomainVerifyCmd(), newDomainSubmitCmd(), newDomainStatusCmd(), newDomainWebpkiCmd(),
+		newDomainListCmd())
 	return cmd
 }
 
@@ -258,8 +262,9 @@ func writeRaw(raw []byte) {
 }
 
 // newDomainSubmitCmd is the KEY-GATED submit. It calls the one control verb (op:domain,
-// sub-op submit). --webpki is kept so the flag a user may already have scripted refuses
-// visibly instead of disappearing, which is the same reason it no longer claims success.
+// sub-op submit). With --webpki it submits first, then reads the domain's status for the
+// capability witness, and only then asks for the leaf, so a control plane that does not offer
+// it is never sent an argument it would refuse.
 func newDomainSubmitCmd() *cobra.Command {
 	var webpki bool
 	cmd := &cobra.Command{
@@ -271,25 +276,145 @@ func newDomainSubmitCmd() *cobra.Command {
 			if apex == "" {
 				return usageErr("domain submit needs an apex, e.g. `whisper domain submit example.com`")
 			}
-			if webpki {
-				return fmt.Errorf("--webpki is not available yet: browser-trusted (WebPKI) leaves are\n" +
-					"issued today only for apexes we operate, and there is no self-serve opt-in for a\n" +
-					"domain you bring. Re-run without --webpki to submit the domain: verification and\n" +
-					"the DANE-EE leaf both work, and the WebPKI leaf is additive when it lands")
-			}
 			// The selector key is `name`, with `zone` accepted as a synonym. A third spelling is
 			// not refused - it is IGNORED, and op:domain then answers from the unselected listing, so
 			// `domain:` returned another domain's rows with ok=true 200, for any input including one
 			// that cannot exist. A wrong answer, not an error.
 			wire := map[string]any{"op": "submit", "name": apex}
-			return runDomainOp(wire, func(res *client.Result) error {
+			if err := runDomainOp(wire, func(res *client.Result) error {
 				return renderDomainSubmit(os.Stdout, res, apex)
-			})
+			}); err != nil || !webpki {
+				return err
+			}
+			if !g.jsonOut {
+				fmt.Fprintln(os.Stdout)
+			}
+			if err := webpkiOffered(apex); err != nil {
+				return submittedButNot(apex, err)
+			}
+			if err := setWebpki(apex, true); err != nil {
+				return submittedButNot(apex, err)
+			}
+			return nil
 		},
 	}
 	cmd.Flags().BoolVar(&webpki, "webpki", false,
-		"request a browser-trusted Let's Encrypt leaf (not available yet: refuses with an explanation)")
+		"also ask for a browser-trusted Let's Encrypt leaf, where the control plane offers it")
 	return cmd
+}
+
+// newDomainWebpkiCmd turns the browser-trusted leaf on or off for the caller's own domain.
+// On is asked for only when the domain's status carries the capability witness; off is always
+// sent, so an owner can always stop a leaf being ordered.
+func newDomainWebpkiCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "webpki <apex> on|off",
+		Short: "Turn a browser-trusted Let's Encrypt leaf on or off for your domain",
+		Long: "Ask for (on) or stop (off) a browser-trusted Let's Encrypt leaf for a domain you\n" +
+			"submitted, beside its DANE-EE leaf. Each Whisper node orders its own leaf once the\n" +
+			"domain is verified, and the issuance is public in the Certificate Transparency logs.\n" +
+			"`whisper domain status <apex>` shows its progress and, if your CAA would refuse it,\n" +
+			"the record to set.",
+		Args: cobra.ExactArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// either order: the one argument that is a choice is the choice, the other is the domain
+			apex, choice := strings.TrimSpace(args[0]), args[1]
+			if _, isChoice := parseOnOff(args[1]); !isChoice {
+				if _, swapped := parseOnOff(args[0]); swapped {
+					apex, choice = strings.TrimSpace(args[1]), args[0]
+				}
+			}
+			on, ok := parseOnOff(choice)
+			if apex == "" || !ok {
+				return usageErr("usage: whisper domain webpki <apex> on|off")
+			}
+			if on {
+				if err := webpkiOffered(apex); err != nil {
+					return err
+				}
+			}
+			return setWebpki(apex, on)
+		},
+	}
+}
+
+// parseOnOff reads on/off liberally: on, off, true, false, yes, no, 1, 0, enable(d), disable(d).
+func parseOnOff(s string) (on bool, ok bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "on", "true", "yes", "1", "enable", "enabled":
+		return true, true
+	case "off", "false", "no", "0", "disable", "disabled":
+		return false, true
+	}
+	return false, false
+}
+
+// webpkiNotOfferedExit is the exit code for "this control plane does not offer the leaf": a
+// standing answer a retry cannot change, distinct from the generic failure a retry might fix.
+// (3 in this command family is domain verify's "could not tell, retry"; this is the opposite.)
+const webpkiNotOfferedExit = 4
+
+// submittedButNot says, whatever went wrong with the opt-in, that the submit itself went through.
+func submittedButNot(apex string, err error) error {
+	msg := fmt.Sprintf("%s was submitted, but --webpki was not: %v", apex, err)
+	if code, ok := exitCodeOf(err); ok {
+		return &exitCodeError{code: code, msg: msg}
+	}
+	return fmt.Errorf("%s was submitted, but --webpki was not: %w", apex, err)
+}
+
+// webpkiOffered reads the domain's status and returns nil only when the control plane offers
+// the opt-in: a webpki row that is not "unavailable". It never prints the status it reads, so
+// --json output stays the one document of the command that follows. Every other answer is an
+// error that says which of three things it was, and nothing is asked for.
+func webpkiOffered(apex string) error {
+	c, err := resolveClient(true, false)
+	if err != nil {
+		return err
+	}
+	cx, cancel := ctx()
+	defer cancel()
+	env, err := c.Agents(cx, "domain", map[string]any{"op": "status", "name": apex})
+	if err != nil {
+		return err
+	}
+	if err := envelopeError(env); err != nil {
+		return err
+	}
+	if env.Result == nil || !hasColumns(env.Result, domainStatusColumns...) {
+		return fmt.Errorf("the control plane's status reply for %s had no shape this CLI reads, so nothing was\n"+
+			"asked for; `whisper --json domain status %s` shows it", apex, apex)
+	}
+	var state string
+	var seen, found bool
+	for _, d := range foldDomainStatus(env.Result) {
+		if !sameDomain(d.name, apex) {
+			continue
+		}
+		seen = true
+		if vs, ok := d.values["webpki"]; ok && len(vs) > 0 {
+			state, found = vs[0], true
+		}
+	}
+	if !seen {
+		return &client.ProblemError{Status: 404, Type: localActionable,
+			Detail: fmt.Sprintf("%s is not a domain on this account - submit it first:  whisper domain submit %s",
+				apex, apex)}
+	}
+	if !found || strings.EqualFold(state, "unavailable") {
+		return &exitCodeError{code: webpkiNotOfferedExit, msg: "a browser-trusted (WebPKI) leaf is not offered by" +
+			" this control plane yet for a\ndomain you bring. Nothing was asked for. Your domain keeps its DANE-EE" +
+			" leaf, which is the\ntrust anchor either way"}
+	}
+	return nil
+}
+
+// setWebpki sends op:domain {op:'webpki'} and prints its rows.
+func setWebpki(apex string, on bool) error {
+	wire := map[string]any{"op": "webpki", "name": apex, "enabled": on}
+	return runDomainOp(wire, func(res *client.Result) error {
+		return renderDomainKindValue(os.Stdout, res)
+	})
 }
 
 // newDomainStatusCmd reads the onboarding + trust state. It exits 0 whatever the state is,

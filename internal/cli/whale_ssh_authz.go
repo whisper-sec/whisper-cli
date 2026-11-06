@@ -151,6 +151,9 @@ type sshAuthzFlags struct {
 	users     []string
 	resolver  string
 	tlsa      bool
+	// boundTo is the ssh view artifact the fleets file was widened for, or "" when it was not.
+	// Such a file holds only while the ACL file is that same governed view.
+	boundTo string
 }
 
 func (f *sshAuthzFlags) bind(cmd *cobra.Command) {
@@ -169,11 +172,12 @@ func (f *sshAuthzFlags) bind(cmd *cobra.Command) {
 func (f *sshAuthzFlags) policy() (whale.AuthzPolicy, error) {
 	raw := nonBlank(f.fleet)
 	if p := strings.TrimSpace(f.fleetFile); p != "" {
-		lines, err := readSSHAuthzFleets(p)
+		lines, bound, err := readSSHAuthzFleets(p)
 		if err != nil {
 			return whale.AuthzPolicy{}, fmt.Errorf("--fleet-file: %v", err)
 		}
 		raw = append(raw, lines...)
+		f.boundTo = bound
 	}
 	fleets, err := whale.ParseFleets(raw)
 	if err != nil {
@@ -195,13 +199,18 @@ func (f *sshAuthzFlags) policyWithout(file string) (whale.AuthzPolicy, error) {
 // readSSHAuthzFleets reads the fleets file the way sshd reads its own command: only when root
 // owns it and nothing on its path can be written by anyone else, and only a regular file of a
 // bounded size. Anything else is an error, which check turns into a denial with the reason.
-func readSSHAuthzFleets(path string) ([]string, error) {
+func readSSHAuthzFleets(path string) ([]string, string, error) {
 	b, err := readSSHAuthzRootFile(path, sshAuthzFleetsMaxBytes, "a fleets file")
 	if err != nil {
-		return nil, err
+		return nil, "", err
 	}
 	return parseSSHAuthzFleets(path, b)
 }
+
+// sshAuthzFleetsBinding starts the one line a fleets file widened for an ssh view carries, the
+// view's artifact hash. An older check reads it as a fleet that does not parse and refuses every
+// login, which is the safe way to misread it.
+const sshAuthzFleetsBinding = "acl-artifact "
 
 // readSSHAuthzRootFile is the one trusted read behind every file check consults (the fleets
 // file and the ssh ACL file): only a regular file root owns, on a path nobody else can
@@ -247,12 +256,13 @@ func readSSHAuthzRootFile(path string, max int64, what string) ([]byte, error) {
 // parseSSHAuthzFleets reads one fleet per line. Blank lines and # comments are skipped, a
 // leading byte-order mark and CRLF line ends are tolerated, and a file that names no fleet at
 // all is an error: an empty set would admit nobody without saying why.
-func parseSSHAuthzFleets(path string, b []byte) ([]string, error) {
+func parseSSHAuthzFleets(path string, b []byte) ([]string, string, error) {
 	text := strings.TrimPrefix(string(b), "\ufeff")
 	var out []string
+	bound := ""
 	for i, line := range strings.Split(text, "\n") {
 		if i >= sshAuthzFleetsMaxLines {
-			return nil, fmt.Errorf("%s has more than %d lines", path, sshAuthzFleetsMaxLines)
+			return nil, "", fmt.Errorf("%s has more than %d lines", path, sshAuthzFleetsMaxLines)
 		}
 		if c := strings.IndexByte(line, '#'); c >= 0 {
 			line = line[:c]
@@ -261,15 +271,23 @@ func parseSSHAuthzFleets(path string, b []byte) ([]string, error) {
 		if line == "" {
 			continue
 		}
+		if h, ok := strings.CutPrefix(line, sshAuthzFleetsBinding); ok {
+			h = strings.TrimSpace(h)
+			if bound != "" || hashOrEmpty(h) == "" {
+				return nil, "", fmt.Errorf("%s line %d: one %s line, naming one sha256: hash", path, i+1, strings.TrimSpace(sshAuthzFleetsBinding))
+			}
+			bound = h
+			continue
+		}
 		if _, _, err := whale.NormalizeFleet(line); err != nil {
-			return nil, fmt.Errorf("%s line %d: %v", path, i+1, err)
+			return nil, "", fmt.Errorf("%s line %d: %v", path, i+1, err)
 		}
 		out = append(out, line)
 	}
 	if len(out) == 0 {
-		return nil, fmt.Errorf("%s names no fleet", path)
+		return nil, "", fmt.Errorf("%s names no fleet", path)
 	}
-	return out, nil
+	return out, bound, nil
 }
 
 func newWhaleSSHAuthzCheckCmd() *cobra.Command {
@@ -331,6 +349,12 @@ func newWhaleSSHAuthzCheckCmd() *cobra.Command {
 			switch {
 			case aclErr != nil:
 				d = whale.AuthzDecision{Reason: "acl: " + aclErr.Error()}
+			case f.boundTo != "" && (!aclPresent || !acl.Governed || acl.ArtifactHash != f.boundTo):
+				// The fleets file admits zones only the ssh view named, so it holds only beside that
+				// very view. A refresh writes the two one after the other; between them, and with the
+				// ACL file gone, every fleet login is refused, and authorized_keys still works.
+				d = whale.AuthzDecision{Reason: "acl: the fleets file was written for ssh view " + f.boundTo +
+					" and the ACL file is not that view; run `sudo whisper whale ssh-authz install --write`"}
 			case aclPresent && acl.Governed && !acl.ListsAddr(req.Source):
 				// No ssh rule names the caller at all: refused before this host walks any chain for it.
 				d = whale.AuthzDecision{Reason: "acl: no ssh rule admits " + req.Source.String() + " as " + logToken(req.User)}
@@ -541,6 +565,7 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			plan = widenSSHAuthzFleets(plan, aclPlan)
 			pol, err := f.policyWithout(plan.file)
 			if err != nil {
 				return usageErr("%v", err)
@@ -610,7 +635,7 @@ func newWhaleSSHAuthzInstallCmd() *cobra.Command {
 					restoreACL()
 					return err
 				}
-				fmt.Fprintf(os.Stdout, "wrote %s: %d fleet(s) from your roster\n", plan.file, plan.count)
+				fmt.Fprintf(os.Stdout, "wrote %s: %d fleet(s) from your roster%s\n", plan.file, plan.count, plan.widened)
 			}
 			if err := writeSSHAuthzSnippet(os.Stdout, path, snippet, sshAuthzCommandLine(bin, pol, f), orNobody(cmdUser)); err != nil {
 				restore()
@@ -633,6 +658,48 @@ type sshAuthzFleetPlan struct {
 	content string // that file's bytes
 	count   int
 	notes   []string
+	zones   []string // the roster's zones, before any widening
+	widened string   // what widenSSHAuthzFleets added, for the line install prints
+}
+
+// widenSSHAuthzFleets adds to the fleets file the zones a governed ssh view's sources sit in
+// that the roster does not already hold. A node an agent registered sees only its own part of
+// the account in its roster. The file then names the view's artifact, and check refuses
+// every fleet login unless the ACL file is that view, so the wider fleets never stand alone.
+// Fleets named by hand (--fleet) are the operator's own, and are never widened.
+func widenSSHAuthzFleets(plan sshAuthzFleetPlan, acl sshAuthzACLPlan) sshAuthzFleetPlan {
+	if !acl.write || !acl.governed || len(acl.fleets) == 0 {
+		return plan
+	}
+	have := map[string]bool{}
+	for _, z := range plan.zones {
+		have[z] = true
+	}
+	var extra []string
+	for _, z := range acl.fleets {
+		if !have[z] {
+			have[z] = true
+			extra = append(extra, z)
+		}
+	}
+	if len(extra) == 0 {
+		return plan
+	}
+	if plan.file == "" {
+		plan.notes = append(plan.notes, fmt.Sprintf("the ssh view admits sources in %d zone(s) the fleets named here do not "+
+			"hold (%s), so they stay refused; drop --fleet to let install write the fleets file", len(extra), strings.Join(extra, ", ")))
+		return plan
+	}
+	zones := append(append([]string{}, plan.zones...), extra...)
+	sort.Strings(zones)
+	plan.content = sshAuthzFleetsContent(zones) + "# Zones the ssh view admits sources from, valid only beside that view:\n" +
+		sshAuthzFleetsBinding + acl.artifact + "\n"
+	plan.count = len(zones)
+	plan.widened = fmt.Sprintf(" and %d the ssh view admits sources from", len(extra))
+	plan.notes = append(plan.notes, fmt.Sprintf("the ssh view admits sources from %d zone(s) beyond your roster (%s); the fleets "+
+		"file names them only beside this view, so a refresh that changes the view refuses fleet logins until both files are written",
+		len(extra), strings.Join(extra, ", ")))
+	return plan
 }
 
 // planSSHAuthzFleets decides the fleet set. --fleet named by hand goes inline, as written.
@@ -658,10 +725,10 @@ func planSSHAuthzFleets(f *sshAuthzFlags, fleetsPath string) (sshAuthzFleetPlan,
 	zones := sshAuthzRosterZones(peers)
 	if rerr == nil && len(zones) > 0 {
 		content := sshAuthzFleetsContent(zones)
-		if _, err := parseSSHAuthzFleets(fleetsPath, []byte(content)); err != nil {
+		if _, _, err := parseSSHAuthzFleets(fleetsPath, []byte(content)); err != nil {
 			return sshAuthzFleetPlan{}, fmt.Errorf("the fleet set read from your roster does not parse: %v", err)
 		}
-		return sshAuthzFleetPlan{file: fleetsPath, content: content, count: len(zones),
+		return sshAuthzFleetPlan{file: fleetsPath, content: content, count: len(zones), zones: zones,
 			notes: []string{fmt.Sprintf("your roster holds %d agent tenant(s); %s", len(zones), sshAuthzScope(f, "among them"))}}, nil
 	}
 	why := "it lists no hosted agent"
@@ -745,7 +812,7 @@ func sshAuthzFleetsContent(zones []string) string {
 func writeSSHAuthzFleets(path, content, cmdUser string) (func(), error) {
 	return writeSSHAuthzRootFile(path, content, cmdUser, "fleets file", "it links your agents' tenants",
 		"--fleet-file, such as "+sshAuthzFleetsPath, func(p string) error {
-			_, err := readSSHAuthzFleets(p)
+			_, _, err := readSSHAuthzFleets(p)
 			return err
 		})
 }

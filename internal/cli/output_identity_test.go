@@ -47,11 +47,11 @@ func TestUnderSudoTheIdentityLineSaysWhoseDirectoryWasRead(t *testing.T) {
 	restore := idkey.SetIdentityDirForTest("/root/.config/whisper/identity")
 	defer restore()
 	saved := sudoContext
-	sudoContext = func() (string, bool) { return "labops", true }
+	sudoContext = func() (string, bool) { return "alice", true }
 	defer func() { sudoContext = saved }()
 
 	got := mapProblem(identityRefusal())
-	for _, want := range []string{"root", "labops", "sudo --preserve-env=HOME"} {
+	for _, want := range []string{"root", "alice", "sudo --preserve-env=HOME"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("missing %q in %q", want, got)
 		}

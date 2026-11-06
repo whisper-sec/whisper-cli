@@ -50,11 +50,13 @@ var ensureStartupBudget = 10 * time.Second
 const ensurePollInterval = 150 * time.Millisecond
 
 // probeWhisperProxy reports whether a LIVE whisper local proxy is already serving
-// 127.0.0.1:<port>. It does a real SOCKS5 no-auth handshake (greeting → method-select): our
-// proxy answers 0x05 0x00 (it requires NO auth from the local client - see egress/proxy.go),
-// which distinguishes it from a random TCP listener that merely accepts the connection. A
-// plain TCP connect alone is NOT enough - some other service could hold the port - so we
-// confirm the protocol. Any error / unexpected reply ⇒ "not ours" (false).
+// 127.0.0.1:<port>. It does a real SOCKS5 greeting offering both "no authentication" and
+// username/password, and counts either 0x05 0x00 or 0x05 0x02 as "a whisper forwarder is here".
+// A forwarder that wants this caller's credential is a live session refused to this caller by
+// policy, and reporting it dead would send the caller to open a second session that replaces its
+// tunnel. The probe ends before any credential is sent. This still tells a
+// SOCKS5 forwarder from a random TCP listener that merely accepts the connection. Any error /
+// unexpected reply means "not ours" (false).
 //
 // It is a package var so a command test can stub the network decision deterministically.
 var probeWhisperProxy = func(port int) bool {
@@ -65,16 +67,15 @@ var probeWhisperProxy = func(port int) bool {
 	}
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(ensureProbeTimeout))
-	// SOCKS5 greeting: VER=5, NMETHODS=1, METHOD=0 (no-auth).
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+	// SOCKS5 greeting: VER=5, NMETHODS=2, METHODS = no-auth, username/password.
+	if _, err := conn.Write([]byte{0x05, 0x02, 0x00, 0x02}); err != nil {
 		return false
 	}
 	reply := make([]byte, 2)
 	if _, err := readFull(conn, reply); err != nil {
 		return false
 	}
-	// Our proxy selects VER=5, METHOD=0 (no-auth). Anything else ⇒ not our proxy.
-	return reply[0] == 0x05 && reply[1] == 0x00
+	return reply[0] == 0x05 && (reply[1] == 0x00 || reply[1] == 0x02)
 }
 
 // readFull reads exactly len(buf) bytes or returns the error (a tiny io.ReadFull without the

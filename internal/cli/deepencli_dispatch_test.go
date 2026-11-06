@@ -122,7 +122,10 @@ func TestDeepenCLI_AgentCmd_SelectorForms(t *testing.T) {
 			srv := recordingServer(t, nil, &seen)
 			defer srv.Close()
 			deepencli_keyedGlobals(t, srv.URL)
-			if err := deepencli_exec(t, newAgentCmd(), tc.args...); err != nil {
+			// The recording plane answers op:agent with no agent row, which the client reads as an unanswered
+			// question (an error), never as "not found"; this test is about the selector the call carries.
+			if err := deepencli_exec(t, newAgentCmd(), tc.args...); err != nil &&
+				!strings.Contains(err.Error(), "without the agent's details") {
 				t.Fatalf("agent %v errored: %v", tc.args, err)
 			}
 			body, ok := deepencli_bodyContaining(seen, "op:'agent'")
@@ -394,7 +397,7 @@ func TestDeepenCLI_GraphListCmd_JSONAndTable(t *testing.T) {
 
 func TestDeepenCLI_DomainCmd_BareIsUsageError(t *testing.T) {
 	err := deepencli_exec(t, newDomainCmd())
-	if err == nil || !isUsageError(err) || !strings.Contains(err.Error(), "verify | submit | status | list") {
+	if err == nil || !isUsageError(err) || !strings.Contains(err.Error(), "verify | submit | status | webpki | list") {
 		t.Fatalf("bare domain must name its subcommands, got %v", err)
 	}
 }

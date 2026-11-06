@@ -9,13 +9,11 @@ import (
 	"time"
 )
 
-// `whisper domain submit --webpki` must REFUSE, and must fire no control call at all. The
-// flag used to set acme:true and report success; nothing in the control plane reads that
-// argument, so the report was the only thing that ever happened. This test asserts the
-// refusal rather than the request, and it asserts the SILENCE on the wire too: an error
-// message alongside a submitted domain would still leave the user with a domain onboarded
-// under terms they did not get. The message must name the flag, so somebody who scripted it
-// can find out why their pipeline stopped.
+// `whisper domain submit --webpki` against a control plane whose status carries no webpki row
+// (the capability witness) submits the domain, but must NOT send the opt-in, and must fail
+// saying so. The flag once set acme:true and reported success while the control plane read no
+// such argument; an opt-in that is silently not sent would repeat that lie. The message names
+// the flag, so somebody who scripted it can find out why their pipeline stopped.
 
 func TestDomainSubmit_WebpkiRefusesAndSendsNothing(t *testing.T) {
 	var seen []recordedCall
@@ -31,16 +29,18 @@ func TestDomainSubmit_WebpkiRefusesAndSendsNothing(t *testing.T) {
 	cmd.SetArgs([]string{"submit", "example.com", "--webpki"})
 	err := cmd.Execute()
 	if err == nil {
-		t.Fatalf("domain submit --webpki must refuse, got no error")
+		t.Fatalf("domain submit --webpki without the witness must fail, got no error")
 	}
 	if !strings.Contains(err.Error(), "--webpki") {
 		t.Fatalf("the refusal must name the flag so a scripted caller can find it; err=%q", err)
 	}
-	if !strings.Contains(err.Error(), "not available") {
-		t.Fatalf("the refusal must say the capability is unavailable, not merely fail; err=%q", err)
+	if !strings.Contains(err.Error(), "asked for") || !strings.Contains(err.Error(), "was submitted") {
+		t.Fatalf("the refusal must say the domain was submitted and nothing was asked for; err=%q", err)
 	}
-	if _, ok := bodyForOp(seen, "domain"); ok {
-		t.Fatalf("a refused --webpki must not submit the domain anyway; ops=%v", opsSeen(seen))
+	for _, c := range seen {
+		if strings.Contains(c.body, "op:'webpki'") || strings.Contains(c.body, "acme") {
+			t.Fatalf("no opt-in may be sent without the witness; body=%q", c.body)
+		}
 	}
 }
 

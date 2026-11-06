@@ -77,6 +77,9 @@ func newIPCmd() *cobra.Command {
 			// echo-through-the-egress assertion, so a wrong/mismatched egress is still caught.
 			var sess *egressSession
 			if reused, ok := findLiveSession(cx, c, sel); ok {
+				if reused.refused != nil {
+					return reused.refused
+				}
 				if err := verifyEgress(cx, c, reused); err != nil {
 					if g.jsonOut {
 						emitJSONValue(map[string]any{"ip": "", "verified": false, "agent": sel})

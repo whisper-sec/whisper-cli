@@ -252,7 +252,7 @@ func TestSocks5DialSpeaksRealSOCKS5(t *testing.T) {
 		}
 		defer conn.Close()
 		_ = conn.SetDeadline(time.Now().Add(5 * time.Second))
-		greeting := make([]byte, 3)
+		greeting := make([]byte, 4)
 		if _, rerr := readFull(conn, greeting); rerr != nil {
 			return
 		}

@@ -81,7 +81,9 @@ const v4ProbePort = 443
 
 // socks5Dial is the one network call this file makes, as a package var so a test can drive
 // every verdict without a live tunnel. It performs a SOCKS5 no-auth handshake against the
-// LOCAL listener and a CONNECT to addr:port, and returns the SOCKS5 reply code.
+// LOCAL listener and a CONNECT to addr:port, and returns the SOCKS5 reply code. It offers
+// username/password as well and completes RFC 1929 with the session's credential when
+// the forwarder asks for it and this caller may use it (socksCredentialForPort).
 var socks5Dial = func(ctx context.Context, listenerPort int, addr netip.Addr, port int) (byte, error) {
 	d := net.Dialer{Timeout: v4ProbeTimeout}
 	conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(listenerPort)))
@@ -95,15 +97,8 @@ var socks5Dial = func(ctx context.Context, listenerPort int, addr netip.Addr, po
 	}
 	_ = conn.SetDeadline(deadline)
 
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+	if err := socksGreet(conn, listenerPort); err != nil {
 		return 0, err
-	}
-	greeting := make([]byte, 2)
-	if _, err := readFull(conn, greeting); err != nil {
-		return 0, err
-	}
-	if greeting[0] != 0x05 || greeting[1] != 0x00 {
-		return 0, fmt.Errorf("the listener on 127.0.0.1:%d is not a Whisper proxy", listenerPort)
 	}
 
 	req := []byte{0x05, 0x01, 0x00}

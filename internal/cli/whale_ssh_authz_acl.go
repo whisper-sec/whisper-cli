@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -103,8 +104,9 @@ type sshAuthzView struct {
 	ArtifactHash string
 	Note         string
 	Entries      []whale.SSHACLEntry
-	Skipped      int // sources the plane holds no name for; they cannot prove one, so cannot log in
-	Declared     int // the header's entries count, -1 when it sent none
+	Skipped      int      // sources the plane holds no name for; they cannot prove one, so cannot log in
+	Declared     int      // the header's entries count, -1 when it sent none
+	Fleets       []string // the hosted tenant zones the view's sources sit in
 }
 
 func fetchSSHAuthzACLView(cx context.Context, node string) (sshAuthzView, error) {
@@ -151,6 +153,7 @@ func sshAuthzViewFrom(env *client.Envelope) (sshAuthzView, error) {
 			v.ACLHash = cellString(item["acl_hash"])
 			v.ArtifactHash = cellString(item["artifact_hash"])
 			v.Note = cellString(item["note"])
+			v.Fleets = stringsOf(item["fleets"])
 			if n, err := strconv.Atoi(cellString(item["entries"])); err == nil {
 				v.Declared = n
 			}
@@ -211,6 +214,10 @@ type sshAuthzACLPlan struct {
 	write   bool // false: leave whatever is there (and there is nothing there)
 	content string
 	notes   []string
+	// A governed view's artifact and the zones its sources sit in, for the fleets file.
+	governed bool
+	artifact string
+	fleets   []string
 }
 
 // planSSHAuthzACL reads this node's view and decides the file. When the answer cannot be
@@ -248,9 +255,14 @@ func planSSHAuthzACL(path string) (sshAuthzACLPlan, error) {
 	}
 	next := whale.SSHACL{Node: self, ACLHash: v.ACLHash, ArtifactHash: v.ArtifactHash}
 	switch v.State {
-	case "ok":
+	case "ok", "orphaned":
+		// orphaned: the agent that registered this node was revoked, so no document governs it any
+		// more, and it admits nobody.
 		if !v.Governed {
-			return keep("the control plane said ok without saying the node is governed")
+			return keep("the control plane said " + v.State + " without saying the node is governed")
+		}
+		if v.State == "orphaned" && (len(v.Entries) > 0 || v.Skipped > 0) {
+			return keep("the control plane said orphaned and still sent sources")
 		}
 		next.Governed, next.Entries = true, v.Entries
 	case "no_document", "no_ssh_block":
@@ -264,8 +276,38 @@ func planSSHAuthzACL(path string) (sshAuthzACLPlan, error) {
 		return keep("the view the control plane sent does not make a file check can read (" + err.Error() + ")")
 	}
 	plan.write, plan.content = true, content
+	if next.Governed {
+		plan.governed, plan.artifact, plan.fleets = true, hashOrEmpty(v.ArtifactHash), sshAuthzViewFleets(v)
+		if plan.artifact == "" {
+			plan.fleets = nil // nothing to bind a widened fleets file to, so it is never widened
+		}
+	}
 	plan.notes = append(plan.notes, sshAuthzACLTransition(old, present, oldErr, next, v.Skipped)...)
 	return plan, nil
+}
+
+// sshAuthzViewFleets keeps the zones the view sent that are hosted tenant zones AND that a
+// listed source's own name sits in: a view cannot widen the fleets file to a zone no admitted
+// source is in, nor to a domain of the account's own, whose whole zone would become a fleet.
+func sshAuthzViewFleets(v sshAuthzView) []string {
+	inView := map[string]bool{}
+	for _, e := range v.Entries {
+		for _, n := range e.Names {
+			inView[strings.ToLower(strings.TrimSuffix(agentDomain(n), "."))] = true
+		}
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, z := range v.Fleets {
+		z = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(z), "."))
+		if _, ok := whale.HostedTenantZone(z); !ok || !inView[z] || seen[z] {
+			continue
+		}
+		seen[z] = true
+		out = append(out, z)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func hashOrEmpty(h string) string {

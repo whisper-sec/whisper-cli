@@ -117,6 +117,36 @@ func printTableTo(w io.Writer, headers []string, rows [][]string) {
 
 // --- submit: [kind, value] ----------------------------------------------------------
 
+// renderDomainKindValue prints a [kind, value] answer (op:domain webpki) one line per row, with
+// notes last; any other shape is printed raw. Every server string is made terminal-safe.
+func renderDomainKindValue(w io.Writer, res *client.Result) error {
+	if !hasColumns(res, domainSubmitColumns...) {
+		renderRawResult(w, res)
+		return nil
+	}
+	labels := map[string]string{"webpki": "WebPKI", "webpki_node": "WebPKI node"}
+	var notes []string
+	for _, rec := range res.Records() {
+		kind, value := asString(rec["kind"]), asString(rec["value"])
+		if kind == "note" {
+			notes = append(notes, value)
+			continue
+		}
+		label := kind
+		if l, ok := labels[kind]; ok {
+			label = l
+		}
+		if kind == "webpki" {
+			value = statusValue("webpki", value)
+		}
+		fmt.Fprintf(w, "%s  %s\n", termSafe(label), termSafe(value))
+	}
+	for _, n := range notes {
+		fmt.Fprintf(w, "note: %s\n", termSafe(n))
+	}
+	return nil
+}
+
 // renderDomainSubmit prints a submit reply: the state, then the records to publish, then
 // the notes. A VERIFIED domain (a re-submit) is told to KEEP the records, not to go
 // and publish them, because sending someone with a working domain off to change their
@@ -191,10 +221,15 @@ var statusLabels = []struct{ key, label string }{
 	{"served_here", "served here"},
 	{"first_seen_wild", "first seen"},
 	{"last_observed", "last observed"},
+	{"webpki", "WebPKI"},
+	{"webpki_node", "WebPKI node"},
+	{"webpki_not_after", "WebPKI expires"},
+	{"webpki_reason", "WebPKI reason"},
+	{"webpki_next_attempt", "WebPKI next try"},
 }
 
 // statusHandledElsewhere are the keys printed as their own lines below the table.
-var statusHandledElsewhere = map[string]bool{"missing": true, "orphan_delegation": true}
+var statusHandledElsewhere = map[string]bool{"missing": true, "orphan_delegation": true, "webpki_caa_hint": true}
 
 func foldDomainStatus(res *client.Result) []*domainStatus {
 	var out []*domainStatus
@@ -220,6 +255,18 @@ func foldDomainStatus(res *client.Result) []*domainStatus {
 // a TTL with its unit, booleans as yes/no.
 func statusValue(key, v string) string {
 	switch key {
+	case "webpki":
+		switch v {
+		case "unavailable":
+			return "not offered by this control plane yet"
+		case "pending_verification":
+			return "requested; ordered once the domain is verified"
+		case "requested":
+			return "requested; each node orders its own on its next pass"
+		case "backing_off":
+			return "the last order did not issue; retrying later"
+		}
+		return v
 	case "first_seen_wild", "last_observed":
 		if parseEpoch(v) > 0 {
 			return humanTime(v) + " UTC"
@@ -259,7 +306,7 @@ func renderDomainStatus(w io.Writer, res *client.Result, apex string) ([]*domain
 		if i > 0 {
 			fmt.Fprintln(w)
 		}
-		fmt.Fprintf(w, "%s  %s\n", d.name, d.state)
+		fmt.Fprintf(w, "%s  %s\n", termSafe(d.name), termSafe(d.state))
 		width := 0
 		for _, l := range statusLabels {
 			if _, ok := d.values[l.key]; ok && len(l.label) > width {
@@ -281,7 +328,7 @@ func renderDomainStatus(w io.Writer, res *client.Result, apex string) ([]*domain
 				if j > 0 {
 					lead = ""
 				}
-				fmt.Fprintf(w, "  %s  %s\n", pad(lead, width), statusValue(key, v))
+				fmt.Fprintf(w, "  %s  %s\n", pad(termSafe(lead), width), termSafe(statusValue(key, v)))
 			}
 		}
 		for _, l := range statusLabels {
@@ -295,7 +342,10 @@ func renderDomainStatus(w io.Writer, res *client.Result, apex string) ([]*domain
 			}
 		}
 		for _, o := range d.values["orphan_delegation"] {
-			fmt.Fprintf(w, "note: %s\n", o)
+			fmt.Fprintf(w, "note: %s\n", termSafe(o))
+		}
+		for _, h := range d.values["webpki_caa_hint"] {
+			fmt.Fprintf(w, "CAA: %s\n", termSafe(h))
 		}
 		if strings.EqualFold(d.state, "verified") {
 			continue

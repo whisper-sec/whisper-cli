@@ -205,15 +205,8 @@ func socks5Connect(ctx context.Context, proxyPort int, target string) (net.Conn,
 		}
 		return nil, e
 	}
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
+	if err := socksGreet(conn, proxyPort); err != nil {
 		return fail(err)
-	}
-	greet := make([]byte, 2)
-	if _, err := readFull(conn, greet); err != nil {
-		return fail(err)
-	}
-	if greet[0] != 0x05 || greet[1] != 0x00 {
-		return fail(fmt.Errorf("the listener on 127.0.0.1:%d is not a Whisper proxy", proxyPort))
 	}
 	req := []byte{0x05, 0x01, 0x00}
 	switch {

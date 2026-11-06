@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"io"
 	"net"
 	"strconv"
 	"testing"
@@ -94,8 +95,8 @@ func TestEnsureDaemon_NoPortIsClearError(t *testing.T) {
 func TestProbeWhisperProxy_RealHandshake(t *testing.T) {
 	// A fake "our proxy": answers the SOCKS5 greeting with VER=5, METHOD=0.
 	good := startFakeListener(t, func(c net.Conn) {
-		buf := make([]byte, 3)
-		_, _ = c.Read(buf) // greeting
+		buf := make([]byte, 4)
+		_, _ = io.ReadFull(c, buf) // greeting: 05 02 00 02
 		_, _ = c.Write([]byte{0x05, 0x00})
 	})
 	defer good.Close()

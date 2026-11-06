@@ -19,6 +19,12 @@ type ProblemError struct {
 	Status      int      `json:"status,omitempty"`
 	Detail      string   `json:"detail,omitempty"`
 	Suggestions []string `json:"suggestions,omitempty"`
+	// Reason, Agent and Address are the structured fields the control plane puts beside code and
+	// message: reason says which not-found or which outage it is (no_record, lifecycle_pending, ...);
+	// agent and address name the agent an idempotency_key already produced.
+	Reason  string `json:"reason,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	Address string `json:"address,omitempty"`
 }
 
 // Error renders the most helpful single line we have: prefer detail, then title, then
@@ -197,11 +203,15 @@ func decodeProblem(raw json.RawMessage) *ProblemError {
 		Code    string `json:"code"`
 		Message string `json:"message"`
 		Status  int    `json:"status"`
+		Reason  string `json:"reason"`
+		Agent   string `json:"agent"`
+		Address string `json:"address"`
 	}
 	if json.Unmarshal(raw, &fd) == nil {
 		code, msg := strings.TrimSpace(fd.Code), strings.TrimSpace(fd.Message)
 		if msg != "" || code != "" {
-			return &ProblemError{Title: code, Detail: msg, Status: fd.Status}
+			return &ProblemError{Title: code, Detail: msg, Status: fd.Status, Reason: strings.TrimSpace(fd.Reason),
+				Agent: strings.TrimSpace(fd.Agent), Address: strings.TrimSpace(fd.Address)}
 		}
 	}
 	var str string

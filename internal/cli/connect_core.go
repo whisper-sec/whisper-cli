@@ -792,6 +792,16 @@ type egressSession struct {
 	// peer names the box side of a Tier-1 tunnel (wgPeerOf), so a check-in can tell whether
 	// the connect it made kept the tunnel where it is.
 	peer string
+	// clientEndpoint is endpoint WITH the session credential, set only when this process's own
+	// clients need it to get through the forwarder (session_access.go). Never printed, never
+	// written to a record; useEndpoint hands it to verify and to a child's environment.
+	clientEndpoint string
+	// share is the admission mode the forwarder was armed with, for the record.
+	share egress.ShareMode
+	// refused is set on a REUSED live session whose forwarder does not admit this caller and
+	// whose credential it may not use (findLiveSession). The session is live, so nothing may open
+	// a competing one; anything that would connect through it returns this instead.
+	refused error
 }
 
 // nat64 reports the NAT64 prefix this session's tunnel SETTLED on and where that came from, for
@@ -979,12 +989,14 @@ func bringUpEgress(ctx context.Context, ce connectEnvelope, keys *connectKeys, p
 		return nil, &client.ProblemError{Status: 502,
 			Detail: cleanProxyError(err)}
 	}
-	return &egressSession{
+	sess := &egressSession{
 		endpoint: proxy.Endpoint(),
 		addr:     ce.address,
 		tier:     firstNonBlank(ce.tier, "socks5"),
 		local:    proxy,
-	}, nil
+	}
+	armSessionAccess(sess)
+	return sess, nil
 }
 
 // cleanProxyError maps a local-proxy bring-up error to a plain remediation. A pinned-port
@@ -1136,6 +1148,7 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 		local:    tun,
 		peer:     wgPeerOf(ce),
 	}
+	armSessionAccess(sess)
 	// The ports this process was asked to accept, opened on every tunnel it brings up, so a
 	// session renewed after the box dropped its peer answers on them again.
 	if p := currentAcceptPlan(); p != nil {
@@ -1195,7 +1208,7 @@ var verifyEgress = verifyEgressLive
 
 func verifyEgressLive(ctx context.Context, c *client.Client, s *egressSession) error {
 	started := time.Now()
-	observed, err := c.ObservedEgressIP(ctx, s.endpoint)
+	observed, err := c.ObservedEgressIP(ctx, s.useEndpoint())
 	if err != nil {
 		return explainVerifyFailure(s, started, err)
 	}

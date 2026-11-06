@@ -391,7 +391,7 @@ func TestPublishingIsOwnerCheckedAndAtomic(t *testing.T) {
 	// and no temporary file is left in the registry either way
 	ents, _ := os.ReadDir(sessionsDirFn())
 	for _, e := range ents {
-		if !strings.HasSuffix(e.Name(), ".json") {
+		if !strings.HasSuffix(e.Name(), ".json") && !strings.HasSuffix(e.Name(), ".cred") {
 			t.Fatalf("a stray file %s was left in the registry", e.Name())
 		}
 	}
@@ -414,7 +414,7 @@ func TestBothHoldersRunTheSupervisor(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(src), "superviseUntilSignal(") {
+		if !strings.Contains(string(src), "superviseUntilSignalFrom(") {
 			t.Fatalf("%s holds its session without the supervisor, so a dropped peer is never reconnected", f)
 		}
 		if !strings.Contains(string(src), ".renew = renewerFor(") {

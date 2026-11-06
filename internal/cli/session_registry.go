@@ -83,6 +83,11 @@ type sessionRecord struct {
 	Accept      []acceptRecord `json:"accept,omitempty"`
 	AcceptScope string         `json:"accept_scope,omitempty"`
 	AcceptFrom  []string       `json:"accept_from,omitempty"`
+	// Auth is who the forwarder admits without the session credential: "owner" (the
+	// holder's user and its share list), "credential", or "any". Absent on a record written
+	// before it, which was a forwarder that admitted everyone. The credential itself is never
+	// here; it is in the owner-only .cred file beside the record.
+	Auth string `json:"auth,omitempty"`
 
 	// path is the file this record was READ from. Not serialised: it is how a sweep
 	// removes the record it is actually looking at instead of recomputing a name, which is what
@@ -174,6 +179,7 @@ func writeSessionRecord(sess *egressSession) {
 		Tier:     firstNonBlank(sess.tier, "socks5"),
 		Port:     endpointPort(sess.endpoint),
 		PID:      os.Getpid(),
+		Auth:     sess.share.String(),
 	}
 	if len(sess.accepts) > 0 {
 		rec.Accept, rec.AcceptScope, rec.AcceptFrom = sess.accepts, sess.acceptScope, sess.acceptFrom
@@ -193,7 +199,7 @@ func writeSessionRecord(sess *egressSession) {
 	// there (see defaultMachineSessionsDir), so a refusal falls through to the host-scoped
 	// registry rather than leaving the session unrecorded and every status surface wrong.
 	name := fmt.Sprintf("%s-%d.json", flattenAddr(sess.addr), rec.Port)
-	for _, dst := range []struct {
+	type registryDir struct {
 		dir  string
 		mode os.FileMode
 		// dirMode is 0700 for a login's own registry and 0755 for the host-scoped one,
@@ -203,10 +209,20 @@ func writeSessionRecord(sess *egressSession) {
 		// `ss -lnt` already.
 		dirMode os.FileMode
 		machine bool
-	}{
+	}
+	dsts := []registryDir{
 		{sessionsDirFn(), 0o600, 0o700, false},
 		{machineSessionsDirFn(), 0o644, 0o755, true},
-	} {
+	}
+	if geteuidFn() == 0 {
+		// A root holder (`sudo whisper connect`, and the service) serves the users on its share
+		// list, and they can only reuse a session whose record they can READ. In root's
+		// own 0700 registry, or as a root-owned 0600 file in a kept HOME, it is invisible to
+		// them, and their `whisper ip` or `whisper run` then opened a session of its own that
+		// replaced this holder's tunnel. The host registry first.
+		dsts[0], dsts[1] = dsts[1], dsts[0]
+	}
+	for _, dst := range dsts {
 		if strings.TrimSpace(dst.dir) == "" {
 			continue
 		}
@@ -219,12 +235,15 @@ func writeSessionRecord(sess *egressSession) {
 			continue
 		}
 		path := filepath.Join(dst.dir, name)
+		// The credential first, so a reader that sees the record can already find it.
+		writeSessionCred(path, rec.Port)
 		// Atomic, as every later rewrite of it is: a reader sees a whole record or none.
 		if writeFileAtomic(path, b, dst.mode) == nil {
 			// Remember exactly what we wrote, so teardown removes THAT file and nothing else.
 			sess.recordPath = path
 			return
 		}
+		_ = os.Remove(credPathFor(path))
 	}
 }
 
@@ -275,6 +294,9 @@ func removeSessionRecordAt(path string) {
 		return
 	}
 	_ = os.Remove(path)
+	// A swept record's credential goes with it: it named that record's pid and port and can
+	// never authenticate anything again. Removing another user's file fails, harmlessly.
+	_ = os.Remove(credPathFor(path))
 }
 
 // readSessionRecords loads every parseable record in the registry (unreadable/garbled files are
@@ -397,12 +419,18 @@ func findLiveSession(cx context.Context, c *client.Client, sel string) (*egressS
 		removeSessionRecordAt(match.path)
 		return nil, false
 	}
+	// Live. Whether THIS caller may use it is a separate question: a session of another
+	// user that is not shared with us is still live, so it is returned (nothing may open a
+	// competing session) carrying the refusal for anything that would connect through it.
+	ce, rerr := reuseEndpoint(*match)
 	return &egressSession{
-		endpoint: match.Endpoint,
-		addr:     match.Addr,
-		tier:     match.Tier,
-		verified: false, // the caller decides whether to fold a fresh verify in (whisper ip does)
-		local:    nil,   // LOAD-BEARING: Stop() must be a no-op - we do not own this egress
+		endpoint:       match.Endpoint,
+		clientEndpoint: ce,
+		refused:        rerr,
+		addr:           match.Addr,
+		tier:           match.Tier,
+		verified:       false, // the caller decides whether to fold a fresh verify in (whisper ip does)
+		local:          nil,   // LOAD-BEARING: Stop() must be a no-op - we do not own this egress
 	}, true
 }
 
@@ -500,11 +528,18 @@ func findProvenSession(cx context.Context, c *client.Client, sel string, require
 			removeSessionRecordAt(r.path)
 			continue
 		}
+		// Not shared with this caller: the session is live and may well be this agent's,
+		// so the run stops with the fix instead of opening one that would replace its tunnel.
+		ce, rerr := reuseEndpoint(r)
+		if rerr != nil {
+			return nil, rerr
+		}
+		via := firstNonBlank(ce, r.Endpoint)
 		// a bounded read per candidate, so a slow echo on one cannot leave the next unproven
 		cc, cancel := ctx()
-		observed, err := observeEgress(cc, c, r.Endpoint)
+		observed, err := observeEgress(cc, c, via)
 		if err != nil {
-			observed, err = observeEgress(cc, c, r.Endpoint)
+			observed, err = observeEgress(cc, c, via)
 		}
 		direct, haveDirect := "", false
 		if err == nil && !inWhisperRange(observed) {
@@ -529,14 +564,14 @@ func findProvenSession(cx context.Context, c *client.Client, sel string, require
 					fmt.Fprintf(os.Stderr, "whisper: reusing the live session for %s on 127.0.0.1:%d (pid %d); "+
 						"its identity could not be checked just now (%v)\n", want, r.Port, r.PID, err)
 				}
-				return &egressSession{endpoint: r.Endpoint, addr: want, tier: r.Tier, verified: false, local: nil}, nil
+				return &egressSession{endpoint: r.Endpoint, clientEndpoint: ce, addr: want, tier: r.Tier, verified: false, local: nil}, nil
 			}
 			unproven = &unprovenSessionError{addr: want, port: r.Port, pid: r.PID}
 			continue
 		}
 		switch classifyEgress(observed, want, direct, haveDirect).kind {
 		case egressPinned:
-			return &egressSession{endpoint: r.Endpoint, addr: want, tier: r.Tier, verified: true, local: nil}, nil
+			return &egressSession{endpoint: r.Endpoint, clientEndpoint: ce, addr: want, tier: r.Tier, verified: true, local: nil}, nil
 		case egressTunnelled:
 			// Through Whisper but not pinnable to a /128: it may be this agent's own session.
 			unproven = &unprovenSessionError{addr: want, port: r.Port, pid: r.PID}

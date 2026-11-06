@@ -183,7 +183,7 @@ func runWithEgress(agent, agentFile, tier, name string, childArgs []string, viaC
 	}
 
 	child := exec.Command(name, childArgs...)
-	child.Env = append(proxyInjectedEnv(os.Environ(), sess.endpoint), runMarkerEnv())
+	child.Env = append(proxyInjectedEnv(os.Environ(), sess.useEndpoint()), runMarkerEnv())
 	child.Stdin = os.Stdin
 	child.Stdout = os.Stdout
 	child.Stderr = os.Stderr

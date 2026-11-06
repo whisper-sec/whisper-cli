@@ -20,7 +20,7 @@ const A = 'a'.repeat(64);
 const B = 'b'.repeat(64);
 const C = 'c'.repeat(64);
 
-test('#1624: --version goes straight to the CLI, everything else to `whisper mcp`', () => {
+test('--version goes straight to the CLI, everything else to `whisper mcp`', () => {
   assert.deepEqual(W.cliArgs(['--version']), ['--version']);
   assert.deepEqual(W.cliArgs([]), ['mcp']);
   assert.deepEqual(W.cliArgs(['--help']), ['mcp', '--help']);
@@ -28,7 +28,7 @@ test('#1624: --version goes straight to the CLI, everything else to `whisper mcp
   assert.deepEqual(W.cliArgs(['-v']), ['mcp', '-v']);
 });
 
-test('#1595: the pinned digest decides, the published one only explains', () => {
+test('the pinned digest decides, the published one only explains', () => {
   assert.equal(W.judgePinned(A, A, ''), null);
   assert.equal(W.judgePinned(A, A, B), null, 'a match on the pin passes whatever the sidecar says');
   const replaced = W.judgePinned(B, A, B).join('\n');
@@ -83,7 +83,7 @@ function packedWith(pinFor) {
 
 const posix = process.platform !== 'win32';
 
-test('#1624: the packed tarball answers --version with both versions', { skip: !posix }, () => {
+test('the packed tarball answers --version with both versions', { skip: !posix }, () => {
   const { tmp, pkgDir, cache } = packedWith((d) => d);
   try {
     const r = spawnSync(process.execPath, [path.join(pkgDir, 'bin', 'whisper-mcp.js'), '--version'], {
@@ -101,7 +101,7 @@ test('#1624: the packed tarball answers --version with both versions', { skip: !
   }
 });
 
-test('#1595: a pin set missing this platform refuses before running anything', { skip: !posix }, () => {
+test('a pin set missing this platform refuses before running anything', { skip: !posix }, () => {
   const { tmp, pkgDir, cache } = packedWith(() => 'not-a-digest');
   try {
     const r = spawnSync(process.execPath, [path.join(pkgDir, 'bin', 'whisper-mcp.js'), '--version'], {

@@ -37,12 +37,15 @@ func newVerifyCmd() *cobra.Command {
 			"agent's exact certificate, so NO public CA and NO pre-installed trust anchor is needed.\n" +
 			"dane_ok is true only when the certificate the agent's address actually serves on :443\n" +
 			"matches a published DANE-EE (3 1 1) pin. dane_state says how that check ended (verified,\n" +
-			"mismatch, unreachable, unchecked, no_pin) and dane_reason why it did not pass; unreachable\n" +
-			"and unchecked mean nobody could look, not that the agent is fake. This command is KEYLESS\n" +
-			"(the verify surface is public).\n\n" +
+			"mismatch, superseded, unreachable, unchecked, no_pin) and dane_reason why it did not pass;\n" +
+			"superseded means the served certificate belongs to a previous allocation of the address,\n" +
+			"and unreachable and unchecked mean nobody could look, not that the agent is fake. This\n" +
+			"command is KEYLESS (the verify surface is public).\n\n" +
 			"  --trustless   prove the identity INDEPENDENTLY, trusting NO Whisper API. Validates the\n" +
 			"                DNSSEC chain from the IANA root IN-PROCESS (TLSA + AAAA + PTR), matches the\n" +
-			"                served DANE-EE cert against the DNSSEC pin, and verifies the transparency\n" +
+			"                served DANE-EE cert against the DNSSEC pin (a Whisper Agent CA cert must\n" +
+			"                also name the address's current allocation, read from its DNSSEC-signed\n" +
+			"                whisper-id1 TXT), and verifies the transparency\n" +
 			"                log + identity document against signing keys published in DNSSEC-signed\n" +
 			"                DNS (_whisper-identity/_whisper-ledger TXT) - the HTTPS-served keys are\n" +
 			"                only a cross-check. The default (no flag) uses Whisper's keyless\n" +

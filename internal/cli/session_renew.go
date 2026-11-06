@@ -732,6 +732,15 @@ var (
 // patiently as a live one. A signal cancels a renewal in flight, so a service manager's stop is
 // honoured within its timeout rather than after a slow connect.
 func superviseUntilSignal(sess *egressSession, logf func(string, ...any)) {
+	superviseUntilSignalFrom(sess, logf, holdsStopping())
+}
+
+// superviseUntilSignalFrom is superviseUntilSignal with the stop channel taken by the caller.
+// A holder takes it BEFORE it publishes its record: a stop issued once the record is visible
+// (the Windows SCM stopping a service that has just started) is then never missed, where taking
+// it here, after the record write, left a window in which the stop went to an older channel and
+// the hold ran on.
+func superviseUntilSignalFrom(sess *egressSession, logf func(string, ...any), stopping <-chan struct{}) {
 	sup := newSessionSupervisor(sess, logf)
 	defer sup.close()
 	sigs, stopSigs := superviseSignals()
@@ -740,7 +749,6 @@ func superviseUntilSignal(sess *egressSession, logf func(string, ...any)) {
 	defer stopTick()
 	run, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	stopping := holdsStopping()
 	go func() {
 		// A stop without a signal (the Windows SCM) cancels a renewal in flight too, or a
 		// renewal's 30 s connect and 45 s bring-up outlast the service's 10 s stop grace and

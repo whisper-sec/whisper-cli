@@ -222,6 +222,16 @@ func (t *Tunnel) Endpoint() string { return t.proxy.Endpoint() }
 // Addr is the bare 127.0.0.1:<port> the local proxy listens on.
 func (t *Tunnel) Addr() string { return t.proxy.Addr() }
 
+// SetAccess arms the tunnel's local forwarder with its admission rule. The WireGuard
+// tier shares the egress front end, so it shares the one gate too.
+func (t *Tunnel) SetAccess(a egress.Access) { t.proxy.SetAccess(a) }
+
+// RefusedPeers is how many local clients the tunnel's forwarder has refused.
+func (t *Tunnel) RefusedPeers() uint64 { return t.proxy.RefusedPeers() }
+
+// IdentityAvailable reports whether the forwarder can name the user behind a client.
+func (t *Tunnel) IdentityAvailable() bool { return t.proxy.IdentityAvailable() }
+
 // LastDialFailure forwards the front-end proxy's record of why the most recent dial through
 // this tunnel failed, and when (see egress.Proxy.LastDialFailure). netDialer.diagnosis already
 // works out which of routing, DNS, or the destination it was and writes a sentence a person

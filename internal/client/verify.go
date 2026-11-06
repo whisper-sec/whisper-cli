@@ -28,8 +28,9 @@ type VerifyVerdict struct {
 	Operator       string `json:"operator"`
 	Tenant         string `json:"tenant"`
 	DaneOK         bool   `json:"dane_ok"`
-	// DaneState is how the DANE leg ended: "verified", "mismatch", "unreachable",
-	// "unchecked" or "no_pin" today. Kept as the server's string, so a state added later
+	// DaneState is how the DANE leg ended: "verified", "mismatch", "superseded" (the served
+	// leaf belongs to a previous allocation of the /128), "unreachable", "unchecked" or
+	// "no_pin" today. Kept as the server's string, so a state added later
 	// still reaches the reader instead of being dropped. "" from a server that predates it.
 	DaneState LooseString `json:"dane_state"`
 	// DaneReason is the server's one sentence on why the DANE leg did not pass ("" when it

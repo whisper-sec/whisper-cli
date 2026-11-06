@@ -273,7 +273,9 @@ func TestAnUnexpectedReplyShapeIsShownNotSwallowed(t *testing.T) {
 // renderFleetCallersAllowed is every function permitted to call renderFleet: the agent
 // listing, and nothing else. A domain sub-command reaching it is; any other
 // non-agent command reaching it is the same defect with another name.
-var renderFleetCallersAllowed = map[string]bool{"newListCmd": true}
+// listWithTombstones is the same agent listing with --tombstones: it hands renderFleet only
+// the live agent rows, and renders the gone ones with its own renderGone.
+var renderFleetCallersAllowed = map[string]bool{"newListCmd": true, "listWithTombstones": true}
 
 func TestRenderFleetIsReachedOnlyFromTheAgentListing(t *testing.T) {
 	fset := token.NewFileSet()

@@ -23,6 +23,7 @@ import (
 
 func newListCmd() *cobra.Command {
 	var kind string
+	var tombstones bool
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List your agents (or records / identities)",
@@ -35,6 +36,12 @@ func newListCmd() *cobra.Command {
 			}
 			cx, cancel := ctx()
 			defer cancel()
+			if tombstones {
+				if kind != "agents" {
+					return usageErr("--tombstones lists agents that are gone; it goes with --kind agents")
+				}
+				return listWithTombstones(c, cx)
+			}
 			env, err := c.Agents(cx, "list", map[string]any{"kind": kind})
 			if kind == "agents" {
 				// The account's agents: a reply with no listing in it is not an empty account.
@@ -69,7 +76,211 @@ func newListCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&kind, "kind", "agents", "what to list: agents | records | identities")
+	cmd.Flags().BoolVar(&tombstones, "tombstones", false,
+		"also list agents that are gone: revoked, released, erased or reaped, when, by whom and why")
 	return cmd
+}
+
+// tombstoneStates are the lifecycle states a gone agent's row carries. A live agent's state is
+// never one of them, so the state alone tells the two apart in a listing.
+var tombstoneStates = map[string]bool{"revoked": true, "released": true, "erased": true, "reaped": true}
+
+// lifecycleUnavailable is the client rule for a reply that lacks its capability witness: nothing about
+// lifecycles is inferred from it. A fresh value each time, so no caller can change it for the next.
+func lifecycleUnavailable() error {
+	return &client.ProblemError{Type: client.LocalActionableType, Status: 503,
+		Detail: "the control plane is being updated and cannot list agents that are gone yet; " +
+			"try again in a few minutes (whisper list still shows the live ones)"}
+}
+
+// errListingIncomplete is a tombstone listing that stopped before the server said it was complete.
+func errListingIncomplete(why string) error {
+	return &client.ProblemError{Type: client.LocalActionableType, Status: 502,
+		Detail: "the list of agents that are gone came back incomplete (" + why + "); nothing was left out on " +
+			"purpose, so try again"}
+}
+
+// maxTombstonePages and maxTombstoneRows bound what one listing reads; tombstonePageSize is the
+// server's own page cap, so a listing takes the fewest round trips.
+const (
+	maxTombstonePages = 1000
+	maxTombstoneRows  = 100000
+	tombstonePageSize = 500
+)
+
+// cellSafe makes a server-supplied value safe to print in a table cell: no control or format
+// characters (an escape sequence, a bidi override) and no line or tab breaks.
+func cellSafe(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r == '\n' || r == '\t' || r == '\r' {
+			return ' '
+		}
+		return r
+	}, terminalSafe(s))
+}
+
+// isTombstoneItem tells a gone agent's row from a live one: a gone agent's row always carries the
+// lifecycle actor, a live row never does; a lifecycle state is the fallback.
+func isTombstoneItem(item map[string]any) bool {
+	if _, ok := item["state_actor"]; ok {
+		return true
+	}
+	return tombstoneStates[field(item, "state")]
+}
+
+// agentsRetryingPending sends one idempotent read and, when the control plane answers that the record
+// of what happened is still being written (503 lifecycle_pending, a one-second hint), asks again up to
+// twice, a second apart, within the call's own deadline.
+func agentsRetryingPending(c *client.Client, cx context.Context, op string, args map[string]any) (*client.Envelope, error) {
+	for attempt := 0; ; attempt++ {
+		env, err := c.Agents(cx, op, args)
+		if err != nil || attempt >= 2 || env == nil || env.Ok || env.Err == nil || env.Err.Reason != "lifecycle_pending" {
+			return env, err
+		}
+		select {
+		case <-cx.Done():
+			return env, nil
+		case <-time.After(time.Second):
+		}
+	}
+}
+
+// listWithTombstones follows op:list {kind:'agents', include:'tombstones'} to its last page and
+// renders the live fleet, then the agents that are gone. Every page must end with a page row that
+// echoes include (the witness), and the last must say complete with no cursor: a listing that stops
+// short for any other reason is an error, never a shorter list.
+func listWithTombstones(c *client.Client, cx context.Context) error {
+	var live, gone []map[string]any
+	cursor := ""
+	seen := map[string]bool{}
+	complete := false
+	pages, dropped := 0, 0
+	for ; pages < maxTombstonePages && !complete; pages++ {
+		args := map[string]any{"kind": "agents", "include": "tombstones", "pageSize": tombstonePageSize}
+		if cursor != "" {
+			args["cursor"] = cursor
+		}
+		env, err := agentsRetryingPending(c, cx, "list", args)
+		if err != nil {
+			return &accountReadError{cause: err}
+		}
+		if env != nil && !env.Ok && env.Err != nil && env.Err.Reason != "" {
+			return env.Err // keep the plane's own reason and words (lifecycle_pending, registrant_unknown, ...)
+		}
+		res, lerr := env.Listing()
+		if lerr != nil {
+			return &accountReadError{cause: lerr}
+		}
+		var pageRow map[string]any
+		for _, row := range res.Rows {
+			if len(row) < 2 {
+				continue
+			}
+			kindCell, _ := row[0].(string)
+			item, ok := row[1].(map[string]any)
+			if !ok {
+				continue
+			}
+			switch {
+			case kindCell == "page":
+				if inc, _ := item["include"].(string); inc == "tombstones" {
+					pageRow = item
+				}
+			case kindCell != "agents":
+				continue
+			case isTombstoneItem(item):
+				gone = append(gone, item)
+			case pages == 0:
+				live = append(live, item)
+			default:
+				dropped++ // later pages carry tombstones only; a live row there is a server fault, counted
+			}
+		}
+		if pageRow == nil {
+			return lifecycleUnavailable()
+		}
+		if len(live)+len(gone) > maxTombstoneRows {
+			return errListingIncomplete("more rows than one listing reads")
+		}
+		next, isString := pageRow["cursor"].(string)
+		done, _ := pageRow["complete"].(bool)
+		switch {
+		case !isString:
+			return errListingIncomplete("the page carried no usable cursor")
+		case next == "" && done:
+			complete = true
+		case next == "":
+			return errListingIncomplete("the server stopped before the end")
+		case seen[next]:
+			return errListingIncomplete("the server repeated a page")
+		default:
+			seen[next] = true
+			cursor = next
+		}
+	}
+	if !complete {
+		return errListingIncomplete("more pages than one listing reads")
+	}
+	if dropped > 0 {
+		fmt.Fprintf(os.Stderr, "whisper: %d live row(s) arrived after the first page and were not shown\n", dropped)
+	}
+	if g.jsonOut {
+		// A synthesized envelope, not one server reply: every page's agents and ONE final page row, so
+		// a script never meets an intermediate cursor and pages again.
+		rows := make([][]any, 0, len(live)+len(gone)+1)
+		for _, m := range live {
+			rows = append(rows, []any{"agents", m})
+		}
+		for _, m := range gone {
+			rows = append(rows, []any{"agents", m})
+		}
+		rows = append(rows, []any{"page", map[string]any{"include": "tombstones", "cursor": "",
+			"tombstones": len(gone), "complete": true, "pages": pages}})
+		emitJSONValue(map[string]any{"ok": true, "status": 200,
+			"result": map[string]any{"columns": []string{"kind", "item"}, "rows": rows}})
+		return nil
+	}
+	if len(live) > 0 || len(gone) == 0 {
+		liveRows := make([][]any, 0, len(live))
+		for _, m := range live {
+			liveRows = append(liveRows, []any{"agents", m})
+		}
+		renderFleet(&client.Result{Columns: []string{"kind", "item"}, Rows: liveRows})
+	} else {
+		fmt.Fprintln(os.Stderr, "no live agents")
+	}
+	renderGone(gone)
+	return nil
+}
+
+// renderGone prints the agents that are gone, most recent change first.
+func renderGone(gone []map[string]any) {
+	if len(gone) == 0 {
+		fmt.Fprintln(os.Stderr, "no agents gone in the time the control plane keeps")
+		return
+	}
+	sort.SliceStable(gone, func(i, j int) bool {
+		return parseEpoch(field(gone[i], "state_at")) > parseEpoch(field(gone[j], "state_at"))
+	})
+	cells := make([][]string, 0, len(gone))
+	for _, m := range gone {
+		why := field(m, "state_reason")
+		if rev, _ := m["reversible"].(bool); rev {
+			why += " (reversible)"
+		}
+		cells = append(cells, []string{
+			cellSafe(orDash(field(m, "agent"))),
+			cellSafe(field(m, "address")),
+			cellSafe(orDash(field(m, "label"))),
+			cellSafe(field(m, "state")),
+			cellSafe(humanTime(field(m, "state_at"))),
+			cellSafe(field(m, "state_actor")),
+			cellSafe(why),
+		})
+	}
+	fmt.Fprintln(os.Stdout)
+	printTable([]string{"GONE", "ADDRESS", "LABEL", "STATE", "WHEN", "BY", "WHY"}, cells)
+	fmt.Fprintf(os.Stderr, "%d agent(s) gone\n", len(gone))
 }
 
 // renderFleet prints the agent fleet table, newest first. Each row's `item` is the
@@ -94,13 +305,13 @@ func renderFleet(res *client.Result) {
 		rows = append(rows, row{
 			created: parseEpoch(created),
 			cells: []string{
-				name,
-				field(item, "address", "addr128"),
-				orDash(field(item, "label")),
-				orDash(agentDomain(field(item, "fqdn"))),
-				orVal(field(item, "state"), "active"),
-				humanTime(created),
-				field(item, "contact"),
+				cellSafe(name),
+				cellSafe(field(item, "address", "addr128")),
+				cellSafe(orDash(field(item, "label"))),
+				cellSafe(orDash(agentDomain(field(item, "fqdn")))),
+				cellSafe(orVal(field(item, "state"), "active")),
+				cellSafe(humanTime(created)),
+				cellSafe(field(item, "contact")),
 			},
 		})
 	}
@@ -147,41 +358,114 @@ func newAgentCmd() *cobra.Command {
 			}
 			cx, cancel := ctx()
 			defer cancel()
-			env, err := c.Agents(cx, "agent", args2)
+			// Ask for the lifecycle too, so an agent that is gone says what became of it.
+			args2["include"] = "tombstones"
+			env, err := agentsRetryingPending(c, cx, "agent", args2)
 			if err != nil {
 				return err
 			}
 			handled, perr := renderEnvelope(env)
-			if handled || perr != nil {
+			if handled {
 				return perr
 			}
-			renderAgentDetail(env.Result)
-			return nil
+			if perr != nil {
+				return lifecycleNotFound(perr)
+			}
+			return renderAgentDetail(env.Result)
 		},
 	}
 	cmd.Flags().StringVar(&addr, "address", "", "select by /128 address")
 	return cmd
 }
 
-func renderAgentDetail(res *client.Result) {
+// lifecycleNotFound keeps a 404 that carries the witness (reason no_record) as the plain answer,
+// and says so when it does not: an older control plane cannot tell "never existed" from "gone".
+func lifecycleNotFound(err error) error {
+	pe, ok := client.AsProblem(err)
+	if !ok || pe.Status != 404 || pe.Reason == "no_record" {
+		return err
+	}
+	return &client.ProblemError{Type: client.LocalActionableType, Status: 404, Detail: pe.Error() +
+		" (the control plane is being updated, so it cannot say yet whether this agent existed and is gone)"}
+}
+
+func renderAgentDetail(res *client.Result) error {
 	recs := res.Records()
 	if len(recs) == 0 {
-		fmt.Fprintln(os.Stderr, "whisper: not found in your account")
-		return
+		// A 200 always carries the agent and the lifecycle columns (the witness); one with no row is not
+		// "not found", it is a control plane that did not answer the question.
+		return &client.ProblemError{Type: client.LocalActionableType, Status: 503,
+			Detail: "the control plane answered without the agent's details; it may be being updated, try again shortly"}
 	}
 	rec := recs[0]
 	order := []string{
 		"agent", "address", "fqdn", "ptr", "label", "state", "allocated_at", "contact",
 		"last_seen", "dns_queries", "dns_blocked", "dns_nxdomain", "packets",
 		"bytes_up", "bytes_down", "connections_active", "connections_total",
+		"state_at", "state_actor", "state_reason", "reversible",
 	}
 	rows := make([][]string, 0, len(order))
 	for _, k := range order {
-		if v, ok := rec[k]; ok {
-			rows = append(rows, []string{k, asString(v)})
+		if v, ok := rec[k]; ok && v != nil {
+			val := asString(v)
+			if k == "state_at" || k == "allocated_at" {
+				val = humanTime(val)
+			}
+			rows = append(rows, []string{k, cellSafe(val)})
 		}
 	}
 	printTable([]string{"FIELD", "VALUE"}, rows)
+	for _, col := range []string{"state_at", "state_actor", "state_reason"} {
+		if _, ok := rec[col]; !ok {
+			// The capability witness is missing: an older control plane answered. Nothing is inferred.
+			fmt.Fprintln(os.Stderr, "whisper: lifecycle detail is not available yet (the control plane is being updated)")
+			return nil
+		}
+	}
+	reversible, known := rec["reversible"].(bool)
+	if note := lifecycleNote(field(rec, "state"), field(rec, "state_actor"), field(rec, "state_reason"),
+		reversible, known, field(rec, "agent"), field(rec, "address")); note != "" {
+		fmt.Fprintln(os.Stderr, note)
+	}
+	return nil
+}
+
+// cypherQuoted makes a server value safe inside a single-quoted Cypher string the user pastes: no
+// control characters, and a backslash or a quote escaped.
+func cypherQuoted(v string) string {
+	return strings.NewReplacer(`\`, `\\`, `'`, `\'`).Replace(cellSafe(v))
+}
+
+// lifecycleNote is the one line under a gone agent's detail. A containment by the account's
+// administrator offers no fix here: it is theirs to lift, in the console. A revoke is called permanent
+// only when the row says it is not reversible.
+func lifecycleNote(state, actor, reason string, reversible, reversibleKnown bool, agent, address string) string {
+	if actor == "operator" && reason == "containment" {
+		return "This identity was suspended by your account's administrator. They manage it at " +
+			"https://console.whisper.online."
+	}
+	switch state {
+	case "revoked":
+		if reversible {
+			sel := "agent:'" + cypherQuoted(agent) + "'"
+			if strings.TrimSpace(agent) == "" {
+				sel = "address:'" + cypherQuoted(address) + "'" // a connect-first identity may carry no agent id
+			}
+			return "This revoke can be undone: CALL whisper.agents({op:'revoke', args:{" + sel +
+				", reverse:true}}) brings the identity back."
+		}
+		if !reversibleKnown {
+			return "This agent was revoked. whisper create makes a new one."
+		}
+		return "This agent was revoked; a revoked agent does not come back. whisper create makes a new one."
+	case "released":
+		return "This agent's /128 was released. whisper create makes a new agent."
+	case "erased":
+		return "This agent was erased, with its history. whisper create makes a new agent."
+	case "reaped":
+		return "This agent was removed after it stayed disconnected past its window. whisper create makes a new one."
+	}
+	return ""
 }
 
 // --- create ----------------------------------------------------------------------
@@ -189,6 +473,7 @@ func renderAgentDetail(res *client.Result) {
 func newCreateCmd() *cobra.Command {
 	var email, name, label, retention string
 	var register, reuse bool
+	var idemKey string
 	var ids identifierFlags
 	var wallet, walletChain string
 	cmd := &cobra.Command{
@@ -245,6 +530,15 @@ func newCreateCmd() *cobra.Command {
 			if deviceID != "" {
 				register = true
 			}
+			// An idempotency key belongs to op:register (the server dedups a register on the account and the
+			// key), so it implies --register, as a typed identifier does.
+			idemKey = strings.TrimSpace(idemKey)
+			if len(idemKey) > 128 {
+				return usageErr("--idempotency-key is at most 128 bytes (this one is %d)", len(idemKey))
+			}
+			if idemKey != "" {
+				register = true
+			}
 
 			// --retention sets the NEW agent's log-retention policy, which only the register
 			// path mints. On the plain op:identity path there is nothing to attach it to, so
@@ -264,6 +558,9 @@ func newCreateCmd() *cobra.Command {
 				}
 				if deviceID != "" {
 					args["device_id"] = deviceID
+				}
+				if idemKey != "" {
+					args["idempotency_key"] = idemKey
 				}
 				if cmd.Flags().Changed("retention") {
 					days, rerr := parseRetentionDays(retention)
@@ -320,13 +617,16 @@ func newCreateCmd() *cobra.Command {
 				}
 				cx, cancel := ctx()
 				defer cancel()
-				env, err := c.Agents(cx, "register", args)
+				env, err := registerOnce(c, cx, args, idemKey)
 				if err != nil {
 					return err
 				}
 				handled, perr := renderEnvelope(env)
-				if handled || perr != nil {
+				if handled {
 					return perr
+				}
+				if perr != nil {
+					return idempotencyRefusal(perr, idemKey)
 				}
 				if err := maybePinWallet(c, env, wallet, walletChain); err != nil {
 					return err
@@ -414,6 +714,8 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&label, "label", "", "legacy alias for --name (--name wins)")
 	cmd.Flags().StringVar(&email, "email", "", "public contact email (opt-in; surfaced in RDAP)")
 	cmd.Flags().BoolVar(&register, "register", false, "mint a NEW agent + its own API key (op:register)")
+	cmd.Flags().StringVar(&idemKey, "idempotency-key", "",
+		"make this register safe to retry: the same key and arguments return the same agent, never a second one (implies --register)")
 	cmd.Flags().BoolVar(&reuse, "reuse", false, "with --register: reuse the agent already registered under --name (mint only when none exists)")
 	cmd.Flags().StringVar(&retention, "retention", "", "with --register: days to keep the new agent's DNS/query logs (0-3650); 0 = keep none (the security floor is still retained for a fixed operator window)")
 	ids.register(cmd)
@@ -421,6 +723,69 @@ func newCreateCmd() *cobra.Command {
 	cmd.Flags().StringVar(&walletChain, "wallet-chain", "", "the wallet's chain id for --wallet (e.g. eip155:8453)")
 	_ = cmd.Flags().MarkHidden("label") // --name is the documented spelling
 	return cmd
+}
+
+// registerRetryWait is how long a keyed register waits before asking again after the server said the
+// same request is still being minted, or that the node holding its answer was not reached.
+var registerRetryWait = 2 * time.Second
+
+// registerOnce sends op:register. With an idempotency key the request is safe to send again, so it is
+// asked for once more, on a fresh deadline, when the reply was lost (a transport error or a timeout,
+// which may come after the server committed), or when the server answered that the same request is
+// still in flight (REGISTER_IN_PROGRESS) or that the node holding its answer was not reached
+// (PRIMARY_UNREACHABLE). The server answers the same key and arguments with the same agent, or names it,
+// never a second mint. Without a key nothing is retried: a retry could mint twice.
+func registerOnce(c *client.Client, cx context.Context, args map[string]any, idemKey string) (*client.Envelope, error) {
+	env, err := c.Agents(cx, "register", args)
+	if idemKey == "" {
+		return env, err
+	}
+	again := false
+	if err != nil {
+		_, isProblem := client.AsProblem(err)
+		again = !isProblem
+	} else if env != nil && !env.Ok && env.Err != nil &&
+		(env.Err.Title == "REGISTER_IN_PROGRESS" || env.Err.Title == "PRIMARY_UNREACHABLE") {
+		time.Sleep(registerRetryWait)
+		again = true
+	}
+	if !again {
+		return env, err
+	}
+	fresh, cancel := ctx()
+	defer cancel()
+	return c.Agents(fresh, "register", args)
+}
+
+// idempotencyRefusal renders the three idempotency answers as what they mean, naming the agent the server
+// named (error.agent). Any other refusal passes through unchanged.
+func idempotencyRefusal(err error, idemKey string) error {
+	pe, ok := client.AsProblem(err)
+	if !ok || pe.Agent == "" {
+		return err
+	}
+	agent := cellSafe(pe.Agent)
+	at := ""
+	if pe.Address != "" {
+		at = " (" + cellSafe(pe.Address) + ")"
+	}
+	var msg string
+	switch pe.Title {
+	case "ALREADY_REGISTERED":
+		msg = "this request already produced agent " + agent + at + "; its API key was shown once, when it was " +
+			"created. `whisper agent " + agent + "` shows it"
+	case "IDEMPOTENCY_MISMATCH":
+		msg = "idempotency key " + strconv.Quote(cellSafe(idemKey)) + " already produced agent " + agent + at +
+			" for a different request. Nothing was registered. Send the original arguments to get that agent " +
+			"back, or use a new key to register another"
+	case "ATTEMPT_CONSUMED":
+		msg = "idempotency key " + strconv.Quote(cellSafe(idemKey)) + " produced agent " + agent + at +
+			", which is gone. Nothing was registered. `whisper agent " + agent + "` says what became of it; " +
+			"use a new key to register another"
+	default:
+		return err
+	}
+	return &client.ProblemError{Type: client.LocalActionableType, Status: 409, Detail: msg}
 }
 
 // identifierFlags holds the mutually-exclusive typed-identity flags (automotive/telecom/

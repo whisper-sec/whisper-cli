@@ -14,6 +14,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/egress"
 )
 
 // --- connect ---------------------------------------------------------------------
@@ -25,6 +26,7 @@ func newConnectCmd() *cobra.Command {
 	var port int
 	var acceptPorts, acceptFrom []string
 	var acceptPublic, acceptYes bool
+	var share string
 	cmd := &cobra.Command{
 		Use:   "connect",
 		Short: "Connect egress bound to your /128 (auto: Tier-1 WireGuard, falling back to Tier-1.5 SOCKS5)",
@@ -60,9 +62,23 @@ func newConnectCmd() *cobra.Command {
 			"admits your fleet only; --accept-from adds addresses or prefixes, and\n" +
 			"--accept-public admits the whole internet once you confirm it. `whisper whale\n" +
 			"status` lists what is accepted, and `whisper service install --accept 22 --now`\n" +
-			"keeps it up across reboots.",
+			"keeps it up across reboots.\n\n" +
+			"Who may use it (--share): the local proxy admits your own user and refuses every\n" +
+			"other local user unless it presents this session's credential (RFC 1929, or HTTP\n" +
+			"Basic), kept owner-only in the .cred file beside the session record. --share\n" +
+			"credential requires the credential from everyone; --share any admits every local\n" +
+			"user, as before. A process of your own user is trusted either way, including a\n" +
+			"--network=host container running as your uid.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			mode, serr := egress.ParseShareMode(share)
+			if serr != nil {
+				return usageErr("%s", serr.Error())
+			}
+			setHolderShareMode(mode)
+			if mode == egress.ShareAny && !g.quiet {
+				fmt.Fprintln(os.Stderr, "whisper: --share any: EVERY local user and process can use this connection and leave from your /128")
+			}
 			// --ensure: the IDEMPOTENT daemon path (used by `whisper init claude` + the
 			// SessionStart hook). Reuse a live proxy on the project's pinned port, else spawn
 			// the tunnel DETACHED and wait (bounded) until it's live. It does NOT hold this
@@ -279,6 +295,7 @@ func newConnectCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&acceptPublic, "accept-public", false, "admit THE WHOLE INTERNET to the accepted ports, not only your fleet (asks you to confirm)")
 	cmd.Flags().BoolVar(&acceptYes, "yes", false, "confirm --accept-public without the prompt (scripts)")
 	cmd.Flags().StringVar(&configFile, "config", "", "path to a project's .whisper/config (for --ensure; default: discovered from the cwd)")
+	cmd.Flags().StringVar(&share, "share", "owner", "who may use the local proxy without its credential: owner (your user) | credential (nobody) | any (every local user)")
 	return cmd
 }
 
@@ -468,10 +485,11 @@ var holdUntilSignal = holdUntilSignalLive
 
 // holdUntilSignalLive is the real hold, which a test can drive with its own tick and signal.
 func holdUntilSignalLive(sess *egressSession) {
+	stopping := holdsStopping() // before the record is visible, so no stop can be missed
 	writeSessionRecord(sess)
 	// Watch the session until the signal, renewing a Tier 1 tunnel whose box has dropped it,
 	// then stop whatever session is current and clear its record.
-	superviseUntilSignal(sess, foregroundLogf())
+	superviseUntilSignalFrom(sess, foregroundLogf(), stopping)
 	if !g.quiet {
 		fmt.Fprintln(os.Stderr, "whisper: disconnected.")
 	}

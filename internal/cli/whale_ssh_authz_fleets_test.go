@@ -271,7 +271,7 @@ func TestInstallWriteIsIdempotentAndRefreshes(t *testing.T) {
 	if fi, _ := os.Stat(fleets); fi.Mode().Perm() != 0o640 {
 		t.Fatalf("mode = %v", fi.Mode())
 	}
-	if lines, err := readSSHAuthzFleets(fleets); err != nil || len(lines) != 2 {
+	if lines, _, err := readSSHAuthzFleets(fleets); err != nil || len(lines) != 2 {
 		t.Fatalf("check cannot read what install wrote: %v %v", lines, err)
 	}
 	if b, _ := os.ReadFile(snippet); !strings.Contains(string(b), "--fleet-file "+fleets+" --") {
