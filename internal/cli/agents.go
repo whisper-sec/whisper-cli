@@ -476,6 +476,7 @@ func newCreateCmd() *cobra.Command {
 	var idemKey string
 	var ids identifierFlags
 	var wallet, walletChain string
+	var join whaleJoinFlags
 	cmd := &cobra.Command{
 		Use:   "create",
 		Short: "Create a named agent (your routable /128 identity), or --register a new agent+key",
@@ -513,7 +514,15 @@ func newCreateCmd() *cobra.Command {
 			"resolvable TXT binding (via op:host) so a facilitator can tie the wallet to the\n" +
 			"verifiable, revocable agent identity.\n\n" +
 			"With --register, --retention sets how many days the new agent's DNS/query logs\n" +
-			"are kept (0-3650); change it later with `whisper policy --retention`.",
+			"are kept (0-3650); change it later with `whisper policy --retention`.\n\n" +
+			"Whalenet join settings ride the new key, and each one implies --register:\n" +
+			"  --tag tag:prod   the node's tags (repeatable); fixed for the key's life\n" +
+			"  --single-use     the key establishes a node once; a second connect is refused\n" +
+			"  --ephemeral      the node is released once it holds no connection for 15 minutes\n" +
+			"  --preapproved    admitted to east-west at once, even under a manual join rule\n" +
+			"  --ttl 24h        the key expires (not with --tag: a tag's authority outlives its minter)\n" +
+			"The node joins with `WHISPER_API_KEY={the key} whisper connect`; `whisper whale nodes`\n" +
+			"shows who joined and `whisper whale approve` admits a pending one.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// --label is the legacy spelling of the name; --name wins.
@@ -539,6 +548,15 @@ func newCreateCmd() *cobra.Command {
 			if idemKey != "" {
 				register = true
 			}
+			// The Whalenet join settings are properties of a newly minted key, so each
+			// one implies --register, and the combinations the server refuses are refused here
+			// first, before anything is sent.
+			if err := join.validate(reuse); err != nil {
+				return err
+			}
+			if join.any() || strings.TrimSpace(join.ttl) != "" {
+				register = true
+			}
 
 			// --retention sets the NEW agent's log-retention policy, which only the register
 			// path mints. On the plain op:identity path there is nothing to attach it to, so
@@ -561,6 +579,12 @@ func newCreateCmd() *cobra.Command {
 				}
 				if idemKey != "" {
 					args["idempotency_key"] = idemKey
+				}
+				if wi := join.intent(); wi != nil {
+					args["whale"] = wi
+				}
+				if n, _ := join.ttlSeconds(); n > 0 {
+					args["ttl_seconds"] = n
 				}
 				if cmd.Flags().Changed("retention") {
 					days, rerr := parseRetentionDays(retention)
@@ -644,6 +668,10 @@ func newCreateCmd() *cobra.Command {
 					return nil
 				}
 				renderCreated(env.Result, true)
+				if sum := join.summary(); sum != "" {
+					fmt.Fprintf(os.Stderr, "  join     %s\n", sum)
+					fmt.Fprintln(os.Stderr, "  next     on the node: WHISPER_API_KEY={the key above} whisper connect")
+				}
 				return nil
 			}
 
@@ -721,6 +749,7 @@ func newCreateCmd() *cobra.Command {
 	ids.register(cmd)
 	cmd.Flags().StringVar(&wallet, "wallet", "", "pin an x402 wallet (EOA) to the new /128 as a resolvable TXT binding (op:host)")
 	cmd.Flags().StringVar(&walletChain, "wallet-chain", "", "the wallet's chain id for --wallet (e.g. eip155:8453)")
+	join.register(cmd)
 	_ = cmd.Flags().MarkHidden("label") // --name is the documented spelling
 	return cmd
 }

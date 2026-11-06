@@ -343,6 +343,13 @@ func mapProblem(pe *client.ProblemError) string {
 		if isSignatureRequired(pe) {
 			return ""
 		}
+		// An *_OWNER_ONLY refusal (WHALE_, DETECT_, EDGE_...) is the control plane
+		// saying it knows exactly whose key this is - an agent's - and that the decision
+		// belongs to the account owner. Logging in again with the same agent key is refused
+		// identically, so the server's own sentence is the guidance.
+		if isOwnerOnlyRefusal(pe) {
+			return ""
+		}
 		return "your key was not accepted - run: whisper login"
 	case 404:
 		// Not every 404 is an agent lookup: a local "no .whisper/config here" or
@@ -422,6 +429,17 @@ func isIdentityKeyRefusal(pe *client.ProblemError) bool {
 	s := strings.ToLower(pe.Title + " " + pe.Type + " " + pe.Error())
 	return strings.Contains(s, "identity_signature_invalid") ||
 		strings.Contains(s, "identity_signature does not verify")
+}
+
+// isOwnerOnlyRefusal reports a 403 whose code is one of the control plane's *_OWNER_ONLY
+// refusals: an authenticated agent or device key declined a decision that is the owner's.
+func isOwnerOnlyRefusal(pe *client.ProblemError) bool {
+	for _, code := range []string{pe.Title, pe.Type} {
+		if strings.HasSuffix(strings.ToUpper(strings.TrimSpace(code)), "_OWNER_ONLY") {
+			return true
+		}
+	}
+	return false
 }
 
 // isSignatureRequired reports the server's IDENTITY_SIGNATURE_REQUIRED, by its code.

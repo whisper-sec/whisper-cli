@@ -28,7 +28,8 @@ import (
 //
 // Most of it reads: status, ip, ping, netcheck, whois, dns, route, syspolicy, and
 // `acl show` / `acl test`. What writes says so and names what it changes. There is still
-// no `up`, because a half-working join is worse than no join.
+// no `up`: the join is `whisper create --register` (the key, with its join settings) plus
+// `whisper connect` on the node, and whale_join.go governs what joined.
 //
 // Every verb here is keyless-tolerant where the answer is public (whois, netcheck, ping
 // against an address) and asks for a key only where the answer is your tenant's
@@ -62,10 +63,16 @@ func newWhaleCmd() *cobra.Command {
 			"  serve      put a local port in front of your fleet, pinned by the published TLSA\n" +
 			"  funnel     the same port, answered for the whole internet, deliberately\n" +
 			"  syspolicy  the settings your MDM manages here, and the profile that sets them\n" +
-			"  acl        the document that decides who in your fleet may reach what\n\n" +
-			"Joining a node is still separate work: a half-working join would be worse than\n" +
-			"none. Everything else here reads before it writes, `migrate plan` changes nothing\n" +
-			"at all on either side, and `acl test` answers from the artifact the wire reads.",
+			"  acl        the document that decides who in your fleet may reach what\n" +
+			"  nodes      who has joined, and what each join key allows\n" +
+			"  approve    admit a pending node to east-west\n" +
+			"  deny       hold a node out of east-west again; it keeps its name and its egress\n" +
+			"  approval   the fleet's join rule: admitted at once, or held for approval\n\n" +
+			"A node joins with a key minted for it: `whisper create --register --name db-01\n" +
+			"--tag tag:prod`, then `whisper connect` on the node with that key. Those two\n" +
+			"commands are the whole join. Everything here reads before it writes, `migrate\n" +
+			"plan` changes nothing at all on either side, and `acl test` answers from the\n" +
+			"artifact the wire reads.",
 	}
 	cmd.AddCommand(
 		newWhaleStatusCmd(),
@@ -84,6 +91,10 @@ func newWhaleCmd() *cobra.Command {
 		newWhaleFunnelCmd(),
 		newWhaleSysPolicyCmd(),
 		newWhaleACLCmd(),
+		newWhaleNodesCmd(),
+		newWhaleApproveCmd(),
+		newWhaleDenyCmd(),
+		newWhaleApprovalRuleCmd(),
 	)
 	// A typo here used to print help and exit 0. The Args validator above could never run
 	// (cobra skips validation for a command with no RunE), so the guard has to be a RunE.

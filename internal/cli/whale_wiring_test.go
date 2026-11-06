@@ -72,9 +72,11 @@ func TestWhaleShipsExactlyTheVerbsThatHaveSomethingBehindThem(t *testing.T) {
 	// subnet-router and exit-node halves, ip with its v4 answer, serve and funnel with
 	// the front end, and acl with the document, its compiler, its CAS and its
 	// enforcement at the CONNECT choke, caller with the accept records it reads, and
-	// ssh-authz with the DNSSEC-proven login decision it makes on the target.
+	// ssh-authz with the DNSSEC-proven login decision it makes on the target, and
+	// nodes, approve, deny and approval with the join lifecycle the control plane carries
+	// on op:list{kind:'whale'}, op:firewall{whale} and op:policy{whale}.
 	want := []string{"status", "ip", "ping", "netcheck", "whois", "dns", "ssh", "caller", "ssh-authz", "migrate", "route",
-		"exit-node", "serve", "funnel", "syspolicy", "acl"}
+		"exit-node", "serve", "funnel", "syspolicy", "acl", "nodes", "approve", "deny", "approval"}
 	for _, w := range want {
 		if !got[w] {
 			t.Errorf("`whisper whale %s` is not registered", w)
