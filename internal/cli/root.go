@@ -40,7 +40,7 @@ import (
 // In a release's source tree the fallback is that release, so a plain build of a release tag
 // reports it, and a tag whose source reports any other version names source that was never
 // released under it.
-const versionFallback = "0.256.1"
+const versionFallback = "0.257.0"
 
 var Version = versionFallback
 
