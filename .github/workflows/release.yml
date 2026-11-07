@@ -81,7 +81,10 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Nothing after the checkout talks to git, so the token is not left behind for it.
+          persist-credentials: false
 
       # A decision that lives only in a comment is one edit away from being undone by somebody
       # who reads this as a release workflow with a broken ending and helpfully fixes it. So
@@ -119,7 +122,7 @@ jobs:
           echo "no publishing step and no contents: write - this run cannot cut a release"
 
       - name: Set up Go
-        uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           # Read from go.mod, so this workflow cannot build with a different Go from the module.
           go-version-file: go.mod
@@ -226,7 +229,7 @@ jobs:
       # `fail_on_unmatched_files` property, because a green run that uploaded nothing is the
       # shape of an absence that reads as a pass.
       - name: Upload the build to this workflow run
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: whisper-client-only-${{ steps.ver.outputs.version }}
           if-no-files-found: error
