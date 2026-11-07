@@ -353,7 +353,7 @@ func resolveClientFrom(needKey, promptOK bool, keyFile string) (*client.Client, 
 	if needKey && cred.IsZero() {
 		return nil, &client.ProblemError{Status: 401, Title: "no key",
 			Detail: "no API key - run 'whisper login', set WHISPER_API_KEY, or pass --key " +
-				"(get one at https://console.whisper.online/settings)"}
+				"(get one at https://edr.whisper.security/settings)"}
 	}
 	return client.New(client.Config{
 		ControlURL: g.controlURL,

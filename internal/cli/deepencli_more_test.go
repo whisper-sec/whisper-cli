@@ -223,7 +223,7 @@ func TestDeepenCLI_PromptForKeyReadsOneTrimmedLine(t *testing.T) {
 	// Asserted as the full path rather than the host alone: naming the host
 	// would still pass if the path were dropped, and the path is the half
 	// that 404s.
-	if !strings.Contains(stderr, "https://console.whisper.online/settings") {
+	if !strings.Contains(stderr, "https://edr.whisper.security/settings") {
 		t.Fatalf("the prompt must tell the user where to get a key: %q", stderr)
 	}
 	if strings.Contains(stderr, "console.whisper.security") {

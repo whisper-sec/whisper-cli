@@ -31,9 +31,9 @@ func newLoginCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "login [key]",
-		Short: "Sign in at console.whisper.online (or save an API key) to ~/.config/whisper/key",
+		Short: "Sign in at edr.whisper.security (or save an API key) to ~/.config/whisper/key",
 		Long: "Sign in to Whisper. With NO key argument on a terminal you can just press Enter to\n" +
-			"open console.whisper.online in your browser and approve the login (the device\n" +
+			"open edr.whisper.security in your browser and approve the login (the device\n" +
 			"flow, RFC 8628) - or paste an API key instead. Pass the key as an argument to skip\n" +
 			"the prompt entirely. The key is saved to the key file (mode 600) so every later\n" +
 			"command uses it with no further config, then verified with a quick op:list.\n\n" +
@@ -71,7 +71,7 @@ func newLoginCmd() *cobra.Command {
 			// 3) --manual forces the bare key prompt (interactive) or errors with guidance.
 			if manual {
 				if !isInteractive() {
-					return usageErr("no key supplied - usage: whisper login <key> (get one at https://console.whisper.online/settings)")
+					return usageErr("no key supplied - usage: whisper login <key> (get one at https://edr.whisper.security/settings)")
 				}
 				k, err := promptForKey()
 				if err != nil {
@@ -99,7 +99,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			// 5) No TTY and no key: a clear, helpful error (never an opaque hang).
-			return usageErr("no key supplied - usage: whisper login <key>, or 'whisper login --web' to sign in via browser (get a key at https://console.whisper.online/settings)")
+			return usageErr("no key supplied - usage: whisper login <key>, or 'whisper login --web' to sign in via browser (get a key at https://edr.whisper.security/settings)")
 		},
 	}
 	cmd.Flags().BoolVar(&web, "web", false, "force the browser sign-in (device flow) - useful with no key on hand")
@@ -114,7 +114,7 @@ func newLoginCmd() *cobra.Command {
 // stdin mirrors promptForKey (the key-ladder last rung) so it behaves identically on a
 // terminal.
 func promptLoginChoice() (string, error) {
-	fmt.Fprint(os.Stderr, "Press Enter to sign in at console.whisper.online (opens your browser), or paste your API key: ")
+	fmt.Fprint(os.Stderr, "Press Enter to sign in at edr.whisper.security (opens your browser), or paste your API key: ")
 	sc := bufio.NewScanner(os.Stdin)
 	if sc.Scan() {
 		return strings.TrimSpace(sc.Text()), nil
@@ -175,7 +175,7 @@ func deviceCallTimeout(timeout time.Duration) time.Duration {
 // is reported but is not fatal, exactly like the prior behaviour.
 func saveAndVerify(key string) error {
 	if key == "" {
-		return usageErr("no key supplied - usage: whisper login <key> (get one at https://console.whisper.online/settings)")
+		return usageErr("no key supplied - usage: whisper login <key> (get one at https://edr.whisper.security/settings)")
 	}
 	path := g.keyFile
 	if path == "" {

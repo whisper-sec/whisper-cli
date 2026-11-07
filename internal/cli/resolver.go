@@ -58,7 +58,7 @@ var (
 )
 
 // resolverKeyURL is where a key comes from - the one URL login/root already print.
-const resolverKeyURL = "https://console.whisper.online/settings"
+const resolverKeyURL = "https://edr.whisper.security/settings"
 
 // errResolverNeedsKey is the keyless-apply fail-soft: Tier-2 resolution is keyed
 // BY DESIGN (the resolver identifies the tenant to apply THEIR policy; the DoH

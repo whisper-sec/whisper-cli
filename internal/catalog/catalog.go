@@ -38,7 +38,7 @@ var catalogJSON []byte
 //	GET  console.whisper.security/api/gallery/run        405   (bogus sibling: 404 HTML)
 //	POST console.whisper.security/api/gallery/run        404 {"error":"FlowNotFound"} - the
 //	                                                     handler itself answering, keyless
-//	POST console.whisper.online/api/gallery/run          401 {"code":"UNAUTHENTICATED"}
+//	POST console.whisper.online/api/gallery/run (now edr.whisper.security)          401 {"code":"UNAUTHENTICATED"}
 //	POST console.whisper.online/api/gallery/<bogus>      401, byte-identical
 //
 // The EDR console answers the same 401 for every path, so 401 there is the blanket
