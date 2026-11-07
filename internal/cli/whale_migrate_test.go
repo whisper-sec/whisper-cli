@@ -5,6 +5,8 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -43,14 +46,123 @@ type migrateControl struct {
 	*httptest.Server
 	// fleet is the live identity set, label -> address, as op:list would answer it.
 	fleet func() map[string]string
+	// acl is the WhaleACL compare-and-set fake: what is in force, and every write it saw.
+	acl *aclCAS
+	// tagsOf is the tags each label was registered with.
+	tagsOf func() map[string][]string
+	// addAgent and setTags change the account behind the run's back, as another session would.
+	addAgent func(label, addr string)
+	setTags  func(label string, tags []string)
+	// hideTags removes a node's whale row, as a control plane that has not converged yet would.
+	hideTags func(label string)
+}
+
+// aclCAS is the control plane's WhaleACL store, reduced to the rules a client depends on:
+// a write naming a base that is not the document in force is a 409 naming what is; with
+// nothing stored there is no base to check; a write of null withdraws. Its hash is derived
+// from the document, so the same document always reads back under the same hash.
+type aclCAS struct {
+	mu       sync.Mutex
+	doc      string
+	version  int
+	writes   []aclWrite
+	refuse   string // when set, the next write is refused with this 400 detail
+	refuseN  int    // how many writes to refuse
+	loseNext bool   // when set, the next write LANDS and its reply is a transport failure
+	dropNext bool   // when set, the next write is LOST before it lands, and so is its reply
+	stomp    string // when set, another writer replaces the next write right after it lands
+	fail500  bool   // when set, the next write LANDS and is answered ok:false with status 500
+}
+
+type aclWrite struct {
+	doc, base string
+	withdraw  bool
+}
+
+func (a *aclCAS) hash() string {
+	if a.doc == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(a.doc))
+	return "sha256:" + hex.EncodeToString(sum[:])[:12]
+}
+
+func (a *aclCAS) rows() string {
+	if a.doc == "" {
+		return `["default","block"],["mode","hybrid"]`
+	}
+	docJSON, _ := json.Marshal(a.doc)
+	return `["whale.acl.hash","` + a.hash() + `"],["whale.acl.version","` + itoa(a.version) + `"],` +
+		`["whale.acl.default","deny"],["whale.acl.nodes","2"],["whale.acl.clauses","3"],` +
+		`["whale.acl.document",` + string(docJSON) + `]`
+}
+
+// set installs a document directly, as another operator's out-of-band write would.
+func (a *aclCAS) set(doc string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.doc = doc
+	a.version++
+}
+
+func (a *aclCAS) current() (string, string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.doc, a.hash()
+}
+
+func (a *aclCAS) recorded() []aclWrite {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]aclWrite(nil), a.writes...)
+}
+
+// cypherStringArg reads key:'...' (or key:null) out of a Cypher map literal, undoing the
+// client's escaping, so the fake sees the document exactly as the control plane would.
+func cypherStringArg(query, key string) (val string, isNull, found bool) {
+	i := strings.Index(query, key+":")
+	if i < 0 {
+		return "", false, false
+	}
+	rest := strings.TrimLeft(query[i+len(key)+1:], " ")
+	if strings.HasPrefix(rest, "null") {
+		return "", true, true
+	}
+	if !strings.HasPrefix(rest, "'") {
+		return "", false, false
+	}
+	var b strings.Builder
+	for j := 1; j < len(rest); j++ {
+		c := rest[j]
+		if c == '\\' && j+1 < len(rest) {
+			j++
+			switch rest[j] {
+			case 'n':
+				b.WriteByte('\n')
+			case 't':
+				b.WriteByte('\t')
+			case 'r':
+				b.WriteByte('\r')
+			default:
+				b.WriteByte(rest[j])
+			}
+			continue
+		}
+		if c == '\'' {
+			return b.String(), false, true
+		}
+		b.WriteByte(c)
+	}
+	return "", false, false
 }
 
 func migrateControlServer(t *testing.T, calls *[]migrateCall) *migrateControl {
 	t.Helper()
 	var mu sync.Mutex
 	registered := map[string]string{} // label -> address
+	tags := map[string][]string{}     // label -> tags it was registered with
 	next := 1
-	ctl := &migrateControl{}
+	ctl := &migrateControl{acl: &aclCAS{}}
 	ctl.fleet = func() map[string]string {
 		mu.Lock()
 		defer mu.Unlock()
@@ -60,32 +172,133 @@ func migrateControlServer(t *testing.T, calls *[]migrateCall) *migrateControl {
 		}
 		return out
 	}
+	ctl.tagsOf = func() map[string][]string {
+		mu.Lock()
+		defer mu.Unlock()
+		out := map[string][]string{}
+		for k, v := range tags {
+			out[k] = v
+		}
+		return out
+	}
+	ctl.addAgent = func(label, addr string) {
+		mu.Lock()
+		defer mu.Unlock()
+		registered[label] = addr
+	}
+	ctl.setTags = func(label string, t []string) {
+		mu.Lock()
+		defer mu.Unlock()
+		tags[label] = t
+	}
+	ctl.hideTags = func(label string) {
+		mu.Lock()
+		defer mu.Unlock()
+		delete(tags, label)
+	}
+	tagList := regexp.MustCompile(`tags:\[([^\]]*)\]`)
 	ctl.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		defer mu.Unlock()
 		raw, _ := io.ReadAll(r.Body)
 		body := string(raw)
+		var q struct {
+			Query string `json:"query"`
+		}
+		_ = json.Unmarshal(raw, &q)
 		op := sniffOp(body)
+		if strings.Contains(q.Query, "op:'policy'") {
+			op = "policy"
+		}
 		if calls != nil {
 			*calls = append(*calls, migrateCall{op: op, body: body})
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(200)
-		switch op {
-		case "register":
+		switch {
+		case op == "register":
 			label := argFromBody(body, "label")
 			addr := "2a04:2a01:1:4::" + string(rune('a'+next-1))
 			next++
 			registered[label] = addr
+			if m := tagList.FindStringSubmatch(q.Query); m != nil {
+				for _, t := range strings.Split(m[1], ",") {
+					if t = strings.Trim(strings.TrimSpace(t), "'"); t != "" {
+						tags[label] = append(tags[label], t)
+					}
+				}
+			}
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["agent","label","address","fqdn","api_key"],` +
 				`"rows":[["ag_` + label + `","` + label + `","` + addr + `","` + label + `.t.agents.example","whisper_live_minted_` + label + `"]]}}`))
-		case "revoke":
+		case op == "revoke":
 			for label := range registered {
 				if strings.Contains(body, "ag_"+label) {
 					delete(registered, label)
+					delete(tags, label)
 				}
 			}
 			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["ok"],"rows":[[true]]}}`))
+		case op == "policy" && strings.Contains(q.Query, "whale:"):
+			a := ctl.acl
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			doc, isNull, _ := cypherStringArg(q.Query, "acl")
+			base, _, _ := cypherStringArg(q.Query, "base")
+			a.writes = append(a.writes, aclWrite{doc: doc, base: base, withdraw: isNull})
+			if a.dropNext {
+				a.dropNext = false
+				panic(http.ErrAbortHandler) // lost in flight: nothing landed
+			}
+			if a.refuseN > 0 {
+				a.refuseN--
+				_, _ = w.Write([]byte(`{"ok":false,"status":400,"result":null,"error":{"code":"BAD_ARGS","status":400,` +
+					`"detail":` + strconvQuote(a.refuse) + `}}`))
+				return
+			}
+			if a.doc != "" && base != a.hash() {
+				_, _ = w.Write([]byte(`{"ok":false,"status":409,"result":null,"error":{"code":"CONFLICT","status":409,` +
+					`"detail":"the WhaleACL in force is ` + a.hash() + `, not ` + base + `"}}`))
+				return
+			}
+			if isNull {
+				a.doc = ""
+			} else {
+				a.doc = doc
+			}
+			a.version++
+			if a.stomp != "" {
+				a.doc, a.stomp = a.stomp, ""
+				a.version++
+			}
+			if a.fail500 {
+				a.fail500 = false
+				_, _ = w.Write([]byte(`{"ok":false,"status":500,"result":null,"error":{"code":"INTERNAL","status":500,` +
+					`"detail":"internal error"}}`))
+				return
+			}
+			if a.loseNext {
+				a.loseNext = false
+				panic(http.ErrAbortHandler) // the write landed; the reply never arrives
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["key","value"],"rows":[` + a.rows() + `]}}`))
+		case op == "policy":
+			ctl.acl.mu.Lock()
+			rows := ctl.acl.rows()
+			ctl.acl.mu.Unlock()
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["key","value"],"rows":[` + rows + `]}}`))
+		case strings.Contains(q.Query, "kind:'whale'"):
+			// Like the server: only a node registered with whale settings has a row.
+			var rows []string
+			for label, ts := range tags {
+				quoted := make([]string, len(ts))
+				for i, t := range ts {
+					quoted[i] = `"` + t + `"`
+				}
+				rows = append(rows, `["whale",{"agent":"ag_`+label+`","address":"`+registered[label]+
+					`","tags":[`+strings.Join(quoted, ",")+`]}]`)
+			}
+			_, _ = w.Write([]byte(`{"ok":true,"status":200,"result":{"columns":["kind","item"],"rows":[` +
+				strings.Join(rows, ",") + `]}}`))
 		default: // list
 			var rows []string
 			for label, addr := range registered {
@@ -97,6 +310,11 @@ func migrateControlServer(t *testing.T, calls *[]migrateCall) *migrateControl {
 		}
 	}))
 	return ctl
+}
+
+func strconvQuote(s string) string {
+	b, _ := json.Marshal(s)
+	return string(b)
 }
 
 // argFromBody digs one string argument out of the Cypher literal the client sends.
@@ -123,9 +341,16 @@ func argFromBody(body, key string) string {
 // tests exercise the same artifact `plan` produces rather than a hand-written stand-in.
 func writeTestPlan(t *testing.T, dir string, widening bool) string {
 	t.Helper()
-	policy := `{"acls":[{"action":"accept","src":["group:eng"],"dst":["tag:prod:443"]}]}`
+	// group:eng is alice, whose laptop is web-01; db-01 is the tagged server. The ssh rule
+	// and their own tests block ride along so every part of the document is exercised.
+	policy := `{"groups":{"group:eng":["alice@example.com"]},
+	  "acls":[{"action":"accept","src":["group:eng"],"dst":["tag:prod:443"]}],
+	  "ssh":[{"action":"accept","src":["group:eng"],"dst":["tag:prod"],"users":["ubuntu"]}],
+	  "tests":[{"src":"alice@example.com","accept":["tag:prod:443"],"deny":["tag:prod:22"]}]}`
 	if widening {
-		policy = `{"acls":[{"action":"accept","src":["group:eng"],"dst":["mail.corp.example:25"]}]}`
+		policy = `{"groups":{"group:eng":["alice@example.com"]},
+	  "acls":[{"action":"accept","src":["group:eng"],"dst":["tag:prod:443"]},
+	          {"action":"accept","src":["group:eng"],"dst":["mail.corp.example:25"]}]}`
 	}
 	pol, lines, err := whale.ParsePolicy([]byte(policy))
 	if err != nil {
@@ -134,8 +359,8 @@ func writeTestPlan(t *testing.T, dir string, widening bool) string {
 	tn := &whale.Tailnet{
 		Name: "example.com", Policy: pol, PolicyLines: lines,
 		Devices: []whale.TSDevice{
-			{ID: "d1", Hostname: "db-01", Name: "db-01.tail1234.ts.net", Addresses: []string{"100.64.0.9"}},
-			{ID: "d2", Hostname: "web-01", Name: "web-01.tail1234.ts.net", Addresses: []string{"100.64.0.10"}},
+			{ID: "d1", Hostname: "db-01", Name: "db-01.tail1234.ts.net", Addresses: []string{"100.64.0.9"}, Tags: []string{"tag:prod"}},
+			{ID: "d2", Hostname: "web-01", Name: "web-01.tail1234.ts.net", Addresses: []string{"100.64.0.10"}, User: "alice@example.com"},
 		},
 	}
 	p, err := whale.BuildPlan(tn, whale.BuildOptions{
@@ -234,9 +459,12 @@ func TestApplyIsIdempotentAndMintsNoSecondIdentity(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The second apply adds NO receipt, because it did nothing: a step already recorded
-	// as applied is skipped before any call is made.
-	if len(p.Receipts) != 2 {
-		t.Fatalf("expected exactly the 2 receipts of the first apply, got %d", len(p.Receipts))
+	// as applied is skipped before any call is made. Two identities and one WhaleACL.
+	if len(p.Receipts) != 3 {
+		t.Fatalf("expected exactly the 3 receipts of the first apply, got %d", len(p.Receipts))
+	}
+	if n := len(srv.acl.recorded()); n != 1 {
+		t.Fatalf("two applies made %d WhaleACL writes; the second must find its own document in force and write nothing", n)
 	}
 	for _, r := range p.Receipts {
 		if !r.Applied() {
@@ -312,7 +540,7 @@ func TestRollbackUndoesInReverseReceiptOrder(t *testing.T) {
 	before, _ := whale.LoadPlan(plan)
 	var order []int
 	for _, r := range before.Receipts {
-		if r.Applied() {
+		if r.Applied() && r.Step == stepIdentity {
 			order = append(order, r.Seq)
 		}
 	}
@@ -755,7 +983,9 @@ func TestRollbackDoesNotRevokeAPreExistingIdentity(t *testing.T) {
 		t.Fatalf("first apply: %v", err)
 	}
 	second := writeTestPlan(t, t.TempDir(), false)
-	if _, _, err := runWhale(t, "whale", "migrate", "apply", "-f", second); err != nil {
+	// --skip-acl: this test is about identities. The first plan's WhaleACL is in force, and
+	// a second plan publishing over it is refused unless --replace-acl, which has its own test.
+	if _, _, err := runWhale(t, "whale", "migrate", "apply", "-f", second, "--skip-acl"); err != nil {
 		t.Fatalf("second plan apply: %v", err)
 	}
 	p, err := whale.LoadPlan(second)

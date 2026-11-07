@@ -395,7 +395,18 @@ func runResolver(o resolverOpts) error {
 	st.OS, st.Mode = osName, string(r.Mode)
 	st.AppliedAt = time.Now().UTC().Format(time.RFC3339)
 	saveResolverState(st)
-	renderResolverApplied(r)
+	// Applied is not the same as in effect: another configuration can
+	// keep lookups away from the server we just wrote. Where the applier can
+	// prove the route, the success line is printed only for a proven one.
+	var route *resolverprofile.RouteCheck
+	if v, ok := ap.(resolverprofile.RouteVerifier); ok {
+		rc := v.VerifyRoute(r)
+		route = &rc
+	}
+	renderResolverApplied(r, route)
+	if route != nil && route.State == resolverprofile.RouteShadowed {
+		return fmt.Errorf("the Tier-2 DNS configuration is written but NOT in effect: lookups do not all reach %s (details above; undo with `whisper resolver --off`)", route.Want)
+	}
 	return nil
 }
 
@@ -656,10 +667,36 @@ func renderResolverPlan(r resolverprofile.Rendered, applied bool, script string)
 	}
 }
 
-// renderResolverApplied reports a successful apply.
-func renderResolverApplied(r resolverprofile.Rendered) {
+// routeJSON is the scriptable form of a route check.
+func routeJSON(rc *resolverprofile.RouteCheck) map[string]any {
+	state := "unverified"
+	switch rc.State {
+	case resolverprofile.RouteOurs:
+		state = "verified"
+	case resolverprofile.RouteShadowed:
+		state = "shadowed"
+	}
+	m := map[string]any{"state": state, "want": rc.Want}
+	if len(rc.Problems) > 0 {
+		m["problems"] = rc.Problems
+	}
+	if rc.Unread != "" {
+		m["unread"] = rc.Unread
+	}
+	return m
+}
+
+// renderResolverApplied reports an apply and, when the applier could check it,
+// where lookups actually go. "Now resolves through Whisper" is printed only
+// when that was proven, or on an OS whose applier has no route check (there
+// the OS itself owns the routing: NRPT on Windows, the profile on macOS).
+func renderResolverApplied(r resolverprofile.Rendered, route *resolverprofile.RouteCheck) {
 	if g.jsonOut {
-		emitJSONValue(resolverPlanJSON(r, true, ""))
+		m := resolverPlanJSON(r, true, "")
+		if route != nil {
+			m["route"] = routeJSON(route)
+		}
+		emitJSONValue(m)
 		return
 	}
 	if g.quiet {
@@ -672,7 +709,21 @@ func renderResolverApplied(r resolverprofile.Rendered) {
 	if r.Mode == resolverprofile.ModeDNS53 {
 		what = "your dedicated :53 resolver"
 	}
-	fmt.Fprintf(os.Stderr, "whisper: Tier-2 DNS applied - this machine now resolves through Whisper (%s)\n", what)
+	switch {
+	case route == nil || route.State == resolverprofile.RouteOurs:
+		fmt.Fprintf(os.Stderr, "whisper: Tier-2 DNS applied - this machine now resolves through Whisper (%s)\n", what)
+		if route != nil {
+			fmt.Fprintf(os.Stderr, "  verified  every lookup goes to %s\n", route.Want)
+		}
+	case route.State == resolverprofile.RouteShadowed:
+		fmt.Fprintf(os.Stderr, "whisper: Tier-2 DNS written, but this machine does NOT resolve only through Whisper yet (%s)\n", what)
+		for _, p := range route.Problems {
+			fmt.Fprintf(os.Stderr, "  shadowed  %s\n", p)
+		}
+	default:
+		fmt.Fprintf(os.Stderr, "whisper: Tier-2 DNS applied (%s), but where lookups go could not be confirmed: %s\n", what, route.Unread)
+		fmt.Fprintln(os.Stderr, "  check     resolvectl status (the Global \"Current DNS Server\" should be the resolver below)")
+	}
 	if r.DoHURL != "" {
 		fmt.Fprintf(os.Stderr, "  doh url   %s\n", r.DoHURL)
 	}

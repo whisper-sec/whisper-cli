@@ -4,6 +4,8 @@
 package cli
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"os"
 	"sort"
@@ -233,6 +235,7 @@ func shortHash(h string) string {
 func newWhaleMigrateApplyCmd() *cobra.Command {
 	var planPath, keysOut string
 	var acceptWidening, dryRun bool
+	var acl aclOptions
 	cmd := &cobra.Command{
 		Use:   "apply",
 		Short: "Write the plan into Whisper. Idempotent and resumable",
@@ -246,7 +249,14 @@ func newWhaleMigrateApplyCmd() *cobra.Command {
 			"Nodes are allocated and named UP FRONT, before any node joins, because a node's\n" +
 			"canonical name is a pure function of its address and the address is drawn at random\n" +
 			"inside your /64: a node that joins first and is named afterwards has already published\n" +
-			"a random name.",
+			"a random name. Each node is registered with its tags.\n\n" +
+			"Then their rules are published as ONE WhaleACL, rewritten onto the new /128s, with their\n" +
+			"own tests and one per rule run by the control plane before it stores a byte. Anything that\n" +
+			"does not carry is narrower than their policy, never broader, and is listed. The document\n" +
+			"governs every agent in the account, so apply stops and asks (--accept-fleet-wide) when the\n" +
+			"account holds agents this plan does not, and it will not publish over a document it did\n" +
+			"not write unless you say --replace-acl (rollback puts that one back). Publishing takes\n" +
+			"`dns:whale:write`; --skip-acl writes the identities alone.",
 		Args: cobraNoArgs,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			p, err := whale.LoadPlan(planPath)
@@ -262,6 +272,11 @@ func newWhaleMigrateApplyCmd() *cobra.Command {
 			if p.HasWidening() && !acceptWidening && !p.AcceptedWidening {
 				return wideningRefusal(p, planPath)
 			}
+			// Before anything is written: a tag this control plane cannot hold would be refused
+			// halfway through the run, and two that differ only in case would merge.
+			if err := whale.ValidatePlanTags(p); err != nil {
+				return &client.ProblemError{Status: 422, Title: "tags", Detail: err.Error()}
+			}
 			if acceptWidening && !p.AcceptedWidening {
 				p.AcceptedWidening = true
 				p.AcceptedWideningAt = time.Now().UTC().Format(time.RFC3339)
@@ -274,7 +289,7 @@ func newWhaleMigrateApplyCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runMigrateApply(c, p, planPath, keysOut)
+			return runMigrateApply(c, p, planPath, keysOut, acl)
 		},
 	}
 	cmd.Flags().StringVarP(&planPath, "file", "f", migratePlanDefault, "the plan to apply")
@@ -283,6 +298,12 @@ func newWhaleMigrateApplyCmd() *cobra.Command {
 	cmd.Flags().StringVar(&keysOut, "keys-out", "",
 		"write each new agent's API key to this file, readable only by you (default: the key is not retained anywhere)")
 	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "print the writes this apply would make, and make none")
+	cmd.Flags().BoolVar(&acl.skip, "skip-acl", false, "write the identities only; publish no WhaleACL")
+	cmd.Flags().BoolVar(&acl.replace, "replace-acl", false,
+		"publish over a WhaleACL this plan did not write (rollback restores it)")
+	cmd.Flags().BoolVar(&acl.acceptFleetWide, "accept-fleet-wide", false,
+		"publish even though the account holds agents outside this plan: the document governs them too, and one "+
+			"carrying a tag the plan's rules name takes that tag's grants")
 	return cmd
 }
 
@@ -341,11 +362,37 @@ func renderApplyDryRun(p *whale.Plan) {
 	}
 	printTable([]string{"LABEL", "THEIR NODE", "WOULD DO"}, rows)
 	whaleNote("%d identity write(s). Nothing was written: this was --dry-run.", len(p.Nodes))
+
+	addrs, _ := planAddresses(p)
+	if len(addrs) < len(p.Nodes) {
+		whaleNote("the WhaleACL names every node by its /128, so it is built once the identities exist: " +
+			"run apply --skip-acl, then --dry-run again to read the document before it is published")
+		return
+	}
+	b, err := whale.BuildMigrationACL(p, addrs)
+	if err != nil {
+		whaleNote("the WhaleACL could not be built: %s", err)
+		if b != nil {
+			for _, d := range b.Dropped {
+				whaleNote("  - %s", d)
+			}
+		}
+		return
+	}
+	fmt.Fprintln(os.Stdout)
+	whaleNote("the WhaleACL it would publish (%d grants, %d ssh rules, %d tests):", b.Grants, b.SSHRules, b.Tests)
+	var pretty bytes.Buffer
+	if json.Indent(&pretty, b.Document, "", "  ") == nil {
+		fmt.Fprintln(os.Stdout, pretty.String())
+	} else {
+		fmt.Fprintln(os.Stdout, string(b.Document))
+	}
+	renderACLOutcome(aclOutcome{State: "would publish", Notes: b.Notes, Dropped: b.Dropped}, "")
 }
 
 // runMigrateApply walks the plan in order, verifying each step against what is live before
 // it writes, and saving the plan after every receipt so an interrupted run is resumable.
-func runMigrateApply(c *client.Client, p *whale.Plan, planPath, keysOut string) error {
+func runMigrateApply(c *client.Client, p *whale.Plan, planPath, keysOut string, aclOpt aclOptions) error {
 	applied, existing, refused := 0, 0, 0
 
 	// The fleet is read ONCE, before anything is written, and a read that FAILS stops the
@@ -384,8 +431,14 @@ func runMigrateApply(c *client.Client, p *whale.Plan, planPath, keysOut string) 
 			continue
 		}
 
+		args := map[string]any{"label": n.Label}
+		// The node's tags ride its register, because a rule naming tag:prod selects the
+		// nodes whose CREDENTIAL carries it, and that is fixed when the key is minted.
+		if tags := whale.NodeTags(n); len(tags) > 0 {
+			args["whale"] = map[string]any{"v": whaleIntentVersion, "tags": tags}
+		}
 		rcx, rcancel := ctx()
-		env, err := c.Agents(rcx, "register", map[string]any{"label": n.Label})
+		env, err := c.Agents(rcx, "register", args)
 		rcancel()
 		if err != nil {
 			p.Record(whale.Receipt{Step: stepIdentity, Subject: n.TailscaleID, Result: whale.ResultRefused,
@@ -418,12 +471,27 @@ func runMigrateApply(c *client.Client, p *whale.Plan, planPath, keysOut string) 
 		}
 	}
 
+	// The ACL half, once every node has its identity: a document naming a node with no /128
+	// cannot be built, and one published over a half-registered fleet would govern a fleet
+	// that does not exist yet.
+	var aclOut aclOutcome
+	var aclErr error
+	switch {
+	case aclOpt.skip:
+		aclOut.State = "skipped"
+	case refused > 0:
+		aclOut.State = "skipped"
+		aclOut.Detail = "the WhaleACL was not attempted: it is published once every node has its identity"
+	default:
+		aclOut, aclErr = runMigrateACL(c, p, planPath, peers, aclOpt)
+	}
+
 	if g.jsonOut {
 		emitJSONValue(map[string]any{
 			"plan": planPath, "applied": applied, "existing": existing, "refused": refused,
-			"receipts": p.Receipts,
+			"acl": aclOut, "receipts": p.Receipts,
 		})
-		return nil
+		return aclErr
 	}
 	rows := [][]string{
 		{"minted", fmt.Sprintf("%d", applied)},
@@ -438,6 +506,13 @@ func runMigrateApply(c *client.Client, p *whale.Plan, planPath, keysOut string) 
 	}
 	whaleNote("receipts are in %s. `whisper whale migrate status -f %s` shows drift; "+
 		"`... rollback -f %s` undoes this in reverse.", planPath, planPath, planPath)
+	renderACLOutcome(aclOut, planPath)
+	if aclOut.Detail != "" && aclOut.State == "skipped" {
+		whaleNote("%s", aclOut.Detail)
+	}
+	if aclErr != nil {
+		return aclErr
+	}
 	if refused > 0 {
 		return &client.ProblemError{Status: 207, Title: "partly applied", Detail: fmt.Sprintf(
 			"%d of %d identity writes were refused by the control plane. They are recorded in %s with the reason; "+
@@ -538,6 +613,10 @@ func newWhaleMigrateStatusCmd() *cobra.Command {
 						"unread one and will not guess", friendly(perr))}
 			}
 			view := migrateStatusView(p, peers, hashErr)
+			acx, acancel := ctx()
+			live, _, aerr := readWhaleACL(acx, c)
+			acancel()
+			view.ACL, view.ACLDetail = aclStatus(p, live, aerr)
 			if g.jsonOut {
 				emitJSONValue(view)
 				return nil
@@ -566,6 +645,10 @@ type migrateStatusReport struct {
 	Counts   map[string]int     `json:"counts"`
 	Widening int                `json:"widening_rules"`
 	Accepted bool               `json:"widening_accepted"`
+	// ACL is the WhaleACL step: live, drifted, withdrawn, pending, refused, not applied, or
+	// unread (a failed read is never reported as an absent document).
+	ACL       string `json:"acl,omitempty"`
+	ACLDetail string `json:"acl_detail,omitempty"`
 }
 
 // migrateStatusView is pure, so the drift logic is testable with no client at all.
@@ -634,6 +717,13 @@ func renderMigrateStatus(rep migrateStatusReport, path string) {
 			whaleNote("%s: %s", r.Label, r.Detail)
 		}
 	}
+	if rep.ACL != "" {
+		line := "WhaleACL: " + rep.ACL
+		if rep.ACLDetail != "" {
+			line += " (" + rep.ACLDetail + ")"
+		}
+		whaleNote("%s", line)
+	}
 	_ = path
 }
 
@@ -695,6 +785,10 @@ func newWhaleMigrateRollbackCmd() *cobra.Command {
 			"Only steps this plan actually applied are undone, and each one is marked as rolled\n" +
 			"back in the plan file as it happens, so an interrupted rollback resumes correctly and\n" +
 			"never undoes the same thing twice.\n\n" +
+			"The WhaleACL goes first: the document this plan replaced is restored, or the one it\n" +
+			"published is withdrawn when there was none before. Both name the hash this plan\n" +
+			"published, so somebody's later edit is never overwritten. If the ACL cannot be undone,\n" +
+			"no identity is revoked, because a document must not outlive the /128s it names.\n\n" +
 			"This revokes identities. It is not reversible by re-running apply: a re-applied node\n" +
 			"gets a NEW random /128 and therefore a new canonical name.",
 		Args: cobraNoArgs,
@@ -703,20 +797,29 @@ func newWhaleMigrateRollbackCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			var undoable []whale.Receipt
+			var aclUndo, idUndo []whale.Receipt
 			for _, r := range p.Receipts {
-				if r.Applied() && r.Undo != nil {
-					undoable = append(undoable, r)
+				switch {
+				case r.Undo == nil || r.RolledBackAt != "":
+				case r.Step == stepACL && (r.Result == whale.ResultApplied || r.Result == whale.ResultPending):
+					// A pending one may have landed with its reply lost; rollbackACL reads and decides.
+					aclUndo = append(aclUndo, r)
+				case r.Step != stepACL && r.Applied():
+					idUndo = append(idUndo, r)
 				}
 			}
-			if len(undoable) == 0 {
+			if len(aclUndo)+len(idUndo) == 0 {
 				whaleNote("nothing to roll back: this plan has no applied step with an undo recorded.")
 				return nil
 			}
 			if !yes && isInteractive() {
-				fmt.Fprintf(os.Stderr, "whisper: this revokes %d identity/identities recorded in %s. "+
+				what := fmt.Sprintf("revokes %d identity/identities", len(idUndo))
+				if len(aclUndo) > 0 {
+					what = "undoes the WhaleACL this plan published and " + what
+				}
+				fmt.Fprintf(os.Stderr, "whisper: this %s recorded in %s. "+
 					"A re-applied node gets a NEW address and a new name. Re-run with --yes to proceed.\n",
-					len(undoable), planPath)
+					what, planPath)
 				return &client.ProblemError{Status: 400, Title: "not confirmed",
 					Detail: "rollback needs --yes, because revoking an identity cannot be undone by re-applying"}
 			}
@@ -724,7 +827,7 @@ func newWhaleMigrateRollbackCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			return runMigrateRollback(c, p, planPath, undoable)
+			return runMigrateRollback(c, p, planPath, aclUndo, idUndo)
 		},
 	}
 	cmd.Flags().StringVarP(&planPath, "file", "f", migratePlanDefault, "the plan to roll back")
@@ -732,10 +835,37 @@ func newWhaleMigrateRollbackCmd() *cobra.Command {
 	return cmd
 }
 
-func runMigrateRollback(c *client.Client, p *whale.Plan, planPath string, undoable []whale.Receipt) error {
+func runMigrateRollback(c *client.Client, p *whale.Plan, planPath string, aclUndo, undoable []whale.Receipt) error {
+	done, failed := 0, 0
+	// The WhaleACL first, whatever its sequence number: it names the identities, so they may
+	// only go once it no longer does.
+	sort.Slice(aclUndo, func(i, j int) bool { return aclUndo[i].Seq > aclUndo[j].Seq })
+	var aclFailures []string
+	for _, r := range aclUndo {
+		ok, err := rollbackACL(c, p, planPath, r)
+		if !ok {
+			failed++
+			reason := "rollback failed: " + err.Error()
+			markACLReceipt(p, r.Seq, func(x *whale.Receipt) { x.Detail = reason })
+			aclFailures = append(aclFailures, err.Error())
+		} else {
+			done++
+		}
+		if serr := whale.SavePlan(planPath, p); serr != nil {
+			return serr
+		}
+	}
+	if len(aclFailures) > 0 {
+		if g.jsonOut {
+			emitJSONValue(map[string]any{"rolled_back": done, "failed": failed, "plan": planPath})
+		}
+		return &client.ProblemError{Status: 409, Title: "ACL not rolled back", Detail: "the WhaleACL could not be " +
+			"undone, so no identity was revoked: a document must not keep naming /128s that no longer belong to you. " +
+			strings.Join(aclFailures, "; ") + ". Re-running rollback retries it"}
+	}
+
 	// Reverse receipt order: the last thing done is the first thing undone.
 	sort.Slice(undoable, func(i, j int) bool { return undoable[i].Seq > undoable[j].Seq })
-	done, failed := 0, 0
 	for _, r := range undoable {
 		cx, cancel := ctx()
 		env, err := c.Agents(cx, r.Undo.Op, r.Undo.Args)

@@ -38,6 +38,8 @@ var (
 	linuxStat     = os.Stat
 	linuxDial     = net.DialTimeout
 	linuxSleep    = time.Sleep
+	linuxReadFile = os.ReadFile
+	linuxGlob     = filepath.Glob
 )
 
 func init() { Register("linux", linuxApplier{}) }
@@ -115,6 +117,114 @@ func (a linuxApplier) Apply(r Rendered) error {
 }
 
 func (a linuxApplier) Revert(r Rendered) error { return a.run(r.Revert) }
+
+// resolvedConfDirs are every directory systemd-resolved reads drop-ins from;
+// a file in any of them takes its place in one order by file name.
+var resolvedConfDirs = []string{
+	"/etc/systemd/resolved.conf.d",
+	"/run/systemd/resolved.conf.d",
+	"/usr/local/lib/systemd/resolved.conf.d",
+	"/usr/lib/systemd/resolved.conf.d",
+}
+
+// VerifyRoute proves where this machine's lookups go after Apply: the
+// resolver answering is not enough, it has to be OUR resolver. Every read is
+// unprivileged. A read that fails yields RouteUnknown, never a pass.
+func (linuxApplier) VerifyRoute(r Rendered) RouteCheck {
+	want := r.ResolverIP
+	if r.Mode == ModeDoH {
+		want = LinuxLoopback
+	}
+	var dropIn, resolvConf *FileSpec
+	for _, s := range r.Apply {
+		if s.File != nil && s.File.Path == LinuxDropIn {
+			dropIn = s.File
+		}
+		if s.File != nil && s.File.Path == LinuxResolvConf {
+			resolvConf = s.File
+		}
+	}
+	switch {
+	case want == "":
+		return RouteCheck{Unread: "the plan names no resolver address"}
+	case dropIn != nil:
+		return verifyResolved(want, dropInRoutesAll(dropIn.Content))
+	case resolvConf != nil:
+		b, err := linuxReadFile(LinuxResolvConf)
+		if err != nil {
+			return RouteCheck{Want: want, Unread: "reading " + LinuxResolvConf + ": " + err.Error()}
+		}
+		return CheckResolvConf(want, string(b))
+	}
+	return RouteCheck{Want: want, Unread: "the plan writes neither the resolved drop-in nor " + LinuxResolvConf}
+}
+
+// dropInRoutesAll reports whether our drop-in routes every name ("~.").
+func dropInRoutesAll(content string) bool {
+	for _, line := range strings.Split(content, "\n") {
+		if v, ok := strings.CutPrefix(line, "Domains="); ok {
+			for _, d := range strings.Fields(v) {
+				if d == "~." {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// verifyResolved reads systemd-resolved's own view. resolved was restarted a
+// moment ago and may not answer on D-Bus yet, so the read is retried, bounded:
+// 3 tries, 1s apart.
+func verifyResolved(want string, matchAll bool) RouteCheck {
+	var ev ResolvedEvidence
+	var err error
+	for i := 0; i < 3; i++ {
+		if i > 0 {
+			linuxSleep(time.Second)
+		}
+		if ev.DNS, err = linuxRunOut([]string{"resolvectl", "dns"}); err == nil {
+			if _, scopes := resolvedScopes(ev.DNS); len(scopes["Global"]) > 0 {
+				break
+			}
+		}
+	}
+	if err != nil {
+		return RouteCheck{Want: want, Unread: "resolvectl dns: " + err.Error()}
+	}
+	if ev.Domain, err = linuxRunOut([]string{"resolvectl", "domain"}); err != nil {
+		return RouteCheck{Want: want, Unread: "resolvectl domain: " + err.Error()}
+	}
+	if ev.Status, err = linuxRunOut([]string{"resolvectl", "status"}); err != nil {
+		return RouteCheck{Want: want, Unread: "resolvectl status: " + err.Error()}
+	}
+	// resolv.conf and the config files only sharpen the diagnosis or add the
+	// bypass check; an unreadable one is skipped, it never decides a pass.
+	if b, rerr := linuxReadFile(LinuxResolvConf); rerr == nil {
+		ev.ResolvConf = string(b)
+	}
+	paths := []string{"/etc/systemd/resolved.conf"}
+	for _, d := range resolvedConfDirs {
+		if m, gerr := linuxGlob(filepath.Join(d, "*.conf")); gerr == nil {
+			paths = append(paths, m...)
+		}
+	}
+	// A drop-in in /etc masks one of the same name further down the list, as
+	// it does for systemd itself, so only the first of each name counts.
+	seen := map[string]bool{}
+	for _, p := range paths {
+		if base := filepath.Base(p); p != "/etc/systemd/resolved.conf" {
+			if seen[base] {
+				continue
+			}
+			seen[base] = true
+		}
+		if b, rerr := linuxReadFile(p); rerr == nil {
+			ev.Confs = append(ev.Confs, ConfFile{Path: p, Content: string(b)})
+		}
+	}
+	return CheckResolved(want, matchAll, ev)
+}
 
 // run executes steps in order, honouring the presence guards. Any step failure
 // stops the plan with a clear error (the ordering guarantees DNS is never left

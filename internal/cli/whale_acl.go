@@ -481,16 +481,7 @@ func resolveACLBase(cx context.Context, c *client.Client, base string, force boo
 // is the point: a document can compile to something far broader or far narrower than its
 // author intended, and a note about that is worthless if you have to go looking for it.
 func writeWhaleACL(cx context.Context, c *client.Client, doc, base string) error {
-	intent := map[string]any{}
-	if doc == "" {
-		intent["acl"] = nil
-	} else {
-		intent["acl"] = doc
-	}
-	if base != "" {
-		intent["base"] = base
-	}
-	env, err := c.Agents(cx, "policy", map[string]any{"whale": intent})
+	env, err := publishWhaleACL(cx, c, doc, base)
 	if err != nil {
 		return err
 	}
@@ -510,6 +501,23 @@ func writeWhaleACL(cx context.Context, c *client.Client, doc, base string) error
 			"puts it back.", orVal(s.Nodes, "0"))
 	}
 	return nil
+}
+
+// publishWhaleACL is the one request that writes a WhaleACL: the document (or "" to
+// withdraw it) with the compare-and-set base it replaces ("" when nothing is in force).
+// `whale acl set`/`withdraw` render its reply; `whale migrate apply` and `rollback` read the
+// hash out of it for their receipts. One request shape, so the two can never drift apart.
+func publishWhaleACL(cx context.Context, c *client.Client, doc, base string) (*client.Envelope, error) {
+	intent := map[string]any{}
+	if doc == "" {
+		intent["acl"] = nil
+	} else {
+		intent["acl"] = doc
+	}
+	if base != "" {
+		intent["base"] = base
+	}
+	return c.Agents(cx, "policy", map[string]any{"whale": intent})
 }
 
 // --- withdraw ---------------------------------------------------------------------

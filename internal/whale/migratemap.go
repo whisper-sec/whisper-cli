@@ -114,6 +114,7 @@ func BuildPlan(t *Tailnet, opts BuildOptions) (*Plan, error) {
 	}
 
 	mapNodes(t, p)
+	carryGroupsAndHosts(t, p)
 	hostAddrs := mapHosts(t, p)
 	mapGroups(t, p)
 	mapRules(t, p, target, hostAddrs)
@@ -278,6 +279,32 @@ func uniqueLabel(base, id string, used map[string]string) string {
 }
 
 // --- hosts, groups -------------------------------------------------------------------
+
+// carryGroupsAndHosts copies their declared groups, `hosts` aliases and `tests` into the plan
+// verbatim, because the WhaleACL `apply` publishes is built from the plan alone and
+// a rule that names group:eng is meaningless without eng's members. Copies, so the plan
+// never aliases the parsed policy.
+func carryGroupsAndHosts(t *Tailnet, p *Plan) {
+	if len(t.Policy.Groups) > 0 {
+		p.Groups = make(map[string][]string, len(t.Policy.Groups))
+		for g, members := range t.Policy.Groups {
+			p.Groups[g] = append([]string{}, members...)
+		}
+	}
+	for _, tc := range t.Policy.Tests {
+		c := make(map[string]any, len(tc))
+		for k, v := range tc {
+			c[k] = v
+		}
+		p.Tests = append(p.Tests, c)
+	}
+	if len(t.Policy.Hosts) > 0 {
+		p.Hosts = make(map[string]string, len(t.Policy.Hosts))
+		for alias, v := range t.Policy.Hosts {
+			p.Hosts[alias] = strings.TrimSpace(v)
+		}
+	}
+}
 
 // mapHosts records their `hosts` aliases and returns the alias-to-address map the rule
 // mapper uses to tell a resolvable alias (an IP dimension) from a bare name (a HOST
@@ -757,11 +784,18 @@ func mapLeftovers(t *Tailnet, p *Plan) {
 			Detail: "auto-approval of routes and exit nodes has nothing to approve here: subnet routes do not carry over",
 		})
 	}
-	if n := len(t.Policy.Tests) + len(t.Policy.SSHTests); n > 0 {
+	if n := len(t.Policy.Tests); n > 0 {
 		p.Fidelity = append(p.Fidelity, Fidelity{
-			Kind: "tests", Subject: fmt.Sprintf("%d tests", n), Class: ClassUnmapped, Plane: PlaneControl,
-			Detail: "their ACL tests do not carry over as written. The WhaleACL document has its own mandatory tests block, and " +
-				"a failing test rejects the write, so re-express them there",
+			Kind: "tests", Subject: fmt.Sprintf("%d tests", n), Class: ClassApprox, Plane: PlaneControl,
+			Detail: "their ACL tests are translated into the WhaleACL's own tests block, which the control plane runs before " +
+				"it stores the document, so a translation that admits what their deny assertions refuse is itself refused. " +
+				"An assertion whose source or target does not carry is dropped and listed when `apply` builds the document",
+		})
+	}
+	if n := len(t.Policy.SSHTests); n > 0 {
+		p.Fidelity = append(p.Fidelity, Fidelity{
+			Kind: "sshTests", Subject: fmt.Sprintf("%d sshTests", n), Class: ClassUnmapped, Plane: PlaneControl,
+			Detail: "their sshTests do not carry over. The WhaleACL tests block asks about a login with `user`; re-express them there",
 		})
 	}
 	for _, section := range t.Policy.ExtraSections() {

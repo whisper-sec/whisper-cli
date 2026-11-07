@@ -183,6 +183,43 @@ function Invoke-WhisperPgpCheck {
 }
 # <<< pgp-layer
 
+# --- the user Path, read and written as the registry holds it ----------------
+# [Environment]::GetEnvironmentVariable('Path', 'User') hands back the value with every
+# %VAR% already expanded, and SetEnvironmentVariable writes it back as REG_SZ. So one
+# install used to freeze a stock REG_EXPAND_SZ Path (%USERPROFILE%\AppData\Local\Microsoft\
+# WindowsApps;) into literal paths and change its type, and an entry an admin wrote as
+# %JAVA_HOME%\bin stopped following JAVA_HOME. This reads the raw text with
+# DoNotExpandEnvironmentNames, appends one entry, and writes it back with the kind it had,
+# so every byte we did not add is left as it was. A value that ended with ';' keeps its
+# trailing ';' after our entry, which is what lets uninstall.ps1 restore it exactly.
+# Returns 'added', 'present', 'foreign' (the value is not text, so we leave it alone) or
+# 'unsupported' (not Windows). $SubKey is under HKCU; the tests point it at a scratch key.
+function Add-WhisperUserPath {
+    param([string]$Dir, [string]$SubKey = 'Environment')
+    if ([Environment]::OSVersion.Platform -ne [PlatformID]::Win32NT) { return 'unsupported' }
+    $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey($SubKey)
+    try {
+        $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString
+        $raw  = ''
+        if ($key.GetValueNames() -contains 'Path') {
+            $kind = $key.GetValueKind('Path')
+            if ($kind -ne [Microsoft.Win32.RegistryValueKind]::String -and $kind -ne [Microsoft.Win32.RegistryValueKind]::ExpandString) { return 'foreign' }
+            $raw = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+        }
+        $want = $Dir.TrimEnd('\')
+        foreach ($p in ($raw -split ';')) {
+            if ($p -eq '') { continue }
+            # Liberal in what we accept: %LOCALAPPDATA%\Whisper\bin is the same entry.
+            if ($p.TrimEnd('\') -ieq $want -or [Environment]::ExpandEnvironmentVariables($p).TrimEnd('\') -ieq $want) { return 'present' }
+        }
+        $new = if ($raw -eq '') { $Dir } elseif ($raw.EndsWith(';')) { "$raw$Dir;" } else { "$raw;$Dir" }
+        $key.SetValue('Path', $new, $kind)
+        return 'added'
+    } finally {
+        $key.Close()
+    }
+}
+
 try {
     Say 'installing…'
 
@@ -289,16 +326,14 @@ try {
     # --- THE PATH FIX (Windows): append %LOCALAPPDATA%\Whisper\bin to the USER Path
     # (no admin), idempotently + deduped; broadcast WM_SETTINGCHANGE so NEW processes
     # see it; set the CURRENT process Path so the immediate `whisper` below works.
-    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
-    if (-not $userPath) { $userPath = '' }
-    $parts = $userPath -split ';' | Where-Object { $_ -ne '' }
-    $already = $false
-    foreach ($p in $parts) {
-        if ($p.TrimEnd('\') -ieq $destDir.TrimEnd('\')) { $already = $true; break }
+    # The value keeps its registry kind and its unexpanded %VARS% (Add-WhisperUserPath).
+    $pathEdit = try { Add-WhisperUserPath -Dir $destDir } catch { 'failed' }
+    if ($pathEdit -eq 'foreign') {
+        Say "your user PATH is not a text value, so it was left as it is - add $destDir to it by hand"
+    } elseif ($pathEdit -eq 'failed') {
+        Say "couldn't update your user PATH - add $destDir to it by hand, or run whisper by its full path"
     }
-    if (-not $already) {
-        $newPath = if ($userPath.TrimEnd(';') -eq '') { $destDir } else { $userPath.TrimEnd(';') + ';' + $destDir }
-        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+    if ($pathEdit -eq 'added') {
         # Broadcast the environment change so already-open Explorer/new shells pick it up.
         try {
             if (-not ('Win32.NativeMethods' -as [type])) {

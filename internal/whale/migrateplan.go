@@ -148,6 +148,16 @@ type Receipt struct {
 	Detail       string `json:"detail,omitempty"`
 	Undo         *Undo  `json:"undo,omitempty"`
 	RolledBackAt string `json:"rolled_back_at,omitempty"`
+	// ACLHash is the hash of the WhaleACL an `acl` step published, and ACLReplaced the hash
+	// of the document it replaced (empty: there was none). Rollback compares both against
+	// what is in force before it sends anything, so a lost reply converges and somebody
+	// else's later edit is never overwritten.
+	ACLHash     string `json:"acl_hash,omitempty"`
+	ACLReplaced string `json:"acl_replaced,omitempty"`
+	// ACLDocument is the document an `acl` step sent. A reply lost in flight leaves the
+	// receipt pending, and comparing this against what is in force is how the next run
+	// (or a rollback) tells "ours landed" from "it never did".
+	ACLDocument string `json:"acl_document,omitempty"`
 }
 
 // Applied reports whether this receipt represents a change that is live and undoable.
@@ -164,6 +174,10 @@ const (
 	ResultExisting = "existing"
 	// ResultRefused: the control plane refused, and Detail carries its words.
 	ResultRefused = "refused"
+	// ResultPending: a write was sent and its answer never came back, so whether it
+	// landed is unknown until the next run reads what is in force. Recorded BEFORE the
+	// send, so the state it would replace is never lost with the reply.
+	ResultPending = "pending"
 )
 
 // Plan is the whole artifact.
@@ -178,12 +192,21 @@ type Plan struct {
 	// with a different credential, and it is 48 bits so it can do that and nothing else.
 	CredentialFingerprint string `json:"credential_fingerprint"`
 
-	Unreadable []string       `json:"unreadable"`
-	Nodes      []PlanNode     `json:"nodes"`
-	Rules      []PlanRule     `json:"rules"`
-	SSH        []PlanSSH      `json:"ssh,omitempty"`
-	Fidelity   []Fidelity     `json:"fidelity"`
-	Summary    map[string]int `json:"summary"`
+	Unreadable []string   `json:"unreadable"`
+	Nodes      []PlanNode `json:"nodes"`
+	Rules      []PlanRule `json:"rules"`
+	SSH        []PlanSSH  `json:"ssh,omitempty"`
+	// Groups and Hosts are their declared groups and `hosts` aliases, verbatim. The rules
+	// name them, and the WhaleACL `apply` writes cannot be built without knowing what they
+	// hold. A plan from an older build has neither, and `apply` refuses its ACL half
+	// rather than publishing a document that silently dropped them.
+	Groups map[string][]string `json:"groups,omitempty"`
+	Hosts  map[string]string   `json:"hosts,omitempty"`
+	// Tests is their own ACL `tests` block, verbatim. Translated into the WhaleACL's tests,
+	// its deny assertions are what catches a translation that admits more than they did.
+	Tests    []map[string]any `json:"tests,omitempty"`
+	Fidelity []Fidelity       `json:"fidelity"`
+	Summary  map[string]int   `json:"summary"`
 
 	// Hash covers everything above. Everything below is written by `apply`.
 	Hash string `json:"hash"`
