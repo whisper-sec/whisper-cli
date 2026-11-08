@@ -75,6 +75,8 @@ func (a *App) renderChainRow(e model.Event, w int, peakBytes int64, flash bool) 
 		return a.flashWrap(a.chainDNS(e, ln, ts), flash, w)
 	case "conn":
 		return a.flashWrap(a.chainConn(e, ln, ts, peakBytes), flash, w)
+	case model.KindInterim:
+		return a.flashWrap(a.chainInterim(e, ln, ts, peakBytes, w), flash, w)
 	case "alloc":
 		tag := th.Alloc.Render(pad("aloc", 4))
 		act := th.Alloc.Render(orPlaceholder(e.Action, "alloc"))
@@ -148,6 +150,60 @@ func (a *App) chainConn(e model.Event, ln chainLanes, ts string, peakBytes int64
 	return line
 }
 
+// chainInterim renders an open tunnel's progress row: the conn lanes, the bytes moved
+// since its previous interim row as the heat bar (folded away when narrow), then how
+// long it has been open and its running total, up and down together ("open 12m
+// Σ27.7K"). A total marked ≥ is a lower bound: the view joined after the tunnel's first
+// interim rows went by. The peer lane gives up what the progress text needs past the
+// close-reason slot, so the client and qname lanes stay in line with the conn rows.
+func (a *App) chainInterim(e model.Event, ln chainLanes, ts string, peakBytes int64, w int) string {
+	th := a.th
+	meta := interimChainMeta(e)
+	if ln.heat > 0 {
+		if extra := lipgloss.Width(meta) - 12; extra > 0 {
+			ln.peer = max(ln.peer-extra, 8)
+		}
+	} else {
+		// Narrow: the collapsed lanes leave no tail, so the lanes share what is left
+		// after the fixed parts (time, tag, two connectors, the spaces: 26 columns) and
+		// the progress text. The delta numbers give way to it.
+		budget := max(w-26-lipgloss.Width(meta), 12)
+		ln.client, ln.qname = budget/4, budget*3/8
+		ln.peer = budget - ln.client - ln.qname
+	}
+	tag := th.Conn.Render(pad("conn", 4))
+	client := th.Dim.Render(padTrunc(components.OrDash(e.ClientSrc), ln.client))
+	qn := e.QName
+	if qn == "" {
+		qn = a.join.qnameAt(e.Addr128, e.TsMicros)
+	}
+	qname := th.DNS.Render(padTrunc(components.OrDash(components.TrimDot(qn)), ln.qname))
+	peer := th.Conn.Render(padTrunc(fmt.Sprintf("%s:%d", components.OrDash(e.PeerHost), e.PeerPort), ln.peer))
+	if ln.heat == 0 {
+		return fmt.Sprintf("%s %s %s %s %s %s %s %s",
+			ts, tag, client, a.connector(true), qname, a.connector(true), peer, th.Dim.Render(meta))
+	}
+	delta := a.flowHeat(e.BytesUp+e.BytesDown, peakBytes, ln.heat-1)
+	return fmt.Sprintf("%s %s %s %s %s %s %s %s %s",
+		ts, tag, client, a.connector(true), qname, a.connector(true), peer, delta, th.Dim.Render(meta))
+}
+
+// interimChainMeta is the feed's compact progress text: "open 12m Σ27.7K".
+func interimChainMeta(e model.Event) string {
+	up, down, partial := e.RunningTotal()
+	ge := ""
+	if partial {
+		ge = "≥"
+	}
+	return "open " + components.Age(e.DurUS) + " Σ" + ge + components.Bytes(up+down)
+}
+
+// interimMeta is an interim row's progress text: "open 12m, total ↑1.2M ↓40.1M".
+func interimMeta(e model.Event) string {
+	up, down, partial := e.RunningTotal()
+	return components.TunnelProgress(e.DurUS, up, down, partial)
+}
+
 // connector returns the lane connector glyph: ──▶ for a flow that proceeded, ──╳ for one
 // that was blocked. Distinct shapes so the silhouette differs by WHERE the block is.
 func (a *App) connector(allowed bool) string {
@@ -216,7 +272,7 @@ func (a *App) reasonGlyph(reason string) string {
 func peakBytesOf(events []model.Event) int64 {
 	var peak int64
 	for _, e := range events {
-		if e.Kind == "conn" {
+		if e.Kind == "conn" || e.Kind == model.KindInterim {
 			if b := e.BytesUp + e.BytesDown; b > peak {
 				peak = b
 			}

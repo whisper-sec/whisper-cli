@@ -4,6 +4,7 @@
 package cli
 
 import (
+	"fmt"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -172,31 +173,45 @@ func TestBirthPinDoesNotStopTheAutoDowngrade(t *testing.T) {
 }
 
 // A box that will not publish the key still connects the agent: the connect is retried once
-// without the key, and the key stored for it is removed, so no file names an agent it is not the
-// pin of.
-func TestBirthPinRefusedConnectsWithoutItAndLeavesNoKey(t *testing.T) {
-	pickHarness(t)
-	clearNewborn(t)
-	stubPins(t, nil)
-	p := &pickPlane{agents: pickFleet}
-	p.connectHook = func(body string) (int, string, bool) {
-		if strings.Contains(body, "adopt_identity_key") {
-			return 503, `{"ok":false,"status":503,"error":{"message":"the durable store is not connected","status":503}}`, true
+// without the key, and the decline is said. A 4xx recorded nothing, so the key stored for it is
+// removed and no file names an agent it is not the pin of; an answer from 500 up may come from a
+// proxy in front of a service that did record it, so the key is kept and the note says so.
+func TestBirthPinRefusedConnectsWithoutIt_keyRemovedOnlyWhenNothingWasRecorded(t *testing.T) {
+	for _, tc := range []struct {
+		status int
+		keep   bool
+		said   string
+	}{
+		{400, false, "NOT published"},
+		{503, true, "has not confirmed"},
+	} {
+		pickHarness(t)
+		clearNewborn(t)
+		stubPins(t, nil)
+		p := &pickPlane{agents: pickFleet}
+		p.connectHook = func(body string) (int, string, bool) {
+			if strings.Contains(body, "adopt_identity_key") {
+				return tc.status, fmt.Sprintf(`{"ok":false,"status":%d,"error":{"message":"no","status":%d}}`,
+					tc.status, tc.status), true
+			}
+			return 0, "", false
 		}
-		return 0, "", false
-	}
-	srv := p.serve(t)
-	stderr, err := runRoot(t, srv.URL, "run", "--agent-file", filepath.Join(t.TempDir(), "agent"), "--tier", "wireguard", "--", "true")
-	if err != nil {
-		t.Fatalf("a refused birth pin must not fail the run: %v\n%s", err, stderr)
-	}
-	c := p.bodies("connect")
-	if len(c) != 2 || !strings.Contains(c[0], "adopt_identity_key") || strings.Contains(c[1], "identity_public_key") ||
-		strings.Contains(c[1], "adopt_identity_key") || !strings.Contains(c[1], "'"+pickMinted+"'") {
-		t.Fatalf("one birth attempt, then one plain connect of the same agent: %v", c)
-	}
-	if _, err := idkey.Load(pickMinted); err == nil {
-		t.Fatalf("the declined birth key was left under the new /128")
+		srv := p.serve(t)
+		stderr, err := runRoot(t, srv.URL, "run", "--agent-file", filepath.Join(t.TempDir(), "agent"), "--tier", "wireguard", "--", "true")
+		if err != nil {
+			t.Fatalf("%d: a refused birth pin must not fail the run: %v\n%s", tc.status, err, stderr)
+		}
+		c := p.bodies("connect")
+		if len(c) != 2 || !strings.Contains(c[0], "adopt_identity_key") || strings.Contains(c[1], "identity_public_key") ||
+			strings.Contains(c[1], "adopt_identity_key") || !strings.Contains(c[1], "'"+pickMinted+"'") {
+			t.Fatalf("%d: one birth attempt, then one plain connect of the same agent: %v", tc.status, c)
+		}
+		if _, err := idkey.Load(pickMinted); (err == nil) != tc.keep {
+			t.Fatalf("%d: key kept = %v, want %v", tc.status, err == nil, tc.keep)
+		}
+		if !strings.Contains(stderr, tc.said) || !strings.Contains(stderr, "whisper connect --adopt-key --agent "+pickMinted) {
+			t.Fatalf("%d: the decline is said on stderr with the fix, never only logged:\n%s", tc.status, stderr)
+		}
 	}
 }
 

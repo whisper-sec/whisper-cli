@@ -199,8 +199,12 @@ func TestRunWithNothingNamedCreatesAnAgentForThisHostOnEveryTier(t *testing.T) {
 			if len(reg) != 1 || !strings.Contains(reg[0], "label:'"+pickHost+"'") {
 				t.Fatalf("one agent named after this host is registered, got %v", reg)
 			}
-			if len(p.bodies("identity")) != 0 {
-				t.Fatalf("op:identity hands back an existing agent on this account and must not run: %v", p.ops())
+			// The birth's key-history read is op:identity{op:'history'}, a read; the op that hands
+			// back an existing agent is the identity create, which must not run.
+			for _, b := range p.bodies("identity") {
+				if !strings.Contains(b, "op:'history'") {
+					t.Fatalf("op:identity hands back an existing agent on this account and must not run: %v %s", p.ops(), b)
+				}
 			}
 			if c := p.bodies("connect"); len(c) == 0 || !strings.Contains(c[0], pickMinted) {
 				t.Fatalf("the created agent is the one connected: %v", c)

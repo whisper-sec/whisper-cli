@@ -4,6 +4,7 @@
 package model
 
 import (
+	"strings"
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
@@ -22,7 +23,7 @@ import (
 // op:logs conn row already carries qname, so the same Event type serves both.
 type Event struct {
 	TsMicros int64  // epoch microseconds (native stream unit; ms sources are scaled up)
-	Kind     string // dns | conn | alloc | hb
+	Kind     string // dns | conn | interim | alloc | hb
 	Node     string // emitting ns box (e.g. "ns1")
 	Agent    string // the agent id
 	Addr128  string // the /128 (the join key for the dns→conn chain)
@@ -47,6 +48,18 @@ type Event struct {
 	DurUS     int64 // conn duration, microseconds
 	Reason    string
 	ClientSrc string // masked original-client source prefix
+
+	// interim (an open tunnel's progress row: the bytes since its previous interim row)
+	//
+	// InterimAccounted marks a closed conn row whose bytes already went out in interim
+	// rows, so no running sum adds them again. The stream sends it; for an op:logs row,
+	// which never carries it, the TunnelTally infers it from the tunnel's interim rows.
+	InterimAccounted bool
+	// RunUp / RunDown are an interim row's running totals for its tunnel, summed over
+	// the interim rows this view has seen. RunPartial means the view joined mid-tunnel,
+	// so the totals are a lower bound. Set by the TunnelTally, never by the wire.
+	RunUp, RunDown int64
+	RunPartial     bool
 
 	// alloc
 	Action string // allocate | release
@@ -106,6 +119,8 @@ func FromStream(m client.MonitorEvent) Event {
 		Reason:    m.Reason,
 		ClientSrc: m.ClientSrc,
 		Action:    m.Action,
+
+		InterimAccounted: m.InterimAccounted,
 	}
 }
 
@@ -132,12 +147,27 @@ func FromLogRecord(rec map[string]any) Event {
 		DurUS:     num(rec, "duration_ms") * 1000, // ms → µs
 		Reason:    str(rec, "reason"),
 		ClientSrc: str(rec, "client_src", "client_subnet"),
+
+		InterimAccounted: truthy(rec["interim_accounted"]),
 	}
 	// The poll's single `peer` column is "host:port" or just a host; split liberally.
 	if peer := str(rec, "peer", "peer_host"); peer != "" {
 		e.PeerHost, e.PeerPort = splitPeer(peer)
 	}
 	return e
+}
+
+// truthy reads a JSON flag liberally: true, "true" (any case), or a non-zero number.
+func truthy(v any) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "1" || strings.EqualFold(x, "true")
+	default:
+		n, ok := asInt(v)
+		return ok && n != 0
+	}
 }
 
 // logTsMicros reads the op:logs `ts` (epoch-ms or RFC-3339-ish) and scales to µs.

@@ -85,6 +85,17 @@ func loadAgentDetail(c *client.Client, a model.Agent) tea.Cmd {
 	}
 }
 
+// logEvents maps an op:logs batch to Events, settled for replay: a long tunnel's
+// interim rows carry its running total and its closed row the interim marker.
+func logEvents(recs []map[string]any) []model.Event {
+	evs := make([]model.Event, 0, len(recs))
+	for _, rec := range recs {
+		evs = append(evs, model.FromLogRecord(rec))
+	}
+	model.SettleLogBatch(evs)
+	return evs
+}
+
 // loadLogs runs op:logs with the given filters and maps rows to unified Events. token
 // lets the caller drop a stale reply after the filter changed.
 func loadLogs(c *client.Client, args map[string]any, token int) tea.Cmd {
@@ -98,10 +109,7 @@ func loadLogs(c *client.Client, args map[string]any, token int) tea.Cmd {
 		if !env.Ok {
 			return logsMsg{token: token, err: envErr(env)}
 		}
-		var evs []model.Event
-		for _, rec := range env.Result.Records() {
-			evs = append(evs, model.FromLogRecord(rec))
-		}
+		evs := logEvents(env.Result.Records())
 		return logsMsg{events: evs, token: token}
 	}
 }
@@ -125,10 +133,7 @@ func loadMonitorBackfill(c *client.Client, agent, from string, token int) tea.Cm
 		if !env.Ok {
 			return monitorBackfillMsg{token: token, err: envErr(env)}
 		}
-		var evs []model.Event
-		for _, rec := range env.Result.Records() {
-			evs = append(evs, model.FromLogRecord(rec))
-		}
+		evs := logEvents(env.Result.Records())
 		return monitorBackfillMsg{events: evs, token: token}
 	}
 }
@@ -151,10 +156,7 @@ func loadMonitorPoll(c *client.Client, agent, from string) tea.Cmd {
 		if !env.Ok {
 			return monitorPollMsg{err: envErr(env)}
 		}
-		var evs []model.Event
-		for _, rec := range env.Result.Records() {
-			evs = append(evs, model.FromLogRecord(rec))
-		}
+		evs := logEvents(env.Result.Records())
 		return monitorPollMsg{events: evs}
 	}
 }

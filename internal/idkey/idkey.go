@@ -378,13 +378,17 @@ func (k *Keypair) SelfSignedLeaf(canonicalFqdn, friendlyFqdn string, addr netip.
 		return tls.Certificate{}, errors.New("idkey: could not generate a certificate serial")
 	}
 	now := time.Now()
+	// The EKU lists both purposes because this one leaf plays both roles (RFC 5280 section
+	// 4.2.1.12): the in-tunnel listener SERVES it on the /128:443, and it is also presented as
+	// an mTLS CLIENT certificate. Listing only serverAuth would get it refused by a client-cert check that
+	// enforces EKU (crypto/tls verifies a client chain for ExtKeyUsageClientAuth).
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
 		Subject:               pkix.Name{CommonName: canonical},
 		NotBefore:             now.Add(-5 * time.Minute), // clock-skew tolerance, mirrors the server leaf
 		NotAfter:              now.Add(leafValidity),
 		KeyUsage:              x509.KeyUsageDigitalSignature,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
 		BasicConstraintsValid: true,
 		IsCA:                  false,
 		DNSNames:              dnsNames,

@@ -14,6 +14,8 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/model"
+	"github.com/whisper-sec/whisper-cli/internal/tui/components"
 )
 
 // --- logs ------------------------------------------------------------------------
@@ -63,7 +65,7 @@ func newLogsCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVar(&agent, "agent", "", "narrow to one agent (id or /128 address)")
-	cmd.Flags().StringVar(&kind, "kind", "", "dns | conn | alloc | all (omit for all)")
+	cmd.Flags().StringVar(&kind, "kind", "", "dns | conn | interim | alloc | all (omit for all)")
 	cmd.Flags().StringVar(&from, "from", "", "window start (epoch-ms, RFC-3339, or relative like -1h)")
 	cmd.Flags().StringVar(&to, "to", "", "window end")
 	cmd.Flags().IntVar(&limit, "limit", 0, "max rows (default 1000, cap 10k)")
@@ -76,13 +78,30 @@ func renderLogs(res *client.Result) {
 		fmt.Fprintln(os.Stderr, "whisper: no activity in this window")
 		return
 	}
+	// An open tunnel's interim rows get their running totals, walked oldest first; the
+	// table keeps the server's order and every other row reads exactly as before.
+	evs := make([]model.Event, len(recs))
+	interim := 0
+	for i, r := range recs {
+		evs[i] = model.FromLogRecord(r)
+		if evs[i].Kind == model.KindInterim {
+			interim++
+		}
+	}
+	if interim > 0 {
+		model.AnnotateLogBatch(evs)
+	}
 	rows := make([][]string, 0, len(recs))
-	for _, r := range recs {
+	for i, r := range recs {
+		decision := field(r, "decision", "reason")
+		if evs[i].Kind == model.KindInterim {
+			decision = interimProgress(evs[i])
+		}
 		rows = append(rows, []string{
 			field(r, "ts"),
 			field(r, "kind"),
 			orDash(field(r, "qname", "peer")),
-			orDash(field(r, "decision", "reason")),
+			orDash(decision),
 			orDash(field(r, "source")),
 			orDash(field(r, "client_src", "client_subnet")),
 			orDash(field(r, "bytes_up")),
@@ -91,6 +110,17 @@ func renderLogs(res *client.Result) {
 	}
 	printTable([]string{"TS", "KIND", "QNAME/PEER", "DECISION", "SOURCE", "CLIENT_SRC", "UP", "DOWN"}, rows)
 	fmt.Fprintf(os.Stderr, "%d event(s)\n", len(recs))
+	if interim > 0 {
+		// A reader adding UP/DOWN down the table would count a long tunnel twice.
+		fmt.Fprintln(os.Stderr, "interim rows are an open tunnel's bytes per interval; its closed row repeats the total")
+	}
+}
+
+// interimProgress is an interim row's DECISION cell: "open 12m, total ↑1.2M ↓40.1M",
+// with ≥ when the window starts after the tunnel's first interim rows.
+func interimProgress(e model.Event) string {
+	up, down, partial := e.RunningTotal()
+	return components.TunnelProgress(e.DurUS, up, down, partial)
 }
 
 // --- monitor (scriptable --follow -> bare NDJSON) --------------------------------

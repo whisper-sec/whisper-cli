@@ -553,3 +553,31 @@ func TestFinishRecoveryLeavesAPointerThatNamesAnotherKey(t *testing.T) {
 		t.Fatal("finished")
 	}
 }
+
+func TestDropNextKeyRemovesOnlyThatKeysCommitment(t *testing.T) {
+	withTempIdentityDir(t)
+	a, _ := LoadOrGenerate("2a04:2a01::a2")
+	b, _ := LoadOrGenerate("2a04:2a01::a3")
+	if err := DropNextKey(a); err != nil {
+		t.Fatalf("no next key is success: %v", err)
+	}
+	if _, err := EnsureNextKey(a); err != nil {
+		t.Fatal(err)
+	}
+	nb, err := EnsureNextKey(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := DropNextKey(a); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NextKey(a); err == nil {
+		t.Fatal("a's next key is gone")
+	}
+	if got, err := NextKey(b); err != nil || got.Digest() != nb.Digest() {
+		t.Fatal("b's next key is untouched")
+	}
+	if DropNextKey(nil) == nil {
+		t.Fatal("no key is an error")
+	}
+}

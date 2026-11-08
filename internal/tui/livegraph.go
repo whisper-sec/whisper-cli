@@ -99,7 +99,7 @@ func (g *liveGraph) observe(e model.Event, stitchedQName string) {
 		d := ag.touchDest(name, e)
 		d.Host = name
 		d.HostBlocked = isBlock(e.Decision)
-	case "conn":
+	case "conn", model.KindInterim: // an interim row keeps a long tunnel's destination fresh
 		host := strings.ToLower(strings.TrimSuffix(e.QName, "."))
 		if host == "" {
 			host = strings.ToLower(strings.TrimSuffix(stitchedQName, "."))
@@ -156,7 +156,9 @@ func (ag *lgAgent) touchDest(dk string, e model.Event) *lgDest {
 		d = &lgDest{}
 		ag.dests[dk] = d
 	}
-	d.Hits++
+	if e.Kind != model.KindInterim {
+		d.Hits++ // a hit is a connection; an interim row is progress on one already counted
+	}
 	if e.TsMicros > d.LastUS {
 		d.LastUS = e.TsMicros
 	}

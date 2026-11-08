@@ -6,6 +6,7 @@ package cli
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -41,6 +42,9 @@ type adoptPlan struct {
 	unsigned   string // why the adopt went unsigned, when it did; said beside a refusal
 	hosted     bool   // the signed form is the hosted identity's adopt inception, not a recovery
 	custody    string // the hosted key the inception was signed over
+	birth      bool   // the automatic birth pin of an agent this process created, not the user's --adopt-key
+	declined   bool   // the birth was declined before anything was sent (declineBirth)
+	retried    int    // a birth's resends of the same statement, after a deferral that may clear
 	sel        string // the handle the connect ran with, which names the kept recovery too
 	kept       bool   // the recovery is kept on this host (KeepRecovery) until it takes effect
 	prior      *idkey.Keypair
@@ -59,9 +63,7 @@ var planAdopt = func(cx context.Context, c *client.Client, args map[string]any, 
 		return nil, nil
 	}
 	if birthAttempt(args, kp) {
-		// The new agent's own key at birth (connect_birth.go): a first pin, which replaces nothing, so
-		// there is no head to sign over and no history to read; it goes as before, adopt_identity_key alone.
-		return nil, nil
+		return planBirth(cx, c, args, kp), nil
 	}
 	for _, k := range adoptEventArgs {
 		delete(args, k)
@@ -116,6 +118,175 @@ var planAdopt = func(cx context.Context, c *client.Client, args map[string]any, 
 		return nil, err
 	}
 	return plan, nil
+}
+
+// planBirth signs the birth pin of an agent this process created (connect_birth.go). The service
+// makes the agent a hosted identity before its first connect, so the pin replaces the hosted key,
+// and it takes that move only as the adopt inception, the statement --adopt-key signs on a hosted
+// identity: an unsigned one is refused. So the birth reads the history and signs the same icp.
+//
+// A birth is never signed as a recovery, and never sent unsigned onto a key someone holds: a
+// history naming another held key means the agent is not the hosted one this command made, so the
+// birth is declined before anything is sent, whatever the service would accept. A history naming
+// this very key means an earlier answer was lost after the key was published; the adopt moves
+// nothing. A history this node cannot give yet (the register still on its way to it, a store or a
+// log catching up) is read again briefly; one it still cannot give declines the birth. Only a
+// service that predates key events (ROTATION_NOT_READY, or no history at all) gets the unsigned
+// form, which it takes, as
+// before this change: its history names no holder, so there the service alone decides whether the
+// adopt may replace a key another host adopted between the register and this connect. A
+// birth never fails the connect, and the person never typed --adopt-key, so the --adopt-key notes
+// are not said; a decline is.
+func planBirth(cx context.Context, c *client.Client, args map[string]any, kp *idkey.Keypair) *adoptPlan {
+	for _, k := range adoptEventArgs {
+		delete(args, k)
+	}
+	addr, _ := newbornAddr(agentArg(args))
+	plan := &adoptPlan{addr: addr, kp: kp, sel: addr.String(), birth: true}
+	h, err := readBirthHead(cx, c, addr)
+	switch {
+	case errors.Is(err, errRotationNotReady):
+		plan.unsigned = "the service does not record key events yet"
+	case err != nil && historyNotServed(err):
+		// a service that answers no key history (an image older than it): the unsigned form, as
+		// before; one that requires the signed form refuses it with a 4xx, which records nothing
+		plan.unsigned = "the service answered no key history (" + refusalCode(err) + ")"
+	case err != nil:
+		declineBirth(args, kp, refusalCode(err), "its key history could not be read ("+err.Error()+")", false)
+		plan.declined = true
+	case h.Key == kp.Digest():
+		// published already, by a send whose answer was lost: the adopt moves nothing
+	case h.Chain != "hosted":
+		declineBirth(args, kp, "KEY_CHAIN_"+strings.ToUpper(firstNonBlank(h.Chain, "unnamed")),
+			"its key history names a key it holds already, so this host's key would replace another's", false)
+		plan.declined = true
+	case !birthRef(h.Ref, addr):
+		// a hosted chain named by no ref of this allocation: an older service, whose unsigned adopt
+		// replaces only the hosted key, as before; a service that requires the signed form refuses it
+		plan.unsigned = "the service named no chain of this allocation to sign the adopt over"
+	default:
+		if serr := signHostedAdopt(args, plan, h); serr != nil {
+			plan.unsigned = serr.Error()
+		}
+	}
+	if plan.unsigned != "" {
+		debugf("birth pin for %s goes unsigned: %s", addr, plan.unsigned)
+	}
+	return plan
+}
+
+// birthRef reports a chain ref bound to this allocation of addr (a<handle>e<millis>): a fresh
+// identity always has one, and a bare legacy ref would let the statement stand for a later
+// allocation of the same /128.
+func birthRef(ref string, addr netip.Addr) bool {
+	a := addr.As16()
+	handle := "a" + hex.EncodeToString(a[8:]) // its hex may hold an e of its own: the suffix is after it
+	return refBelongsTo(ref, addr) == nil && strings.HasPrefix(ref, handle+"e") && len(ref) > len(handle)+1
+}
+
+// birthHeadReads bounds how often a birth reads a history the node cannot give yet.
+const birthHeadReads = 3
+
+// readBirthHead reads addr's head for a birth, again after a short wait while the node answering
+// cannot give it yet: no answer, a store or log that is busy or catching up, or the register that
+// made the agent not yet on this node (404, OWNERSHIP_UNAVAILABLE). A node may not know an agent
+// registered a moment ago, so it is read again briefly.
+func readBirthHead(cx context.Context, c *client.Client, addr netip.Addr) (chainHead, error) {
+	var h chainHead
+	var err error
+	for i := 0; i < birthHeadReads; i++ {
+		if h, _, err = readHead(cx, c, addr); err == nil || !birthHeadRetryable(err) {
+			return h, err
+		}
+		if i+1 < birthHeadReads && !birthWait(cx, time.Second) {
+			break
+		}
+	}
+	return h, err
+}
+
+// historyNotServed reports a history answer that is a refusal for good from 400 to 499: the op is
+// not served there, or (after the retries) the node still knows no such identity. A 5xx or no answer
+// is not: that node may know more than it said.
+func historyNotServed(err error) bool {
+	pe, ok := client.AsProblem(err)
+	return ok && pe.Status >= 400 && pe.Status < 500 && pe.Status != 429
+}
+
+func birthHeadRetryable(err error) bool {
+	if headReadRetryable(err) || isCode(err, "OWNERSHIP_UNAVAILABLE") {
+		return true
+	}
+	pe, ok := client.AsProblem(err)
+	return ok && pe.Status == 404
+}
+
+// birthWait waits d for a birth's retry, and reports false, without waiting, when the connect's
+// deadline leaves too little for the retry and the connect after it: the birth pin is a bonus, so
+// it never costs the Tier 1 attempt its bound. A package var so a test does not sleep.
+var birthWait = func(cx context.Context, d time.Duration) bool {
+	if dl, ok := cx.Deadline(); ok && time.Until(dl) < d+3*time.Second {
+		return false
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-cx.Done():
+		return false
+	case <-t.C:
+		return true
+	}
+}
+
+// refusalCode is the code a refusal carries, or its HTTP status, for the decline note.
+func refusalCode(err error) string {
+	if pe, ok := client.AsProblem(err); ok {
+		return firstNonBlank(problemCode(pe), fmt.Sprintf("HTTP %d", pe.Status))
+	}
+	return "NO_ANSWER"
+}
+
+// declineBirth ends a birth whose key the service did not publish: said on stderr, the key and the
+// key-event arguments stripped from args so nothing names it again, and the stored key (with the
+// next key it committed to) removed when the service provably recorded nothing for it. keep leaves
+// them on this host: an answer that may still have recorded the key must never lose its only holder.
+func declineBirth(args map[string]any, kp *idkey.Keypair, code, why string, keep bool) {
+	addr := agentArg(args)
+	identityNote("%s", birthDeclinedNote(addr, code, why, keep))
+	if keep {
+		forgetNewborn(addr)
+	} else {
+		declineNewborn(addr, kp)
+	}
+	delete(args, "identity_public_key")
+	delete(args, "adopt_identity_key")
+	stripBirthArgs(args)
+}
+
+// birthDeclinedNote is the line said when the service did not publish this host's key for an agent
+// this command created: what was refused and why, that the agent connects with its hosted key, and
+// the one command that publishes this host's key.
+func birthDeclinedNote(addr, code, why string, keep bool) string {
+	fix := "`whisper connect --adopt-key --agent " + addr + "`"
+	if keep {
+		return "whisper: the service has not confirmed this host's identity key for the new agent " + addr +
+			" (" + code + ": " + why + "). Until it does, the agent connects with its Whisper-hosted key and a " +
+			"statement signed here does not verify. This host keeps the key; " + fix + " finishes it."
+	}
+	return "whisper: this host's identity key was NOT published for the new agent " + addr + " (" + code +
+		": " + why + "). It connects with its Whisper-hosted key, so its TLSA, SSHFP and OPENPGPKEY name a " +
+		"key this host does not hold, and a statement signed here does not verify. Publish this host's key " +
+		"with " + fix + "."
+}
+
+// adoptNote is said for a --adopt-key the person asked for; a birth's goes to the debug log, and the
+// decline, when the service refuses it, is said instead.
+func adoptNote(plan *adoptPlan, format string, a ...any) {
+	if plan != nil && plan.birth {
+		debugf(format, a...)
+		return
+	}
+	identityNote(format, a...)
 }
 
 // headReadRetryable reports a key-history read that failed for now, not for good: no answer came
@@ -191,7 +362,7 @@ func signAdopt(args map[string]any, plan *adoptPlan, h chainHead) error {
 func signHostedAdopt(args map[string]any, plan *adoptPlan, h chainHead) error {
 	if err := refBelongsTo(h.Ref, plan.addr); err != nil || !kel.IsDigest(h.Key) {
 		plan.unsigned = "the service named no hosted key and chain to sign the adopt over"
-		identityNote("whisper: --adopt-key could not sign the move for %s: %s; sending adopt_identity_key alone",
+		adoptNote(plan, "whisper: --adopt-key could not sign the move for %s: %s; sending adopt_identity_key alone",
 			plan.addr, plan.unsigned)
 		return nil
 	}
@@ -338,6 +509,14 @@ func settleAdopt(cx context.Context, c *client.Client, args map[string]any, keys
 		if h, _, err := readHead(cx, c, plan.addr); err == nil && plan.hosted && h.Chain != "hosted" {
 			// the hosted identity took another key meanwhile: replacing that one is a recovery, the
 			// user's to ask for again knowing it, never a step this connect takes on its own
+			if plan.birth {
+				if h.Key == plan.kp.Digest() {
+					return env, nil // the head that moved is this very key's inception: published
+				}
+				// another key landed first, and this statement appended nothing: decline, key removed
+				return settleBirthDeclined(args, keys, env, plan, "KEY_HEAD_MOVED",
+					"it took another key while this connect was adopting it", false), nil
+			}
 			identityNote("whisper: %s took another key while --adopt-key was adopting it, so nothing was "+
 				"changed; run `whisper connect --adopt-key` again to replace that key", plan.addr)
 			return env, nil
@@ -365,6 +544,9 @@ func settleAdopt(cx context.Context, c *client.Client, args map[string]any, keys
 			"withdraws it. This host keeps the recovery; run `whisper connect --adopt-key` again once it is in "+
 			"effect to finish it here", plan.addr, untilWhen(rec, "effective_after"), plan.addr)
 	case "deferred":
+		if reason != "ROTATION_NOT_READY" && plan.birth {
+			return settleBirthDeferred(cx, c, args, keys, env, plan, tier, reason)
+		}
 		if reason != "ROTATION_NOT_READY" {
 			identityNote("whisper: the identity key of %s was not changed (key_move: deferred, %s); run "+
 				"`whisper connect --adopt-key` again later", plan.addr, firstNonBlank(reason, "no reason given"))
@@ -379,16 +561,65 @@ func settleAdopt(cx context.Context, c *client.Client, args map[string]any, keys
 			return nil, err
 		}
 		dropKeptRecovery(plan) // the unsigned form moved the key at once: no recovery is pending
-		identityNote("whisper: the service does not record key events yet (ROTATION_NOT_READY), so --adopt-key " +
+		adoptNote(plan, "whisper: the service does not record key events yet (ROTATION_NOT_READY), so --adopt-key "+
 			"sent adopt_identity_key alone, as before; the key history records the move later")
 		return env2, nil
 	case "":
-		identityNote("whisper: the service's primary did not record --adopt-key as a key event (it predates " +
+		adoptNote(plan, "whisper: the service's primary did not record --adopt-key as a key event (it predates "+
 			"signed key recoveries), so it took adopt_identity_key alone, as before")
 	default:
 		identityNote("whisper: the identity key of %s was not changed (key_move: %s)", plan.addr, move)
 	}
 	return env, nil
+}
+
+// birthResends bounds how often a deferred birth sends its statement again.
+const birthResends = 1
+
+// settleBirthDeferred answers a birth's signed adopt that connected with its key move deferred. A
+// deferral is a successful connect, so the agent is up either way; what is decided here is only
+// what this host does with the key. A log this node could not append to (KEY_LOG_UNAVAILABLE)
+// recorded nothing, and an event recorded but not yet confirmed
+// (KEY_EVENT_UNCONFIRMED) is answered `unchanged` when the same statement is sent again: both are
+// sent once more after a short wait. The key is removed only on a deferral that provably recorded
+// nothing; any other, one that is still unconfirmed, and a moved head this host could not read
+// again (it may name this key: settleAdopt removes the key only when it read another), keeps it, because the reconcile may yet
+// publish it and a published key must never lose its only holder.
+func settleBirthDeferred(cx context.Context, c *client.Client, args map[string]any, keys *connectKeys,
+	env *client.Envelope, plan *adoptPlan, tier, reason string) (*client.Envelope, error) {
+	code := firstNonBlank(reason, "KEY_MOVE_DEFERRED")
+	resendable := code == "KEY_LOG_UNAVAILABLE" || code == "KEY_EVENT_UNCONFIRMED"
+	if resendable && plan.retried < birthResends && birthWait(cx, 2*time.Second) {
+		plan.retried++
+		env2, err := connectWithSelfHeal(cx, c, args, keys, tier)
+		if err != nil {
+			if code == "KEY_EVENT_UNCONFIRMED" {
+				// the first send may stand: the agent is connected by it, and the key stays here
+				return settleBirthDeclined(args, keys, env, plan, code, "the key event is recorded but not yet confirmed", true), nil
+			}
+			return nil, err
+		}
+		return settleAdopt(cx, c, args, keys, env2, plan, tier)
+	}
+	switch code {
+	case "KEY_LOG_UNAVAILABLE":
+		return settleBirthDeclined(args, keys, env, plan, code, "the key event was not appended", false), nil
+	case "KEY_EVENT_UNCONFIRMED":
+		return settleBirthDeclined(args, keys, env, plan, code, "the key event is recorded but not yet confirmed", true), nil
+	}
+	return settleBirthDeclined(args, keys, env, plan, code, "key_move: deferred", true), nil
+}
+
+// settleBirthDeclined declines a birth whose connect succeeded without publishing the key: the
+// agent goes on with the hosted key and this session serves no leaf of its own.
+func settleBirthDeclined(args map[string]any, keys *connectKeys, env *client.Envelope, plan *adoptPlan,
+	code, why string, keep bool) *client.Envelope {
+	declineBirth(args, plan.kp, code, why, keep)
+	if keys != nil {
+		keys.identity = nil
+	}
+	plan.signed = false
+	return env
 }
 
 // untilWhen renders an epoch-millisecond column as " until <RFC 3339>", or "" when it is absent.

@@ -113,6 +113,9 @@ func (a *App) onStreamEvent(e model.Event) {
 // does not flash, does not bump the session counters (a focus-change re-seed must
 // never double-count), and respects pause only for the live tail.
 func (a *App) foldEvent(e model.Event, live bool) {
+	// An interim row gets its tunnel's running total; a long tunnel's closed row learns
+	// its bytes already went out in interim rows (op:logs rows never carry the marker).
+	a.tunnels.Annotate(&e)
 	if e.Kind == "dns" && !isBlock(e.Decision) {
 		// A BLOCKED lookup returned no usable address, so a later conn can never be
 		// "for" that name: keep it out of the join cache (never a wrong stitch).
@@ -156,7 +159,7 @@ func (a *App) foldEvent(e model.Event, live bool) {
 	// The live graph grows from the same fold: stitch a nameless conn's hostname from
 	// the join cache (same TTL discipline as the chain rows - never a wrong stitch).
 	stitched := ""
-	if e.Kind == "conn" && e.QName == "" {
+	if (e.Kind == "conn" || e.Kind == model.KindInterim) && e.QName == "" {
 		stitched = a.join.qnameAt(e.Addr128, e.TsMicros)
 	}
 	a.lgraph.observe(e, stitched)

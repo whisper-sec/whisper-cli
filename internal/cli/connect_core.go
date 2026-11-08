@@ -162,31 +162,39 @@ func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]a
 	if err != nil {
 		return nil, nil, err
 	}
+	if plan != nil && plan.declined {
+		idKey, plan = nil, nil // a birth declined before it was sent: the agent connects with its hosted key
+	}
 	if err := storeAdoptedKey(sel, idKey); err != nil {
 		return nil, nil, err
 	}
 	keys := newConnectKeys(wgKey, idKey, args)
 	env, err := connectWithSelfHeal(cx, c, args, keys, tier)
+	if err != nil {
+		env, err = resignHostedAdopt(cx, c, args, keys, plan, tier, err)
+	}
+	if err == nil {
+		env, err = settleAdopt(cx, c, args, keys, env, plan, tier)
+	}
 	if err != nil && birthAttempt(args, idKey) {
 		// The birth pin is a bonus, never a condition: a box that will not publish the key now (a
 		// store that is not connected, a fence, a policy) still connects the agent, which then
-		// keeps its Whisper-derived key exactly as an agent created without one does.
-		if _, isProblem := client.AsProblem(err); isProblem {
-			debugf("tier %s: the box did not publish this host's key for the new agent (%v); connecting without it", tier, err)
-			declineNewborn(agentArg(args), idKey)
-			delete(args, "identity_public_key")
-			delete(args, "adopt_identity_key")
-			stripBirthArgs(args) // the signed birth names the key that is no longer sent
+		// keeps its Whisper-derived key exactly as an agent created without one does. That is said,
+		// never only logged: the agent then holds no key this host can sign as.
+		if pe, isProblem := client.AsProblem(err); isProblem {
+			why := "the connect was refused"
+			if plan != nil && plan.unsigned != "" {
+				why = "this host could not sign it: " + plan.unsigned
+			}
+			// A 4xx is a refusal that recorded nothing, so the key goes. An answer from 500 up may come
+			// from a proxy in front of a service that did record it, so the key is kept on this host.
+			declineBirth(args, idKey, refusalCode(pe), why, pe.Status >= 500)
 			keys.identity = nil
+			plan = nil
 			env, err = connectWithSelfHeal(cx, c, args, keys, tier)
 		}
 	}
 	if err != nil {
-		if env, err = resignHostedAdopt(cx, c, args, keys, plan, tier, err); err != nil {
-			return nil, nil, adoptRefusal(err, plan)
-		}
-	}
-	if env, err = settleAdopt(cx, c, args, keys, env, plan, tier); err != nil {
 		return nil, nil, adoptRefusal(err, plan)
 	}
 	settleIdentity(args, env.Result, keys)

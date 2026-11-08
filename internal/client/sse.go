@@ -17,6 +17,11 @@ const (
 	KindConn  = "conn"
 	KindAlloc = "alloc"
 	KindHB    = "hb" // a heartbeat comment; surfaced so the TUI can show "connected" while idle
+
+	// KindInterim is an open egress tunnel's progress row: the conn fields, with the
+	// bytes and relay events moved since the previous interim row and duration_us the
+	// tunnel's age so far. A long tunnel's closed row then carries interim_accounted.
+	KindInterim = "interim"
 )
 
 // MonitorEvent is one decoded stream event, normalised so the TUI/scripts never have
@@ -61,6 +66,11 @@ type MonitorEvent struct {
 	Reason      string `json:"reason,omitempty"`
 	TokenMasked string `json:"token_masked,omitempty"`
 	ClientSrc   string `json:"client_src,omitempty"`
+	// InterimAccounted marks a closed conn row whose bytes all went out earlier in
+	// interim rows: the row still carries the tunnel's totals, so adding them again to
+	// a running sum counts the tunnel twice. Absent (false) from a server that writes
+	// no interim rows.
+	InterimAccounted bool `json:"interim_accounted,omitempty"`
 
 	// --- alloc ---
 	Action      string `json:"action,omitempty"`

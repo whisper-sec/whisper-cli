@@ -48,7 +48,7 @@ type monitorView struct {
 	app        *App
 	rings      map[string]*agentRing // keyed by agent Key()
 	focused    string                // a focused agent Key() ("" = whole tenant)
-	kindF      string                // "", dns, conn, alloc cycle (f)
+	kindF      string                // "", dns, conn (with its interim rows), alloc cycle (f)
 	backfilled bool                  // the op:logs backfill has run for the current focus (re-armed on focus change)
 }
 
@@ -126,9 +126,13 @@ func (v *monitorView) observe(e model.Event) {
 		}
 		idx = (r.head - int(delta) + kbpsWindow*2) % kbpsWindow
 	}
+	if e.CountsBytes() {
+		// An interim row's delta charts at its own time; a closed row whose interim rows
+		// already carried its bytes adds none again (it still counts as a connection).
+		r.bytes[idx] += float64(e.BytesUp + e.BytesDown)
+	}
 	switch e.Kind {
 	case "conn":
-		r.bytes[idx] += float64(e.BytesUp + e.BytesDown)
 		r.conns[idx]++
 	case "dns":
 		r.dnsTotal[idx]++
@@ -299,6 +303,7 @@ func (v *monitorView) focus(a model.Agent) tea.Cmd {
 	v.focused = key
 	v.backfilled = false
 	v.app.feed.clear()
+	v.app.tunnels.Reset()
 	v.app.lastEventUS = 0
 	return tea.Batch(v.onEnter(), v.app.restartStreamNarrowed(v.narrowAddr()))
 }
@@ -311,6 +316,7 @@ func (v *monitorView) unfocus() tea.Cmd {
 	v.focused = ""
 	v.backfilled = false
 	v.app.feed.clear()
+	v.app.tunnels.Reset()
 	v.app.lastEventUS = 0
 	return tea.Batch(v.onEnter(), v.app.restartStreamNarrowed(""))
 }
@@ -529,7 +535,8 @@ func (v *monitorView) filteredRecent(n int) []model.Event {
 	}
 	out := make([]model.Event, 0, n)
 	for _, e := range all {
-		if e.Kind == v.kindF {
+		// conn shows a tunnel's interim progress rows too: they are the same egress
+		if e.Kind == v.kindF || v.kindF == "conn" && e.Kind == model.KindInterim {
 			out = append(out, e)
 			if len(out) >= n {
 				break

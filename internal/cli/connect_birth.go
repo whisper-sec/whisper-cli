@@ -21,13 +21,16 @@ import (
 // its own.
 //
 // An agent this process just created has no other holder, so its first routed connect may publish
-// this host's key, asked for by name (adopt_identity_key). The key is stored under the /128 BEFORE
-// the connect is sent: an answer lost on the way back (a timeout, a dropped connection) may still
-// have published it, and a published pin whose private half was never kept could only be replaced
-// by an adopt. A refusal the box did answer removes the file again (Unlink, only while it holds this
-// key), so no key is left behind naming an agent it is not the pin of. It is used once: a renewal
-// strips the adopt, the Tier 1.5 leg carries no key, and a later command proves possession with the
-// stored key like any other reconnect.
+// this host's key, asked for by name (adopt_identity_key). The service made the agent a hosted
+// identity, so the pin replaces the hosted key, and the connect carries the signed adopt inception
+// for it (planBirth): the unsigned form is refused. The key is stored under the /128 BEFORE the
+// connect is sent: an answer lost on the way back (a timeout, a dropped connection) may still have
+// published it, and a published pin whose private half was never kept could only be replaced by an
+// adopt. A refusal that provably recorded nothing removes the file again (Unlink, only while it
+// holds this key, and its next key with it), so no key is left behind naming an agent it is not the
+// pin of; an answer that may have recorded it keeps the file. Either way the decline is said on
+// stderr. It is used once: a renewal strips the adopt, the Tier 1.5 leg carries no key, and a later
+// command proves possession with the stored key like any other reconnect.
 
 var (
 	newbornMu sync.Mutex
@@ -96,6 +99,10 @@ func declineNewborn(addr string, kp *idkey.Keypair) {
 	if a, ok := newbornAddr(addr); ok && kp != nil {
 		if err := idkey.Unlink(a.String(), kp); err != nil {
 			debugf("the declined birth key for %s was not removed: %v", a, err)
+			return
+		}
+		if err := idkey.DropNextKey(kp); err != nil {
+			debugf("the next key of the declined birth key for %s was not removed: %v", a, err)
 		}
 	}
 }

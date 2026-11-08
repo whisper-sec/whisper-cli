@@ -116,6 +116,19 @@ func EnsureNextKey(kp *Keypair) (*Keypair, error) {
 	}
 }
 
+// DropNextKey removes kp's committed next key, for a key that was never published: a commitment
+// the service never recorded protects nothing, and a private key nothing will use is not kept. No
+// next key is success.
+func DropNextKey(kp *Keypair) error {
+	if kp == nil {
+		return errors.New("idkey: no key")
+	}
+	if err := os.Remove(nextPath(kp.Digest())); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	return nil
+}
+
 // move is the record of a confirmed pin move.
 type move struct {
 	To           string `json:"to"`

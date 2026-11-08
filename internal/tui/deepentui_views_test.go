@@ -128,8 +128,8 @@ func TestLogsTimeEditorFlow(t *testing.T) {
 func TestLogsKindCycleAndKeys(t *testing.T) {
 	a := newTestApp(t, 120, 40)
 	v := a.logsView
-	// The kind filter cycles all -> dns -> conn -> alloc -> all.
-	want := []string{"dns", "conn", "alloc", ""}
+	// The kind filter cycles all -> dns -> conn -> interim -> alloc -> all.
+	want := []string{"dns", "conn", "interim", "alloc", ""}
 	for i := range want {
 		v.cycleKind()
 		if v.kind != want[i] {

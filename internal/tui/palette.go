@@ -59,7 +59,7 @@ func (p *palette) commands() []command {
 		{"go to LOGS", "view · op:logs", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeLogs; a.layout(); return a, a.onEnterMode() }},
 		{"go to POLICY", "view · op:policy", func(a *App) (tea.Model, tea.Cmd) { a.mode = modePolicy; a.layout(); return a, a.onEnterMode() }},
 		{"go to CONFIG", "view", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeConfig; a.layout(); return a, nil }},
-		{"explore graph", "view · graph.whisper.security", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeExplore; a.layout(); return a, a.onEnterMode() }},
+		{"explore graph", "view · graph.whisper.online", func(a *App) (tea.Model, tea.Cmd) { a.mode = modeExplore; a.layout(); return a, a.onEnterMode() }},
 		{"refresh fleet", "op:list {kind:'agents'}", func(a *App) (tea.Model, tea.Cmd) { a.loading = true; return a, loadFleet(a.client) }},
 		{"cycle theme", "local", func(a *App) (tea.Model, tea.Cmd) { a.cycleTheme(); return a, nil }},
 		{"help", "local", func(a *App) (tea.Model, tea.Cmd) { a.overlay = overlayHelp; return a, nil }},

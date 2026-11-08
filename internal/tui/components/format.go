@@ -30,6 +30,33 @@ func Bytes(n int64) string {
 	return fmt.Sprintf("%.1f%s", float64(n)/float64(div), suffix)
 }
 
+// Age renders a span in microseconds as a tunnel age: 45s, 12m, 2h05m, 3d04h.
+func Age(us int64) string {
+	s := us / 1_000_000
+	switch {
+	case s < 0:
+		return "0s"
+	case s < 60:
+		return fmt.Sprintf("%ds", s)
+	case s < 3600:
+		return fmt.Sprintf("%dm", s/60)
+	case s < 86400:
+		return fmt.Sprintf("%dh%02dm", s/3600, s%3600/60)
+	default:
+		return fmt.Sprintf("%dd%02dh", s/86400, s%86400/3600)
+	}
+}
+
+// TunnelProgress is an open tunnel's progress text, "open 12m, total ↑1.2M ↓40.1M",
+// with ≥ before the total when it is a lower bound.
+func TunnelProgress(ageUS, up, down int64, partial bool) string {
+	ge := ""
+	if partial {
+		ge = "≥"
+	}
+	return fmt.Sprintf("open %s, total %s↑%s ↓%s", Age(ageUS), ge, Bytes(up), Bytes(down))
+}
+
 // Count renders a plain integer count compactly (1.2k, 88k, 4k) for high-cardinality
 // counters; small values stay exact.
 func Count(n int64) string {

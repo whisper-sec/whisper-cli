@@ -105,7 +105,8 @@ type App struct {
 	// always-on live monitor (the merged AGENTS panel + the GRAPH view share this state)
 	feed       *feedRing
 	join       *joinCache
-	lgraph     *liveGraph // the self-expanding agent-activity graph, fed from the same fold
+	tunnels    model.TunnelTally // open egress tunnels, followed through their interim rows
+	lgraph     *liveGraph        // the self-expanding agent-activity graph, fed from the same fold
 	stream     monitorState
 	source     feedSource // the data path currently filling the feed (backfill/live/poll)
 	paused     bool

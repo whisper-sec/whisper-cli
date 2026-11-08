@@ -24,7 +24,7 @@ type logsView struct {
 	events []model.Event
 
 	from  string // relative window (e.g. -1h); editable
-	kind  string // "", dns, conn, alloc
+	kind  string // "", dns, conn, interim, alloc
 	agent string // optional narrow (the AGENTS selection, by id/addr)
 
 	token   int // request token: a stale reply (token mismatch) is dropped
@@ -73,11 +73,11 @@ func (v *logsView) columns(w int) []table.Column {
 	iw := w - 4
 	return []table.Column{
 		{Title: "TIME", Width: 8},
-		{Title: "KIND", Width: 5},
+		{Title: "KIND", Width: 7}, // fits "interim"
 		{Title: "CLIENT_SRC", Width: clamp(iw*15/100, 10, 18)},
 		{Title: "QNAME", Width: clamp(iw*22/100, 12, 30)},
 		{Title: "PEER", Width: clamp(iw*18/100, 12, 24)},
-		{Title: "DECISION", Width: 10},
+		{Title: "DECISION", Width: clamp(iw*14/100, 10, 34)}, // an interim row's progress text
 		{Title: "↑/↓", Width: 14},
 	}
 }
@@ -152,6 +152,14 @@ func (v *logsView) syncRows() {
 		bw := "-"
 		if e.BytesUp > 0 || e.BytesDown > 0 {
 			bw = fmt.Sprintf("↑%s ↓%s", components.Bytes(e.BytesUp), components.Bytes(e.BytesDown))
+		}
+		if e.Kind == model.KindInterim {
+			// an open tunnel's progress: the bytes since its previous interim row, its age
+			// and its running total
+			dec = interimMeta(e)
+			if bw != "-" {
+				bw = "+" + bw
+			}
 		}
 		rows = append(rows, table.Row{
 			components.Clock(e.TsMicros),
@@ -230,7 +238,7 @@ func (v *logsView) handleEditKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (v *logsView) cycleKind() {
-	next := map[string]string{"": "dns", "dns": "conn", "conn": "alloc", "alloc": ""}
+	next := map[string]string{"": "dns", "dns": "conn", "conn": "interim", "interim": "alloc", "alloc": ""}
 	v.kind = next[v.kind]
 }
 

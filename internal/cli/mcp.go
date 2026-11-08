@@ -463,13 +463,13 @@ func mcpControlTools() []map[string]any {
 		},
 		{
 			"name":        "whisper_logs",
-			"description": "Query YOUR agents' recent activity - DNS queries (with allow/block decisions), connections, and allocations. Narrow with agent (an agent id or its /128 address from whisper_list), kind ('dns' | 'conn' | 'alloc'), a time window (from/to: epoch-ms, RFC-3339, or relative like '-1h'), and limit. Use this to audit what an agent actually did on the network.",
+			"description": "Query YOUR agents' recent activity - DNS queries (with allow/block decisions), connections, and allocations. Narrow with agent (an agent id or its /128 address from whisper_list), kind ('dns' | 'conn' | 'interim' | 'alloc'; an interim row is an open tunnel's bytes since its previous one, and a long tunnel's closed row repeats the total, so do not add bytes across conn and interim), a time window (from/to: epoch-ms, RFC-3339, or relative like '-1h'), and limit. Use this to audit what an agent actually did on the network.",
 			"inputSchema": map[string]any{
 				"type":                 "object",
 				"additionalProperties": false,
 				"properties": map[string]any{
 					"agent": map[string]any{"type": "string", "description": "narrow to one agent (id or /128 address)"},
-					"kind":  map[string]any{"type": "string", "enum": []string{"dns", "conn", "alloc", "all"}, "description": "event kind (omit for all)"},
+					"kind":  map[string]any{"type": "string", "enum": []string{"dns", "conn", "interim", "alloc", "all"}, "description": "event kind (omit for all)"},
 					"from":  map[string]any{"type": "string", "description": "window start (epoch-ms, RFC-3339, or relative like -1h)"},
 					"to":    map[string]any{"type": "string", "description": "window end"},
 					"limit": map[string]any{"type": "integer", "description": "max rows (default 1000, cap 10k)"},
