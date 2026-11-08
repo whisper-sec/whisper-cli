@@ -104,12 +104,14 @@ func (t *TunnelTally) Annotate(e *Event) {
 	}
 }
 
-// CountsBytes reports whether a row's bytes belong in a running sum: a conn row's
-// bytes, unless its interim rows already carried them, and an interim row's delta.
+// CountsBytes reports whether a row's bytes belong in a running sum: an interim row's
+// delta, and a conn row's bytes when it is the row that carries a tunnel's count
+// (ChartsConnBytes) and its interim rows did not already carry them. A budget-breach
+// row repeats the bytes its closed row carries, so it adds none.
 func (e Event) CountsBytes() bool {
 	switch e.Kind {
 	case KindConn:
-		return !e.InterimAccounted
+		return !e.InterimAccounted && e.ChartsConnBytes()
 	case KindInterim:
 		return true
 	}

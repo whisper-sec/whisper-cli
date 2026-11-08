@@ -472,3 +472,16 @@ func TestCreate_AHostileAgentFieldNeverReachesTheTerminal(t *testing.T) {
 		t.Fatalf("the agent field is sanitised, got %q", friendly(err))
 	}
 }
+
+// TestAgentDetail_AContainmentNoteNamesTheEDRConsole pins where an administrator's
+// suspension sends the reader: the EDR console's own host, not the old name that now
+// only redirects there.
+func TestAgentDetail_AContainmentNoteNamesTheEDRConsole(t *testing.T) {
+	got := lifecycleNote("suspended", "operator", "containment", false, false, "agent-c", "")
+	if !strings.Contains(got, "https://edr.whisper.security.") {
+		t.Fatalf("a containment note names the EDR console, got %s", got)
+	}
+	if strings.Contains(got, "console.whisper.online") {
+		t.Fatalf("a containment note must not print the retired console host, got %s", got)
+	}
+}

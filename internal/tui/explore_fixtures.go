@@ -130,7 +130,9 @@ func fixtureMegaFanout() deckState {
 			ASN: "AS13335", ASName: "CLOUDFLARENET", Country: "US", Prefix: "104.16.128.0/20", Hosts: "~1.24M"},
 	}
 	edges := []edgeGroup{
-		{Type: "ANNOUNCED_BY", Dir: 1, Total: 1, Sample: []graphNode{node("ASN", "AS13335", "BENIGN")}},
+		// ANNOUNCED_BY lands on the covering announced prefix, never on an ASN; the origin AS
+		// is one more hop, (:ASN)-[:ROUTES]->(:ANNOUNCED_PREFIX).
+		{Type: "ANNOUNCED_BY", Dir: 1, Total: 1, Sample: []graphNode{node("ANNOUNCED_PREFIX", "104.16.128.0/20", "BENIGN")}},
 		{Type: "IN_PREFIX", Dir: 1, Total: 1, Sample: []graphNode{node("PREFIX", "104.16.128.0/20", "BENIGN")}},
 		{Type: "RESOLVES_TO⁻¹", Dir: -1, Total: 1240000, Capped: true, Sample: []graphNode{
 			hostIdent("glitch-me.tk", "MALICIOUS", "listed urlhaus, phishtank"),
@@ -167,20 +169,18 @@ func fixtureASN() deckState {
 		Ident: &identity{Vendor: "Cloudflare, Inc.", ASN: "AS13335", ASName: "CLOUDFLARENET", Country: "US"},
 	}
 	edges := []edgeGroup{
-		{Type: "ORIGINATES", Dir: 1, Total: 1512, Sample: []graphNode{
-			node("PREFIX", "104.16.0.0/13", "BENIGN"),
-			node("PREFIX", "172.64.0.0/13", "BENIGN"),
-			node("PREFIX", "2606:4700::/32", "BENIGN"),
+		// An ASN reaches its announcements over ROUTES. It carries no ANNOUNCED_BY edge in
+		// either direction: that edge runs from an address or prefix to an ANNOUNCED_PREFIX.
+		{Type: "ROUTES", Dir: 1, Total: 1512, Sample: []graphNode{
+			node("ANNOUNCED_PREFIX", "104.16.0.0/13", "BENIGN"),
+			node("ANNOUNCED_PREFIX", "172.64.0.0/13", "BENIGN"),
+			node("ANNOUNCED_PREFIX", "2606:4700::/32", "BENIGN"),
 		}},
 		{Type: "PEERS_WITH", Dir: 1, Total: 8231, Sample: []graphNode{
 			node("ASN", "AS15169", "BENIGN"),
 			node("ASN", "AS3356", "BENIGN"),
 		}},
 		{Type: "MEMBER_OF", Dir: 0, Total: 3, Sample: []graphNode{node("ASN", "AS-CLOUDFLARE", "BENIGN")}},
-		{Type: "ANNOUNCED_BY⁻¹", Dir: -1, Total: 1240000, Capped: true, Sample: []graphNode{
-			ipv4("104.16.132.229", "BENIGN", cfIdent()),
-			ipv4("104.16.133.229", "BENIGN", cfIdent()),
-		}},
 		{Type: "GEO_LOCATED", Dir: 1, Total: 1, Sample: []graphNode{node("ORGANIZATION", "US", "")}},
 	}
 	return deckState{focus: focus, edges: edges, edgeCur: 0}

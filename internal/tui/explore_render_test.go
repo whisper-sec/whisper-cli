@@ -398,3 +398,42 @@ func TestExploreDumpScreenshots(t *testing.T) {
 	deck, cards := fixtureCatalog()
 	dump("catalog", deck, func(v *exploreView) { v.ov = ovCatalog; v.results = cards })
 }
+
+// TestExploreFixturesNeverWalkAnnouncedByToAnASN pins the graph's one meaning of
+// ANNOUNCED_BY: from an address or a prefix it lands on the covering ANNOUNCED_PREFIX, and an
+// ASN carries no ANNOUNCED_BY edge in either direction. A fixture that drew it reaching an
+// ASN would teach the reader a hop the live graph does not serve.
+func TestExploreFixturesNeverWalkAnnouncedByToAnASN(t *testing.T) {
+	is := func(n graphNode, label string) bool {
+		for _, l := range n.Labels {
+			if l == label {
+				return true
+			}
+		}
+		return false
+	}
+	seen := 0
+	for name, mk := range exploreFixtures() {
+		deck := mk()
+		for _, g := range deck.edges {
+			if strings.TrimSuffix(g.Type, "⁻¹") != "ANNOUNCED_BY" {
+				continue
+			}
+			seen++
+			if is(deck.focus, "ASN") {
+				t.Errorf("%s: an ASN focus carries %s, an edge an ASN never has", name, g.Type)
+			}
+			for _, n := range g.Sample {
+				if g.Dir > 0 && !is(n, "ANNOUNCED_PREFIX") {
+					t.Errorf("%s: outgoing ANNOUNCED_BY lands on %v %q, want ANNOUNCED_PREFIX", name, n.Labels, n.Value)
+				}
+				if is(n, "ASN") {
+					t.Errorf("%s: %s reaches ASN %q", name, g.Type, n.Value)
+				}
+			}
+		}
+	}
+	if seen == 0 {
+		t.Fatal("no fixture draws ANNOUNCED_BY, so this guard checks nothing")
+	}
+}

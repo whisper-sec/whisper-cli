@@ -127,8 +127,10 @@ func (v *monitorView) observe(e model.Event) {
 		idx = (r.head - int(delta) + kbpsWindow*2) % kbpsWindow
 	}
 	if e.CountsBytes() {
-		// An interim row's delta charts at its own time; a closed row whose interim rows
-		// already carried its bytes adds none again (it still counts as a connection).
+		// An interim row's delta charts at its own time. A closed row whose interim rows
+		// already carried its bytes adds none again, and neither does a budget-breach row,
+		// which repeats the bytes its closed row carries. Each still counts as a connection
+		// (a budget refusal at CONNECT writes only the breach row).
 		r.bytes[idx] += float64(e.BytesUp + e.BytesDown)
 	}
 	switch e.Kind {

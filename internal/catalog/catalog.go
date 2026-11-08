@@ -38,11 +38,13 @@ var catalogJSON []byte
 //	GET  console.whisper.security/api/gallery/run        405   (bogus sibling: 404 HTML)
 //	POST console.whisper.security/api/gallery/run        404 {"error":"FlowNotFound"} - the
 //	                                                     handler itself answering, keyless
-//	POST console.whisper.online/api/gallery/run (now edr.whisper.security)          401 {"code":"UNAUTHENTICATED"}
+//	POST console.whisper.online/api/gallery/run          401 {"code":"UNAUTHENTICATED"}
 //	POST console.whisper.online/api/gallery/<bogus>      401, byte-identical
 //
-// The EDR console answers the same 401 for every path, so 401 there is the blanket
-// middleware and not a route. There is no gallery in that app at all.
+// console.whisper.online was the EDR console's name when this was measured; it now
+// redirects to edr.whisper.security. The EDR console answers the same 401 for every
+// path, so 401 there is the blanket middleware and not a route. There is no gallery in
+// that app at all.
 const (
 	fallbackDocsBase   = "https://www.whisper.security"
 	fallbackGraphURL   = "https://graph.whisper.online/api/query"

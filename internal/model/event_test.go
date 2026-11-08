@@ -152,3 +152,27 @@ func TestAllDigitsPort(t *testing.T) {
 		}
 	}
 }
+
+// TestChartsConnBytesOnlyClosedAndReasonless pins which conn rows feed a byte sum: the
+// closed row and an older server's row with no reason. A budget-breach row repeats its
+// tunnel's bytes, so summing it would count the tunnel twice.
+func TestChartsConnBytesOnlyClosedAndReasonless(t *testing.T) {
+	cases := []struct {
+		e    Event
+		want bool
+	}{
+		{Event{Kind: "conn", Reason: "closed"}, true},
+		{Event{Kind: "conn"}, true},
+		{Event{Kind: "conn", Reason: "budget-breach"}, false},
+		{Event{Kind: "conn", Reason: "budget-breach:budget-kill"}, false},
+		{Event{Kind: "conn", Reason: "fw-deny"}, false},
+		{Event{Kind: "conn", Reason: "ssrf-block"}, false},
+		{Event{Kind: "dns"}, false},
+		{Event{Kind: "alloc"}, false},
+	}
+	for _, c := range cases {
+		if got := c.e.ChartsConnBytes(); got != c.want {
+			t.Errorf("%s/%q: ChartsConnBytes=%v want %v", c.e.Kind, c.e.Reason, got, c.want)
+		}
+	}
+}

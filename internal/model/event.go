@@ -76,6 +76,14 @@ type Event struct {
 func (e Event) FlashTick() int      { return e.flashTick }
 func (e *Event) SetFlashTick(t int) { e.flashTick = t }
 
+// ChartsConnBytes reports whether a conn row's bytes belong in a byte sum. Only the
+// closed row carries a tunnel's count once, and an older server's rows carry no reason
+// at all, so those two shapes are summed. A budget-breach row repeats bytes the closed
+// row already carries, and a deny or a failed dial moved nothing.
+func (e Event) ChartsConnBytes() bool {
+	return e.Kind == "conn" && (e.Reason == "closed" || e.Reason == "")
+}
+
 // Time returns the event time as a Go time (UTC).
 func (e Event) Time() time.Time { return time.UnixMicro(e.TsMicros).UTC() }
 

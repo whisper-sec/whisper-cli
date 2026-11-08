@@ -215,7 +215,11 @@ func TestCountsBytesByKind(t *testing.T) {
 		want bool
 	}{
 		{Event{Kind: KindConn}, true},
+		{Event{Kind: KindConn, Reason: "closed"}, true},
 		{Event{Kind: KindConn, InterimAccounted: true}, false},
+		{Event{Kind: KindConn, Reason: "closed", InterimAccounted: true}, false},
+		{Event{Kind: KindConn, Reason: "budget-breach:budget-bytes-up"}, false},
+		{Event{Kind: KindConn, Reason: "denied"}, false},
 		{Event{Kind: KindInterim}, true},
 		{Event{Kind: "dns"}, false},
 		{Event{Kind: "alloc"}, false},
@@ -223,6 +227,28 @@ func TestCountsBytesByKind(t *testing.T) {
 	for _, c := range cases {
 		if got := c.e.CountsBytes(); got != c.want {
 			t.Errorf("%+v: CountsBytes=%v want %v", c.e, got, c.want)
+		}
+	}
+}
+
+// A tunnel cut by its byte budget mid-stream writes interim rows, then a budget-breach
+// row and a closed row that both carry the tunnel's totals. Whether the closed row is
+// marked by the stream or the tally infers the mark from the interim rows, the bytes
+// are summed once: the interim deltas, and neither the breach row nor the closed row.
+func TestABreachRowNextToAnInterimAccountedCloseCountsOnce(t *testing.T) {
+	for _, marked := range []bool{true, false} {
+		evs := longTunnel("2a04:2a01::1", t0, marked)
+		closed := evs[len(evs)-1]
+		breach := closed
+		breach.Reason = "budget-breach:budget-bytes-up"
+		breach.InterimAccounted = false
+		evs = append(evs[:len(evs)-1], breach, closed)
+		evs = annotateAll(evs)
+		if !evs[len(evs)-1].InterimAccounted {
+			t.Fatalf("marked=%v: the closed row is interim-accounted", marked)
+		}
+		if got, want := sumCounted(evs), int64(1700+26000); got != want {
+			t.Errorf("marked=%v: summed %d bytes, want %d (each byte once)", marked, got, want)
 		}
 	}
 }

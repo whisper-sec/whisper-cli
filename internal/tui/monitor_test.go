@@ -487,6 +487,79 @@ func TestMonitorObserveBlockRate(t *testing.T) {
 	}
 }
 
+// TestMonitorChartsABreachedTunnelOnce asserts the rate ring sums a breached tunnel's
+// bytes once: the budget-breach row and the closed row that follows carry the same
+// bytes, and only the closed row (or an older server's reasonless row) is charted.
+func TestMonitorChartsABreachedTunnelOnce(t *testing.T) {
+	a := newTestApp(t, 100, 30)
+	key := "2a04:2a01::1"
+	ts := time.Now().UnixMicro()
+	tunnel := model.Event{Kind: "conn", Addr128: key, TsMicros: ts, PeerHost: "203.0.113.9", PeerPort: 443,
+		BytesUp: 4000, BytesDown: 6000}
+	breach, closed := tunnel, tunnel
+	breach.Reason = "budget-breach:budget-bytes-up"
+	closed.Reason = "closed"
+	a.monitorVw.observe(breach)
+	a.monitorVw.observe(closed)
+
+	sum := func(k string) float64 {
+		var b float64
+		for _, x := range a.monitorVw.rings[k].bytes {
+			b += x
+		}
+		return b
+	}
+	if got := sum(key); got != 10000 {
+		t.Errorf("a breach row next to its closed row charts %v bytes, want 10000 (counted once)", got)
+	}
+
+	// An older server writes conn rows with no reason: those are still charted.
+	old := tunnel
+	old.Addr128 = "2a04:2a01::2"
+	a.monitorVw.observe(old)
+	if got := sum(old.Addr128); got != 10000 {
+		t.Errorf("a reasonless conn row charts %v bytes, want 10000", got)
+	}
+}
+
+// TestMonitorChartsABreachNextToAnInterimAccountedCloseOnce asserts a long tunnel cut
+// by its budget charts each byte once: its interim deltas chart, and neither the
+// budget-breach row nor the interim-accounted closed row (both carrying the totals)
+// adds them again. Both still count as connections.
+func TestMonitorChartsABreachNextToAnInterimAccountedCloseOnce(t *testing.T) {
+	a := newTestApp(t, 100, 30)
+	key := "2a04:2a01::3"
+	now := time.Now().UnixMicro()
+	open := now - 200*1_000_000
+	row := func(kind string, at, up, down int64, reason string) model.Event {
+		return model.Event{Kind: kind, Addr128: key, TsMicros: at, PeerHost: "203.0.113.9", PeerPort: 443,
+			BytesUp: up, BytesDown: down, DurUS: at - open, Reason: reason}
+	}
+	breach := row("conn", now-10*1_000_000, 1500, 25000, "budget-breach:budget-bytes-up")
+	closed := breach
+	closed.Reason = "closed"
+	closed.InterimAccounted = true
+	for _, e := range []model.Event{
+		row("interim", now-150*1_000_000, 1000, 20000, "interim"),
+		row("interim", now-60*1_000_000, 500, 5000, "interim"),
+		breach,
+		closed,
+	} {
+		a.monitorVw.observe(e)
+	}
+	var bytes, conns float64
+	for i := range a.monitorVw.rings[key].bytes {
+		bytes += a.monitorVw.rings[key].bytes[i]
+		conns += a.monitorVw.rings[key].conns[i]
+	}
+	if bytes != 26500 {
+		t.Errorf("charted %v bytes, want 26500 (the interim deltas, once)", bytes)
+	}
+	if conns != 2 {
+		t.Errorf("counted %v connections, want 2 (the breach row and the closed row)", conns)
+	}
+}
+
 // --- last-active fleet ordering + the freeze toggle --------------------------
 
 // TestAgentsOrderByLastActive asserts the DEFAULT fleet order follows folded activity:
