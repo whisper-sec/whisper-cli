@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"sync"
 	"time"
 	"unsafe"
 
@@ -24,16 +23,6 @@ var (
 	user32                      = windows.NewLazySystemDLL("user32.dll")
 	procGetProcessWindowStation = user32.NewProc("GetProcessWindowStation")
 	procGetThreadDesktop        = user32.NewProc("GetThreadDesktop")
-)
-
-// watchInterval is how often the watch asks the engine for every filter the run depends on.
-const watchInterval = 500 * time.Millisecond
-
-// exitFilterLost is the agent's exit code when the watch killed it; exitInterrupted is
-// STATUS_CONTROL_C_EXIT, what Windows reports for a program ended by Ctrl-C.
-const (
-	exitFilterLost  = 0xE0F1
-	exitInterrupted = 0xC000013A
 )
 
 // WindowsSpec is what the CLI hands over: the agent's command and environment, and the port of
@@ -183,38 +172,20 @@ func RunWindows(spec WindowsSpec, ready func()) (res WindowsResult, err error) {
 	}
 	defer windows.CloseHandle(proc) //nolint:errcheck
 
-	var killOnce sync.Once
-	kill := func(why string, code uint32) {
-		killOnce.Do(func() {
-			res.Killed = why
-			_ = windows.TerminateJobObject(job, code)
-		})
-	}
-	done := make(chan struct{})
-	go func() {
-		t := time.NewTicker(watchInterval)
-		defer t.Stop()
-		for {
-			select {
-			case <-done:
-				return
-			case <-intr:
-				kill("interrupted", exitInterrupted)
-			case <-t.C:
-				if why := checkFilters(static, agentIDs, dyn, icmpIDs); why != "" {
-					logf("whisper: %s, so the agent was stopped (it is never left running unfiltered)", why)
-					kill(why, exitFilterLost)
-				}
-			}
-		}
-	}()
+	// The watch is stopped and waited for before anything is torn down (finish), so it can
+	// never read the run's own teardown as a lost filter, nor end a job whose handle is gone.
+	ticker := time.NewTicker(watchInterval)
+	defer ticker.Stop()
+	check := func() string { return checkFilters(static, agentIDs, dyn, icmpIDs) }
+	kill := func(code uint32) error { return windows.TerminateJobObject(job, code) }
+	w := startWatch(ticker.C, intr, check, kill, logf)
 
 	_, werr := windows.WaitForSingleObject(proc, windows.INFINITE)
-	close(done)
 	var code uint32
 	if werr == nil {
 		werr = windows.GetExitCodeProcess(proc, &code)
 	}
+	res.Killed = w.finish(code)
 	// The agent's tree goes before its filters: nothing it started may outlive them.
 	_ = windows.TerminateJobObject(job, 1)
 	waitJobEmpty(job, 5*time.Second)

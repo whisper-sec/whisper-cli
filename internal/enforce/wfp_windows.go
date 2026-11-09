@@ -51,6 +51,12 @@ func (e *wfpErr) Error() string {
 	return fmt.Sprintf("%s: %v (0x%08X)", e.call, windows.Errno(e.code), e.code)
 }
 
+// The arguments are addresses passed as integers. Without the directive below, a variable whose
+// address is passed may live on this goroutine's stack, and the stack can move during the call
+// (the first call loads the DLL, which may grow it), so the engine would read or write the old
+// stack. The directive keeps every such variable off the stack, as x/sys does for LazyProc.Call.
+//
+//go:uintptrescapes
 func wfpCall(name string, p *windows.LazyProc, args ...uintptr) error {
 	if err := p.Find(); err != nil {
 		return fmt.Errorf("the Windows Filtering Platform is not available here (%s: %w)", name, err)

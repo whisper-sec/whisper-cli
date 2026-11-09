@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 	"unsafe"
@@ -226,11 +225,17 @@ func TestTheWatchStopsTheAgentWhenAFilterVanishes(t *testing.T) {
 		t.Skip("no powershell.exe")
 	}
 	self, _ := selfTag()
-	var deleted atomic.Bool
+	// The saboteur is waited for before the result is read, so it can neither be read early nor
+	// reach into the next test's run (every run in this process carries the same tag).
+	deleted := make(chan bool, 1)
+	sabotaging := false // ready runs only once the filters are in place; an earlier failure skips it
 	start := time.Now()
 	res, err := RunWindows(WindowsSpec{Path: ps, Args: []string{"powershell", "-NoProfile", "-Command", "Start-Sleep 60"},
 		Env: os.Environ(), ProxyPort: 1}, func() {
+		sabotaging = true
 		go func() {
+			ok := false
+			defer func() { deleted <- ok }()
 			time.Sleep(2 * time.Second)
 			e, oerr := openEngine(false, "whisper enforce test (saboteur)")
 			if oerr != nil {
@@ -240,16 +245,17 @@ func TestTheWatchStopsTheAgentWhenAFilterVanishes(t *testing.T) {
 			fs, _ := e.providerFilters(LayerConnectV6)
 			for _, f := range fs {
 				if f.desc == self.String() && e.deleteFilter(f.id) == nil {
-					deleted.Store(true)
+					ok = true
 					return
 				}
 			}
 		}()
 	})
+	sabotaged := sabotaging && <-deleted
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !deleted.Load() {
+	if !sabotaged {
 		t.Fatal("the test could not find the run's own IPv6 block to delete")
 	}
 	if res.Killed == "" || res.Code != exitFilterLost {
@@ -296,5 +302,24 @@ func assertNoFiltersOf(t *testing.T, tag RunTag) {
 				t.Fatalf("filter %d of the ended run is still in the engine on %v", f.id, l)
 			}
 		}
+	}
+}
+
+// wfpCall hands the engine addresses as integers, so a variable whose address it passes must not
+// live on the goroutine's stack, which can move during the call. Measured, not read from the
+// source: passing a variable's address has to cost the allocation that puts it on the heap, which
+// passing a plain integer does not. The procedure does not exist, so nothing is called; the
+// allocation happens at the call site either way.
+func TestWFPCallKeepsWhatItIsHandedOffTheStack(t *testing.T) {
+	none := windows.NewLazySystemDLL("whisper-no-such-library.dll").NewProc("NoSuchProc")
+	plain := testing.AllocsPerRun(100, func() {
+		_ = wfpCall("NoSuchProc", none, 0)
+	})
+	addressed := testing.AllocsPerRun(100, func() {
+		var id uint64
+		_ = wfpCall("NoSuchProc", none, uintptr(unsafe.Pointer(&id)))
+	})
+	if addressed < plain+1 {
+		t.Fatalf("a variable whose address is passed to wfpCall stays on the stack (%v allocations, %v for a plain integer)", addressed, plain)
 	}
 }
