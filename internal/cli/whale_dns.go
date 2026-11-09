@@ -78,6 +78,9 @@ func newWhaleDNSStatusCmd() *cobra.Command {
 				"doh_url":     maskDoHURL(st.DoHURL),
 				"applied_at":  st.AppliedAt,
 			}
+			if ips := st.resolverIPs(); len(ips) > 1 {
+				view["resolver_ips"] = ips
+			}
 			if st.ResolverIP != "" {
 				rtt, err := probeResolver(cx, st.ResolverIP, whale.NetcheckQName, dns.TypeSOA)
 				if err != nil {
@@ -101,7 +104,7 @@ func newWhaleDNSStatusCmd() *cobra.Command {
 			rows := [][]string{
 				{"mode", orDash(st.Mode)},
 				{"os", orDash(st.OS)},
-				{"resolver", orDash(st.ResolverIP)},
+				{"resolver", orDash(strings.Join(st.resolverIPs(), ", "))},
 				{"doh url", orDash(maskDoHURL(st.DoHURL))},
 				{"applied", orDash(st.AppliedAt)},
 			}

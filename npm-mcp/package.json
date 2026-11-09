@@ -1,8 +1,8 @@
 {
   "name": "@whisper-security/whisper-mcp",
-  "version": "0.260.2",
+  "version": "0.261.1",
   "mcpName": "io.github.whisper-sec/whisper",
-  "whisperCliVersion": "0.260.2",
+  "whisperCliVersion": "0.261.1",
   "description": "Give an AI agent a real, routable IPv6 identity, verifiable egress and DNS policy. Keyless: verify any agent's identity and query the infrastructure graph. With a key: register, govern and route agents.",
   "keywords": [
     "mcp",
@@ -47,16 +47,16 @@
     "access": "public"
   },
   "whisperCliDigests": {
-    "whisper-darwin-amd64": "05f11d24cfd438d0f066d8689ed317dbeed0903197363ffb66bc95cbd4e0da60",
-    "whisper-darwin-arm64": "52cb00737b9ae8945d7cd33f0ecfe32e44b621ac11efbe8d2ed4f22396ca4092",
-    "whisper-linux-386": "04b71c548a8ecd35129dbdd922b63bdcffad715a7141d79f9c7b6af195a25c8d",
-    "whisper-linux-amd64": "a75321840f90bb62555912e94dff17ffe7901f006d8fc23d53f4df6e345bdef1",
-    "whisper-linux-arm": "a832abfae5ad9fa9252fee7c28dfcf8d385838e69c75f7e3c151fc180a4602f8",
-    "whisper-linux-arm64": "4d54fc8944afee0dac999a985a1f0dc629988eabcc0c4cff141cf92181e94c41",
-    "whisper-linux-mips": "10a3eed4b3a347db25ac6fd626d8622add24e27666cd88f1c768e858c847c649",
-    "whisper-linux-mipsle": "932a3c7da3652c6219618511abcb0efc391de9539c0a03dd52f179fc70098f05",
-    "whisper-linux-riscv64": "b6545335cddf34f040d0ba7d143906e41b0652430f7892b2162fac9ea6586512",
-    "whisper-windows-amd64.exe": "2d3706915c258bdcf84d3d54d7b70e81f036e8830f30fa46645bf4d5f776f5d3",
-    "whisper-windows-arm64.exe": "960ef6906ac3f5e9ece7140c32c6cd9874b69ddbfe45a2aa39bdabb984471fde"
+    "whisper-darwin-amd64": "bd5f9c9e3d741040a187b191af06b1dead30e466ee11d9aea89c0b5bf3cf802e",
+    "whisper-darwin-arm64": "7b18d542a824bdd735cc101bbf2ee0f2fb1aa88a898b49b2cb7b3ebcbf7cae8b",
+    "whisper-linux-386": "3808dcdd337e1075200bf7fedddabdaec1903d9ae73f2865a37d34498ab9e56a",
+    "whisper-linux-amd64": "eb77189af323180a6b655d486dc3ae1df607edfe9ed5670a7141311495bc923f",
+    "whisper-linux-arm": "0b2726b8faf2a2de1fcc83c152e8ff682937138e4986a67ac6170c93964326c9",
+    "whisper-linux-arm64": "912d3961fadec9095368220be27b82348d0c33a8bffba9034415a7972a4a3277",
+    "whisper-linux-mips": "ac61d9c22fbb331677013871bc4589d5f37fcabbd87c21ab9800790f2508977a",
+    "whisper-linux-mipsle": "1d136177b29e362c897758736375988261887fd506adcf029371281034cbfbc7",
+    "whisper-linux-riscv64": "050154a0c13282aaff099c900095726074f1d2e1bb3f6b8ccb488a9da32a1e37",
+    "whisper-windows-amd64.exe": "35587ac3605cd2ebf5abebb9c2ce581329ca93caf34d18338fa78cf63b1b41e1",
+    "whisper-windows-arm64.exe": "f27d5c50a54f44d7d19aee4a87458ccba7e6a1a591ece559e34a685d33cb83ae"
   }
 }

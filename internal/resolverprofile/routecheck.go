@@ -38,8 +38,13 @@ const (
 type RouteCheck struct {
 	State RouteState
 	// Want is the resolver address lookups should reach (the dedicated /128,
-	// or the local DoH forwarder on 127.0.0.1).
+	// or the local DoH forwarder on 127.0.0.1). With a resolver pair it is the
+	// first address.
 	Want string
+	// Accept is every address that counts as ours, Want first: the resolver
+	// pair when the plan configured two, else just Want. Lookups that have
+	// moved to the failover address are still going to Whisper.
+	Accept []string
 	// Problems is one plain sentence per thing that takes lookups away from
 	// Want, each ending with the fix. Empty unless State is RouteShadowed.
 	Problems []string
@@ -231,8 +236,33 @@ func filesSetting(confs []ConfFile, s, ours string) []string {
 // measured, not assumed: such a link received 41 of 72 upstream queries in
 // parallel with ours.
 func CheckResolved(want string, matchAll bool, ev ResolvedEvidence) RouteCheck {
-	want = stripServer(want)
-	rc := RouteCheck{Want: want}
+	return CheckResolvedAny([]string{want}, matchAll, ev)
+}
+
+// acceptSet normalises the addresses that count as ours, first one first.
+func acceptSet(wants []string) (want string, accept []string, ours map[string]bool) {
+	ours = map[string]bool{}
+	for _, w := range wants {
+		w = stripServer(strings.TrimSpace(w))
+		if w == "" || ours[w] {
+			continue
+		}
+		ours[w] = true
+		accept = append(accept, w)
+	}
+	if len(accept) > 0 {
+		want = accept[0]
+	}
+	return want, accept, ours
+}
+
+// CheckResolvedAny is CheckResolved for a resolver pair: any address in wants
+// counts as ours, so a host whose resolved has moved to the failover address
+// is still routed to Whisper.
+func CheckResolvedAny(wants []string, matchAll bool, ev ResolvedEvidence) RouteCheck {
+	want, accept, ours := acceptSet(wants)
+	named := strings.Join(accept, " or ")
+	rc := RouteCheck{Want: want, Accept: accept}
 	order, servers := resolvedScopes(ev.DNS)
 	if _, ok := servers["Global"]; !ok {
 		rc.Unread = "`resolvectl dns` listed no Global scope"
@@ -244,13 +274,13 @@ func CheckResolved(want string, matchAll bool, ev ResolvedEvidence) RouteCheck {
 	}
 	has := false
 	for _, s := range global {
-		if s == want {
+		if ours[s] {
 			has = true
 		}
 	}
 	switch {
 	case !has:
-		p := "systemd-resolved is not using " + want + " at all"
+		p := "systemd-resolved is not using " + named + " at all"
 		if len(global) > 0 {
 			p += "; its global servers are " + strings.Join(global, ", ")
 		}
@@ -261,8 +291,8 @@ func CheckResolved(want string, matchAll bool, ev ResolvedEvidence) RouteCheck {
 		}
 		rc.Problems = append(rc.Problems, p)
 	default:
-		if cur := globalCurrentServer(ev.Status); cur != "" && cur != want {
-			p := "systemd-resolved's current server is " + cur + ", not " + want
+		if cur := globalCurrentServer(ev.Status); cur != "" && !ours[cur] {
+			p := "systemd-resolved's current server is " + cur + ", not " + named
 			if by := filesSetting(ev.Confs, cur, LinuxDropIn); len(by) > 0 {
 				p += " (set in " + strings.Join(by, ", ") + "); remove that DNS= line, then run: sudo systemctl restart systemd-resolved"
 			} else {
@@ -295,7 +325,7 @@ func CheckResolved(want string, matchAll bool, ev ResolvedEvidence) RouteCheck {
 		}
 	}
 	if ev.ResolvConf != "" {
-		if ns := resolvConfNameservers(ev.ResolvConf); len(ns) > 0 && !resolvedStubAddrs[ns[0]] && ns[0] != want {
+		if ns := resolvConfNameservers(ev.ResolvConf); len(ns) > 0 && !resolvedStubAddrs[ns[0]] && !ours[ns[0]] {
 			rc.Problems = append(rc.Problems, "/etc/resolv.conf sends lookups straight to "+ns[0]+", bypassing systemd-resolved; point it at the resolved stub (sudo ln -sf /run/systemd/resolve/stub-resolv.conf /etc/resolv.conf) or stop the tool that rewrites it")
 		}
 	}
@@ -311,14 +341,20 @@ func CheckResolved(want string, matchAll bool, ev ResolvedEvidence) RouteCheck {
 // nameserver, so that must be ours. Something like NetworkManager or a DHCP
 // hook can rewrite the file the moment we write it.
 func CheckResolvConf(want, content string) RouteCheck {
-	want = stripServer(want)
-	rc := RouteCheck{Want: want}
+	return CheckResolvConfAny([]string{want}, content)
+}
+
+// CheckResolvConfAny is CheckResolvConf for a resolver pair: the first
+// nameserver must be one of wants.
+func CheckResolvConfAny(wants []string, content string) RouteCheck {
+	want, accept, ours := acceptSet(wants)
+	rc := RouteCheck{Want: want, Accept: accept}
 	ns := resolvConfNameservers(content)
 	if len(ns) == 0 {
 		rc.Unread = LinuxResolvConf + " lists no nameserver"
 		return rc
 	}
-	if ns[0] != want {
+	if !ours[ns[0]] {
 		rc.State = RouteShadowed
 		rc.Problems = append(rc.Problems, LinuxResolvConf+" sends lookups to "+ns[0]+" first, not "+want+"; another tool (NetworkManager, dhclient, resolvconf) rewrote it - configure that tool to use "+want+", or stop it managing the file")
 		return rc

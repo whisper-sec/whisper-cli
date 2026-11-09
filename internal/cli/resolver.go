@@ -96,6 +96,9 @@ type resolverState struct {
 	DoHURL     string `json:"doh_url,omitempty"`
 	DotHost    string `json:"dot_host,omitempty"`
 	ResolverIP string `json:"resolver_ip,omitempty"` // the tenant's dedicated :53 /128
+	// ResolverIPs is the tenant's resolver address list, primary first, when the
+	// server offers a failover address; empty otherwise (ResolverIP alone).
+	ResolverIPs []string `json:"resolver_ips,omitempty"`
 	// Suffix is this tenant's DNS namespace (t<hash>.agents.whisper.online), the
 	// parent of the device's own FQDN. The search-domain work installs it as a real OS SEARCH
 	// domain so a bare `ping db-01` completes to db-01.<suffix> locally, without
@@ -327,15 +330,16 @@ func runResolver(o resolverOpts) error {
 			saveResolverState(st)
 		}
 		if resolverIP == "" && (mode == resolverprofile.ModeDNS53 || prefer53) {
-			ip, err := ensureTenantResolver(c)
+			ips, err := ensureTenantResolver(c)
 			if err != nil {
 				return err
 			}
-			st.ResolverIP, resolverIP = ip, ip
+			st.ResolverIP, resolverIP = ips[0], ips[0]
+			st.ResolverIPs = pairOrNil(ips)
 			saveResolverState(st)
 		}
 		if prefer53 {
-			if perr := resolverProbe53(resolverIP); perr == nil {
+			if perr := probeAnyResolver(st.resolverIPs()); perr == nil {
 				mode = resolverprofile.ModeDNS53
 				notes = append(notes, "Linux default: your dedicated per-tenant resolver on :53 - no forwarder needed (force the encrypted DoH forwarder profile with --doh)")
 			} else if host.ForwarderKind != "" {
@@ -343,6 +347,7 @@ func runResolver(o resolverOpts) error {
 				// The DoH plan must not silently fall back to the /128 we just
 				// proved unreachable.
 				resolverIP = ""
+				st.ResolverIPs = nil
 			} else {
 				return fmt.Errorf("your dedicated resolver %s did not answer from this host (%v; it listens on IPv6 :53, so check the global IPv6 route) "+
 					"and no usable DoH forwarder is installed for the encrypted fallback - install one (sudo apt install dnscrypt-proxy) and re-run `whisper resolver`; nothing was changed", resolverIP, perr)
@@ -357,6 +362,9 @@ func runResolver(o resolverOpts) error {
 	}
 	if resolverIP != "" {
 		p.ResolverIPs = []string{resolverIP}
+		if resolverIP == st.ResolverIP && len(st.ResolverIPs) > 1 {
+			p.ResolverIPs = st.ResolverIPs
+		}
 	}
 	// install the tenant's own namespace as a REAL OS search domain, so
 	// a bare hostname completes on the host rather than relying on the server-side
@@ -428,7 +436,7 @@ func runResolverOff(o resolverOpts, osName string) error {
 		DohTemplate: firstNonBlank(st.DoHURL, resolverprofile.BareDoHURL),
 	}
 	if st.ResolverIP != "" {
-		p.ResolverIPs = []string{st.ResolverIP}
+		p.ResolverIPs = st.resolverIPs()
 	}
 	if st.Suffix != "" {
 		p.SearchDomains = []string{st.Suffix} // the search-domain support, same list the apply installed
@@ -540,11 +548,12 @@ func mintResolverDevice(c *client.Client, o resolverOpts) (resolverState, error)
 	rec := recs[0]
 	t2 := tier2FromEnvelope(env) // validated doh_url + resolver_ip (fail-soft)
 	return resolverState{
-		Token:      field(rec, "token"),
-		Address:    field(rec, "address"),
-		DoHURL:     t2.DoHURL,
-		DotHost:    field(rec, "dot_host"),
-		ResolverIP: t2.ResolverIP,
+		Token:       field(rec, "token"),
+		Address:     field(rec, "address"),
+		DoHURL:      t2.DoHURL,
+		DotHost:     field(rec, "dot_host"),
+		ResolverIP:  t2.ResolverIP,
+		ResolverIPs: pairOrNil(t2.ResolverIPs),
 		// search domains on top of that: the suffix worth SEARCHING is the fleet
 		// namespace the MEMBER name lives in, not the agent's own island. op:register
 		// re-parents the member name into the registrant's subtree while the canonical
@@ -576,25 +585,73 @@ func parentOfFqdn(fqdn string) string {
 
 // ensureTenantResolver allocates (or returns) the caller-tenant's dedicated
 // :53 resolver /128 via op:resolver - a per-tenant slot, one per account.
-func ensureTenantResolver(c *client.Client) (string, error) {
+// ensureTenantResolver returns the tenant's resolver addresses, primary first:
+// one address, or the primary and its failover when the server offers both
+// (the addresses column). Never empty on success.
+func ensureTenantResolver(c *client.Client) ([]string, error) {
 	cx, cancel := ctx()
 	defer cancel()
 	env, err := c.Agents(cx, "resolver", map[string]any{})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if perr := envelopeError(env); perr != nil {
-		return "", perr
+		return nil, perr
 	}
 	recs := env.Result.Records()
 	if len(recs) == 0 {
-		return "", fmt.Errorf("the control plane returned no resolver record")
+		return nil, fmt.Errorf("the control plane returned no resolver record")
 	}
 	addr := field(recs[0], "address")
 	if addr == "" {
-		return "", fmt.Errorf("the control plane returned no resolver address (state %q)", field(recs[0], "state"))
+		return nil, fmt.Errorf("the control plane returned no resolver address (state %q)", field(recs[0], "state"))
 	}
-	return addr, nil
+	if ips := resolverIPList(recs[0], "addresses", addr); len(ips) > 0 {
+		return ips, nil
+	}
+	return []string{addr}, nil
+}
+
+// resolverIPs is the saved address list, primary first: the pair when one was
+// saved, else the single address, else nil.
+func (st resolverState) resolverIPs() []string {
+	if len(st.ResolverIPs) > 1 && st.ResolverIPs[0] == st.ResolverIP {
+		return st.ResolverIPs
+	}
+	if st.ResolverIP == "" {
+		return nil
+	}
+	return []string{st.ResolverIP}
+}
+
+// pairOrNil keeps a list only when it carries a failover address, so a single
+// resolver saves and prints exactly as it always did.
+func pairOrNil(ips []string) []string {
+	if len(ips) < 2 {
+		return nil
+	}
+	return ips
+}
+
+// probeAnyResolver is resolverProbe53 over the address list: the profile is
+// usable from this host when any of the addresses answers (the first one may be
+// briefly unavailable while the second serves). It returns the first address's
+// error when none answers.
+func probeAnyResolver(ips []string) error {
+	var first error
+	for _, ip := range ips {
+		err := resolverProbe53(ip)
+		if err == nil {
+			return nil
+		}
+		if first == nil {
+			first = err
+		}
+	}
+	if first == nil {
+		first = fmt.Errorf("no resolver address to probe")
+	}
+	return first
 }
 
 // --- rendering --------------------------------------------------------------------
@@ -621,6 +678,9 @@ func resolverPlanJSON(r resolverprofile.Rendered, applied bool, script string) m
 		"notes":       r.Notes,
 		"applied":     applied,
 	}
+	if len(r.ResolverIPs) > 1 {
+		m["resolver_ips"] = r.ResolverIPs
+	}
 	if script != "" {
 		m["script"] = script
 	}
@@ -634,6 +694,15 @@ func resolverQuietValue(r resolverprofile.Rendered) string {
 		return r.ResolverIP
 	}
 	return r.DoHURL
+}
+
+// resolverLine is the human "resolver" value: the address, or the address and
+// its failover.
+func resolverLine(r resolverprofile.Rendered) string {
+	if len(r.ResolverIPs) > 1 {
+		return strings.Join(r.ResolverIPs, ", ") + " (in order; the second is the failover)"
+	}
+	return r.ResolverIP
 }
 
 // renderResolverPlan shows a plan WITHOUT applying it: the human header on
@@ -657,7 +726,7 @@ func renderResolverPlan(r resolverprofile.Rendered, applied bool, script string)
 		fmt.Fprintf(os.Stderr, "  doh url   %s\n", r.DoHURL)
 	}
 	if r.ResolverIP != "" {
-		fmt.Fprintf(os.Stderr, "  resolver  %s\n", r.ResolverIP)
+		fmt.Fprintf(os.Stderr, "  resolver  %s\n", resolverLine(r))
 	}
 	for _, n := range r.Notes {
 		fmt.Fprintf(os.Stderr, "  note      %s\n", n)
@@ -665,6 +734,15 @@ func renderResolverPlan(r resolverprofile.Rendered, applied bool, script string)
 	if script != "" {
 		fmt.Fprintln(os.Stdout, script)
 	}
+}
+
+// routeTargets names every address a verified route may reach: the pair when
+// the plan configured two, else Want.
+func routeTargets(rc *resolverprofile.RouteCheck) []string {
+	if len(rc.Accept) > 1 {
+		return rc.Accept
+	}
+	return []string{rc.Want}
 }
 
 // routeJSON is the scriptable form of a route check.
@@ -677,6 +755,9 @@ func routeJSON(rc *resolverprofile.RouteCheck) map[string]any {
 		state = "shadowed"
 	}
 	m := map[string]any{"state": state, "want": rc.Want}
+	if len(rc.Accept) > 1 {
+		m["accept"] = rc.Accept
+	}
 	if len(rc.Problems) > 0 {
 		m["problems"] = rc.Problems
 	}
@@ -713,7 +794,7 @@ func renderResolverApplied(r resolverprofile.Rendered, route *resolverprofile.Ro
 	case route == nil || route.State == resolverprofile.RouteOurs:
 		fmt.Fprintf(os.Stderr, "whisper: Tier-2 DNS applied - this machine now resolves through Whisper (%s)\n", what)
 		if route != nil {
-			fmt.Fprintf(os.Stderr, "  verified  every lookup goes to %s\n", route.Want)
+			fmt.Fprintf(os.Stderr, "  verified  every lookup goes to %s\n", strings.Join(routeTargets(route), " or "))
 		}
 	case route.State == resolverprofile.RouteShadowed:
 		fmt.Fprintf(os.Stderr, "whisper: Tier-2 DNS written, but this machine does NOT resolve only through Whisper yet (%s)\n", what)
@@ -728,7 +809,7 @@ func renderResolverApplied(r resolverprofile.Rendered, route *resolverprofile.Ro
 		fmt.Fprintf(os.Stderr, "  doh url   %s\n", r.DoHURL)
 	}
 	if r.ResolverIP != "" {
-		fmt.Fprintf(os.Stderr, "  resolver  %s\n", r.ResolverIP)
+		fmt.Fprintf(os.Stderr, "  resolver  %s\n", resolverLine(r))
 	}
 	for _, n := range r.Notes {
 		fmt.Fprintf(os.Stderr, "  note      %s\n", n)

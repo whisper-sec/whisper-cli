@@ -21,6 +21,9 @@ import (
 //	              itself when it needs one.
 //	resolver_ip - the caller-tenant's dedicated :53 resolver /128 (the per-tenant op:resolver
 //	              slot) when allocated, else "".
+//	resolver_ips - when the server offers it, the full resolver address list, primary first
+//	              (the primary and its failover). Absent from older servers; the CLI then
+//	              uses resolver_ip alone, exactly as before.
 //
 // Both are FAIL-SOFT by contract: absent, empty, or malformed reads as "not available" and the
 // consumer treats it as "not offered" (the resolver verb then fails soft or falls back) - never an
@@ -33,6 +36,9 @@ type tier2Endpoints struct {
 	DoHURL string
 	// ResolverIP is the dedicated per-tenant :53 resolver IP literal ("" when none allocated).
 	ResolverIP string
+	// ResolverIPs is the resolver address list, primary first, when the server sent
+	// resolver_ips; otherwise just ResolverIP (or nil when there is none).
+	ResolverIPs []string
 }
 
 // empty reports whether the server offered no Tier-2 endpoint at all (the fallback signal).
@@ -58,6 +64,46 @@ func tier2FromRecord(rec map[string]any) tier2Endpoints {
 		if _, err := netip.ParseAddr(v); err == nil {
 			out.ResolverIP = v
 		}
+	}
+	out.ResolverIPs = resolverIPList(rec, "resolver_ips", out.ResolverIP)
+	if out.ResolverIP == "" && len(out.ResolverIPs) > 0 {
+		out.ResolverIP = out.ResolverIPs[0]
+	}
+	return out
+}
+
+// resolverIPList reads a list-of-addresses column (resolver_ips, addresses): every
+// entry must be an IP literal, blanks and repeats are dropped, order is kept. When
+// the column is absent, empty or holds nothing usable, the single fallback address
+// stands alone, so an older server that sends only the one address keeps working.
+// A list whose first entry differs from a non-empty fallback is put back in the
+// fallback's order: the single-address column names the primary.
+func resolverIPList(rec map[string]any, col, fallback string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			return
+		}
+		if _, err := netip.ParseAddr(s); err != nil {
+			return
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	if fallback != "" {
+		add(fallback)
+	}
+	if raw, ok := rec[col].([]any); ok {
+		for _, v := range raw {
+			if s, ok := v.(string); ok {
+				add(s)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

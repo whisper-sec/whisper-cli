@@ -136,6 +136,9 @@ func renderDeviceAdded(res *client.Result) error {
 		fmt.Fprintf(os.Stderr, "  android   %s  (Private DNS host)\n", v)
 	}
 	if v := field(rec, "resolver_ip"); v != "" {
+		if ips := resolverIPList(rec, "resolver_ips", v); len(ips) > 1 {
+			v = strings.Join(ips, ", ") + " (in order; the second is the failover)"
+		}
 		fmt.Fprintf(os.Stderr, "  resolver  %s\n", v)
 	}
 	// The token is the credential - shown ONCE on stdout so it is capturable/pipeable.

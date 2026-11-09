@@ -89,7 +89,9 @@ type Profile struct {
 	// DohTemplate is the DoH URL - the public keyless endpoint or the per-tenant
 	// keyed one (the token in the path is a resolve-only device credential).
 	DohTemplate string
-	// ResolverIPs are the dedicated per-tenant :53 resolver /128s (usually one).
+	// ResolverIPs are the dedicated per-tenant :53 resolver addresses, primary
+	// first. One address, or a pair: the second is the failover the OS moves to
+	// when the first stops answering.
 	ResolverIPs []string
 	// MatchDomains says which names route through Whisper; ["."] (the default
 	// when empty) means everything.
@@ -190,6 +192,9 @@ type Rendered struct {
 	Mode       Mode   `json:"mode"`
 	DoHURL     string `json:"doh_url,omitempty"`
 	ResolverIP string `json:"resolver_ip,omitempty"`
+	// ResolverIPs is the full address list, primary first. Set only when there
+	// is more than one, so a single-address plan reads exactly as it always has.
+	ResolverIPs []string `json:"resolver_ips,omitempty"`
 	// Summary is the one-line human description of what apply will do.
 	Summary string `json:"summary"`
 	Apply   []Step `json:"apply"`
@@ -214,13 +219,53 @@ func (p Profile) Render(h Host) Rendered {
 
 // firstResolverIP returns the plan's :53 target, "" when none is known.
 func (p Profile) firstResolverIP() string {
-	for _, ip := range p.ResolverIPs {
-		if s := strings.TrimSpace(ip); s != "" {
-			return s
-		}
+	if ips := p.resolverIPs(); len(ips) > 0 {
+		return ips[0]
 	}
 	return ""
 }
+
+// resolverIPs returns the :53 addresses in order, trimmed, blanks and repeats
+// dropped (liberal in what the caller hands us).
+func (p Profile) resolverIPs() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, ip := range p.ResolverIPs {
+		s := strings.TrimSpace(ip)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+// pairOrNil is the Rendered.ResolverIPs value: the list when there is a
+// failover address, nil (omitted) for a single one.
+func pairOrNil(ips []string) []string {
+	if len(ips) < 2 {
+		return nil
+	}
+	return ips
+}
+
+// resolverLabel names the :53 target in a summary line: the address alone, or
+// the address and its failover.
+func resolverLabel(ips []string) string {
+	if len(ips) < 2 {
+		return strings.Join(ips, "")
+	}
+	return ips[0] + " (failover " + strings.Join(ips[1:], ", ") + ")"
+}
+
+// failoverNote is said once whenever the plan configures more than one address.
+const failoverNote = "two resolver addresses are configured: lookups go to the first, and move to the second if the first stops answering"
+
+// resolvConfOptions is the stub tuning that goes with a pair in resolv.conf:
+// give up on a silent server after 1 s instead of glibc's 5 s, try each
+// server twice, and never rotate, so the steady load stays on the first.
+const resolvConfOptions = "options timeout:1 attempts:2\n"
 
 // matchDomains returns the normalised routing set, defaulting to everything.
 func (p Profile) matchDomains() []string {
@@ -288,7 +333,7 @@ func (p Profile) linuxSearchLine() string {
 }
 
 func (p Profile) renderLinux(h Host) Rendered {
-	r := Rendered{OS: "linux", Mode: p.Mode, DoHURL: p.DohTemplate, ResolverIP: p.firstResolverIP()}
+	r := Rendered{OS: "linux", Mode: p.Mode, DoHURL: p.DohTemplate, ResolverIP: p.firstResolverIP(), ResolverIPs: pairOrNil(p.resolverIPs())}
 
 	if p.Mode == ModeDoH {
 		if h.ForwarderKind == "" {
@@ -339,42 +384,46 @@ func (p Profile) renderLinux(h Host) Rendered {
 			// ANSWERS before repointing, so DNS is never left half-configured.
 			Step{WaitFor: LinuxLoopback + ":53"},
 		)
-		r.Apply = append(r.Apply, linuxPointResolverSteps(h, LinuxLoopback, p.linuxDomainsLine(), p.linuxSearchLine())...)
+		r.Apply = append(r.Apply, linuxPointResolverSteps(h, []string{LinuxLoopback}, p.linuxDomainsLine(), p.linuxSearchLine())...)
 		r.Revert = linuxRevertSteps(h)
 		return r
 	}
 
 	// ModeDNS53: the dedicated /128 is a real :53 listener - no forwarder, the
 	// trivial apply.
-	ip := p.firstResolverIP()
-	if ip == "" {
+	ips := p.resolverIPs()
+	if len(ips) == 0 {
 		r.Summary = "no dedicated :53 resolver address known"
 		r.Notes = append(r.Notes, "a dedicated :53 resolver needs a Whisper key (it is allocated per tenant, so your policy rides it) - run with a key")
 		r.Revert = linuxRevertSteps(h)
 		return r
 	}
 	if h.ResolvedActive {
-		r.Summary = "point systemd-resolved at your dedicated Whisper resolver " + ip + " (drop-in " + LinuxDropIn + ")"
+		r.Summary = "point systemd-resolved at your dedicated Whisper resolver " + resolverLabel(ips) + " (drop-in " + LinuxDropIn + ")"
 	} else {
-		r.Summary = "point " + LinuxResolvConf + " at your dedicated Whisper resolver " + ip + " (backup kept)"
+		r.Summary = "point " + LinuxResolvConf + " at your dedicated Whisper resolver " + resolverLabel(ips) + " (backup kept)"
 	}
-	r.Apply = linuxPointResolverSteps(h, ip, p.linuxDomainsLine(), p.linuxSearchLine())
+	r.Apply = linuxPointResolverSteps(h, ips, p.linuxDomainsLine(), p.linuxSearchLine())
 	r.Revert = linuxRevertSteps(h)
 	r.Notes = append(r.Notes,
 		"plain :53 is unencrypted on-path; the DoH profile (default mode) is the encrypted alternative",
 		"the dedicated resolver answers on IPv6; this host needs a global IPv6 route")
+	if len(ips) > 1 {
+		r.Notes = append(r.Notes, failoverNote)
+	}
 	return r
 }
 
-// linuxPointResolverSteps points the system resolver at ip: the resolved drop-in
-// when systemd-resolved is active, else the resolv.conf fallback with a backup
-// (only taken when no backup exists - matching the server script).
-func linuxPointResolverSteps(h Host, ip, domainsLine, searchLine string) []Step {
+// linuxPointResolverSteps points the system resolver at ips (primary first):
+// the resolved drop-in when systemd-resolved is active, else the resolv.conf
+// fallback with a backup (only taken when no backup exists - matching the
+// server script).
+func linuxPointResolverSteps(h Host, ips []string, domainsLine, searchLine string) []Step {
 	if h.ResolvedActive {
 		return []Step{
 			{File: &FileSpec{
 				Path:    LinuxDropIn,
-				Content: LinuxDropInContent(ip, domainsLine),
+				Content: LinuxDropInContent(strings.Join(ips, " "), domainsLine),
 				Mode:    0o644,
 			}},
 			{Cmd: []string{"systemctl", "restart", "systemd-resolved"}},
@@ -384,10 +433,25 @@ func linuxPointResolverSteps(h Host, ip, domainsLine, searchLine string) []Step 
 		{Cmd: []string{"cp", LinuxResolvConf, LinuxResolvBackup}, IfPresent: LinuxResolvConf, IfAbsent: LinuxResolvBackup},
 		{File: &FileSpec{
 			Path:    LinuxResolvConf,
-			Content: "nameserver " + ip + "\n" + searchLine,
+			Content: resolvConfContent(ips, searchLine),
 			Mode:    0o644,
 		}},
 	}
+}
+
+// resolvConfContent is the fallback resolv.conf: one nameserver line per
+// address in order, the failover tuning when there is more than one, then the
+// search line. A single address renders exactly the file it always did.
+func resolvConfContent(ips []string, searchLine string) string {
+	var b strings.Builder
+	for _, ip := range ips {
+		b.WriteString("nameserver " + ip + "\n")
+	}
+	if len(ips) > 1 {
+		b.WriteString(resolvConfOptions)
+	}
+	b.WriteString(searchLine)
+	return b.String()
 }
 
 // LinuxDropInContent renders our resolved.conf.d drop-in. The empty "DNS="
@@ -397,15 +461,17 @@ func linuxPointResolverSteps(h Host, ip, domainsLine, searchLine string) []Step 
 // Whisper (measured: 50 upstream queries to the other server, 0 to
 // ours). An empty assignment clears what was read before it, so while this
 // file is in place our server is the only global one (measured: 49 to ours, 0
-// elsewhere). Nothing else is touched: --off removes this file and the other
+// elsewhere). ips is one address or a space-separated list in order; with two,
+// resolved asks the first and moves to the second when the first fails.
+// Nothing else is touched: --off removes this file and the other
 // files' servers return exactly as they were. Sorting first instead
 // (00-whisper-...) was measured too and rejected: it keeps the other server as
 // a failover, and resolved switches to a failover after one timeout and stays
 // there, so the tenant's policy would drop away silently.
-func LinuxDropInContent(ip, domainsLine string) string {
+func LinuxDropInContent(ips, domainsLine string) string {
 	return "# Whisper resolver - generated by `whisper resolver`; revert with `whisper resolver --off`.\n" +
 		"# The empty DNS= clears servers set by files read earlier, so every lookup goes to Whisper while this file exists.\n" +
-		"[Resolve]\nDNS=\nDNS=" + ip + "\n" + domainsLine + "\n"
+		"[Resolve]\nDNS=\nDNS=" + ips + "\n" + domainsLine + "\n"
 }
 
 // linuxRevertSteps is ONE universal, guard-protected undo covering every apply
@@ -582,17 +648,21 @@ func splitDoHURL(dohURL string) (host, path string) {
 // --- Windows ----------------------------------------------------------------------
 
 func (p Profile) renderWindows() Rendered {
-	r := Rendered{OS: "windows", Mode: p.Mode, DoHURL: p.DohTemplate, ResolverIP: p.firstResolverIP()}
+	r := Rendered{OS: "windows", Mode: p.Mode, DoHURL: p.DohTemplate, ResolverIP: p.firstResolverIP(), ResolverIPs: pairOrNil(p.resolverIPs())}
 	if p.Mode == ModeDNS53 {
-		ip := p.firstResolverIP()
-		if ip == "" {
+		ips := p.resolverIPs()
+		if len(ips) == 0 {
 			r.Summary = "no dedicated :53 resolver address known"
 			r.Notes = append(r.Notes, "a dedicated :53 resolver needs a Whisper key (it is allocated per tenant, so your policy rides it) - run with a key")
 			return r
 		}
-		r.Summary = "point every non-loopback adapter at your dedicated Whisper resolver " + ip
+		r.Summary = "point every non-loopback adapter at your dedicated Whisper resolver " + resolverLabel(ips)
+		quoted := make([]string, 0, len(ips))
+		for _, ip := range ips {
+			quoted = append(quoted, psQuote(ip))
+		}
 		r.Apply = []Step{
-			{Shell: "Get-DnsClient | Where-Object InterfaceAlias -notmatch 'Loopback' | Set-DnsClientServerAddress -ServerAddresses " + psQuote(ip)},
+			{Shell: "Get-DnsClient | Where-Object InterfaceAlias -notmatch 'Loopback' | Set-DnsClientServerAddress -ServerAddresses " + strings.Join(quoted, ",")},
 		}
 		r.Apply = append(r.Apply, p.windowsSearchApply()...)
 		r.Revert = []Step{
@@ -605,6 +675,9 @@ func (p Profile) renderWindows() Rendered {
 			"the dedicated resolver answers on IPv6; this host needs a global IPv6 route",
 			"revert resets adapter DNS back to DHCP/automatic",
 		)
+		if len(ips) > 1 {
+			r.Notes = append(r.Notes, failoverNote)
+		}
 		return r
 	}
 
@@ -689,19 +762,19 @@ func psQuote(s string) string {
 // --- macOS ------------------------------------------------------------------------
 
 func (p Profile) renderDarwin() Rendered {
-	r := Rendered{OS: "darwin", Mode: p.Mode, DoHURL: p.DohTemplate, ResolverIP: p.firstResolverIP()}
+	r := Rendered{OS: "darwin", Mode: p.Mode, DoHURL: p.DohTemplate, ResolverIP: p.firstResolverIP(), ResolverIPs: pairOrNil(p.resolverIPs())}
 	if p.Mode == ModeDNS53 {
-		ip := p.firstResolverIP()
-		if ip == "" {
+		ips := p.resolverIPs()
+		if len(ips) == 0 {
 			r.Summary = "no dedicated :53 resolver address known"
 			r.Notes = append(r.Notes, "a dedicated :53 resolver needs a Whisper key (it is allocated per tenant, so your policy rides it) - run with a key")
 			return r
 		}
 		// networksetup is the ONE truly no-GUI macOS path (supported write, takes
 		// effect immediately, per network service).
-		r.Summary = "point every macOS network service at your dedicated Whisper resolver " + ip + " (networksetup - no GUI approval)"
+		r.Summary = "point every macOS network service at your dedicated Whisper resolver " + resolverLabel(ips) + " (networksetup - no GUI approval)"
 		r.Apply = []Step{
-			{Shell: `networksetup -listallnetworkservices | tail -n +2 | while IFS= read -r s; do networksetup -setdnsservers "$s" ` + ip + `; done`},
+			{Shell: `networksetup -listallnetworkservices | tail -n +2 | while IFS= read -r s; do networksetup -setdnsservers "$s" ` + strings.Join(ips, " ") + `; done`},
 		}
 		r.Revert = []Step{
 			{Shell: `networksetup -listallnetworkservices | tail -n +2 | while IFS= read -r s; do networksetup -setdnsservers "$s" Empty; done`},
@@ -709,6 +782,9 @@ func (p Profile) renderDarwin() Rendered {
 		r.Notes = append(r.Notes,
 			"plain :53 is unencrypted on-path; the DoH profile (default mode) is the encrypted alternative",
 			"the dedicated resolver answers on IPv6; this host needs a global IPv6 route")
+		if len(ips) > 1 {
+			r.Notes = append(r.Notes, failoverNote)
+		}
 		return r
 	}
 

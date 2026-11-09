@@ -132,8 +132,13 @@ var resolvedConfDirs = []string{
 // unprivileged. A read that fails yields RouteUnknown, never a pass.
 func (linuxApplier) VerifyRoute(r Rendered) RouteCheck {
 	want := r.ResolverIP
+	wants := r.ResolverIPs
+	if len(wants) == 0 {
+		wants = []string{want}
+	}
 	if r.Mode == ModeDoH {
 		want = LinuxLoopback
+		wants = []string{LinuxLoopback}
 	}
 	var dropIn, resolvConf *FileSpec
 	for _, s := range r.Apply {
@@ -148,13 +153,13 @@ func (linuxApplier) VerifyRoute(r Rendered) RouteCheck {
 	case want == "":
 		return RouteCheck{Unread: "the plan names no resolver address"}
 	case dropIn != nil:
-		return verifyResolved(want, dropInRoutesAll(dropIn.Content))
+		return verifyResolved(wants, dropInRoutesAll(dropIn.Content))
 	case resolvConf != nil:
 		b, err := linuxReadFile(LinuxResolvConf)
 		if err != nil {
 			return RouteCheck{Want: want, Unread: "reading " + LinuxResolvConf + ": " + err.Error()}
 		}
-		return CheckResolvConf(want, string(b))
+		return CheckResolvConfAny(wants, string(b))
 	}
 	return RouteCheck{Want: want, Unread: "the plan writes neither the resolved drop-in nor " + LinuxResolvConf}
 }
@@ -176,7 +181,8 @@ func dropInRoutesAll(content string) bool {
 // verifyResolved reads systemd-resolved's own view. resolved was restarted a
 // moment ago and may not answer on D-Bus yet, so the read is retried, bounded:
 // 3 tries, 1s apart.
-func verifyResolved(want string, matchAll bool) RouteCheck {
+func verifyResolved(wants []string, matchAll bool) RouteCheck {
+	want := wants[0]
 	var ev ResolvedEvidence
 	var err error
 	for i := 0; i < 3; i++ {
@@ -223,7 +229,7 @@ func verifyResolved(want string, matchAll bool) RouteCheck {
 			ev.Confs = append(ev.Confs, ConfFile{Path: p, Content: string(b)})
 		}
 	}
-	return CheckResolved(want, matchAll, ev)
+	return CheckResolvedAny(wants, matchAll, ev)
 }
 
 // run executes steps in order, honouring the presence guards. Any step failure
