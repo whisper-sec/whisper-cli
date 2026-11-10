@@ -76,6 +76,30 @@ const darwinProfileIdentifier = "online.whisper.resolver"
 // darwinMobileconfigFile is where the darwin plan stages the profile before `open`.
 const darwinMobileconfigFile = "whisper-dns.mobileconfig"
 
+// darwinNetState records each network service's DNS servers and search domains
+// as they were before the first dns53 apply, one
+// "<service><TAB><servers|Empty><TAB><domains|Empty>" line per service. It is
+// written once (never over an existing record, so a re-apply or a retry after an
+// interrupted apply keeps the true original) and moved into place whole, so it is
+// either absent or complete. `--off` restores every recorded value exactly,
+// "Empty" included, and only then removes the file. A variable only so the tests
+// can point it into a temporary directory.
+var darwinNetState = "/var/db/whisper-resolver.netstate"
+
+// darwinServices lists the macOS network services, one per line. networksetup
+// marks a disabled service with a leading "*" that is not part of its name, so
+// it is stripped: the per-service setters take the bare name.
+const darwinServices = `networksetup -listallnetworkservices | tail -n +2 | sed 's/^\*//'`
+
+// darwinWordsOf reads one of service $s's settings (-getdnsservers or
+// -getsearchdomains) into the shell variable v as a word list. Every server and
+// every domain is one whitespace-free word per line; networksetup's "There aren't
+// any ... set" notice is prose, so dropping every line that holds a space leaves
+// exactly the values, and nothing for an empty setting.
+func darwinWordsOf(get, v string) string {
+	return `l=$(networksetup ` + get + ` "$s") || exit 1; ` + v + `=$(printf '%s\n' "$l" | awk '!/[[:space:]]/ && NF')`
+}
+
 // ErrNeedsRoot is returned by an applier when the plan mutates system state but the
 // process is not privileged. The caller prints the exact block to run instead of
 // failing opaquely (Postel: a clear, helpful path, never a dead end).
@@ -768,17 +792,18 @@ func (p Profile) renderDarwin() Rendered {
 		if len(ips) == 0 {
 			r.Summary = "no dedicated :53 resolver address known"
 			r.Notes = append(r.Notes, "a dedicated :53 resolver needs a Whisper key (it is allocated per tenant, so your policy rides it) - run with a key")
+			r.Revert = []Step{darwinNetRestore()}
 			return r
 		}
 		// networksetup is the ONE truly no-GUI macOS path (supported write, takes
 		// effect immediately, per network service).
 		r.Summary = "point every macOS network service at your dedicated Whisper resolver " + resolverLabel(ips) + " (networksetup - no GUI approval)"
 		r.Apply = []Step{
-			{Shell: `networksetup -listallnetworkservices | tail -n +2 | while IFS= read -r s; do networksetup -setdnsservers "$s" ` + strings.Join(ips, " ") + `; done`},
+			darwinNetCapture(),
+			{Shell: `( ` + darwinServices + ` | while IFS= read -r s; do networksetup -setdnsservers "$s" ` + strings.Join(ips, " ") + ` || exit 1; done ) || exit 1`},
 		}
-		r.Revert = []Step{
-			{Shell: `networksetup -listallnetworkservices | tail -n +2 | while IFS= read -r s; do networksetup -setdnsservers "$s" Empty; done`},
-		}
+		r.Apply = append(r.Apply, p.darwinSearchApply()...)
+		r.Revert = []Step{darwinNetRestore(), darwinUnrecordedRevert(ips)}
 		r.Notes = append(r.Notes,
 			"plain :53 is unencrypted on-path; the DoH profile (default mode) is the encrypted alternative",
 			"the dedicated resolver answers on IPv6; this host needs a global IPv6 route")
@@ -814,15 +839,84 @@ func (p Profile) renderDarwin() Rendered {
 	// Settings reads it at approval time); revert cleans it up. `profiles remove`
 	// tolerates a not-installed profile (the trailing guard) so a double `--off`
 	// stays a clean no-op.
+	// The dns53 restore rides along: it only runs when a dns53 apply left its
+	// record behind, so `--off` puts the servers and search lists back even when
+	// the CLI's own state no longer says dns53 was the mode applied.
 	r.Revert = []Step{
 		{Remove: darwinMobileconfigFile, IfPresent: darwinMobileconfigFile},
 		{Shell: "profiles remove -identifier " + darwinProfileIdentifier + " 2>/dev/null || true"},
+		darwinNetRestore(),
 	}
 	r.Notes = append(r.Notes,
 		"macOS requires the final approval by hand: System Settings > General > VPN & Device Management (Apple offers no silent CLI install)",
 		"remove it any time in the same place; with an API key, `whisper resolver --resolver` is the no-approval :53 alternative",
 	)
 	return r
+}
+
+// darwinNetCapture records every service's current DNS servers and search
+// domains before anything changes, and only when no record exists yet. It runs
+// first, so a failure here leaves the machine untouched. The record is built
+// beside its final path and renamed into place, so an interrupted apply never
+// leaves half a file.
+func darwinNetCapture() Step {
+	st := shQuote(darwinNetState)
+	tmp := shQuote(darwinNetState + ".tmp")
+	return Step{
+		IfAbsent: darwinNetState,
+		Shell: `( umask 077; set -f; ` + darwinServices + ` | while IFS= read -r s; do ` +
+			darwinWordsOf("-getdnsservers", "d") + `; ` + darwinWordsOf("-getsearchdomains", "q") +
+			`; d=$(echo $d); q=$(echo $q); printf '%s\t%s\t%s\n' "$s" "${d:-Empty}" "${q:-Empty}"; done > ` + tmp +
+			` ) || exit 1; mv -f ` + tmp + ` ` + st,
+	}
+}
+
+// darwinSearchApply ADDS our suffixes to each service's search list, after the
+// domains already there, the same union the Windows apply makes. networksetup
+// takes the whole list, so setting only ours would silently drop a suffix an
+// admin configured; the union keeps it, and makes a re-apply a no-op.
+func (p Profile) darwinSearchApply() []Step {
+	sd := p.searchDomains()
+	if len(sd) == 0 {
+		return nil
+	}
+	ours := make([]string, 0, len(sd))
+	for _, d := range sd {
+		ours = append(ours, shQuote(d))
+	}
+	return []Step{{Shell: `( set -f; ` + darwinServices + ` | while IFS= read -r s; do ` + darwinWordsOf("-getsearchdomains", "d") +
+		`; n=; for x in $d ` + strings.Join(ours, " ") + `; do case " $n " in *" $x "*) ;; *) n="$n $x" ;; esac; done; ` +
+		`networksetup -setsearchdomains "$s" $n || exit 1; done ) || exit 1`}}
+}
+
+// darwinNetRestore puts back every service's recorded DNS servers and search
+// domains, exactly, then removes the record. A service that no longer exists (an
+// adapter since removed) is skipped. A service networksetup refuses does not stop
+// the others from being restored, but it keeps the record, so the next `--off`
+// finishes the job. With no record there is nothing recorded to restore, so it
+// does not run at all, which is what makes a second `--off` a clean no-op.
+func darwinNetRestore() Step {
+	st := shQuote(darwinNetState)
+	return Step{
+		IfPresent: darwinNetState,
+		Shell: `( set -f; rc=0; nl=$(printf '\nx'); nl=${nl%x}; cur=$(` + darwinServices + `); while IFS="$(printf '\t')" read -r s d q; do ` +
+			`case "$nl$cur$nl" in *"$nl$s$nl"*) ;; *) continue ;; esac; ` +
+			`networksetup -setdnsservers "$s" $d || rc=1; networksetup -setsearchdomains "$s" $q || rc=1; done < ` + st +
+			`; exit $rc ) || exit 1; rm -f ` + st,
+	}
+}
+
+// darwinUnrecordedRevert covers a Mac switched by a CLI that kept no record. It
+// clears the servers only on a service still set to exactly ours, so a list an
+// admin set by hand is never touched, and once ours are gone it changes nothing,
+// which keeps a repeated `--off` a no-op. It does not run when a record exists:
+// the exact restore handles that case.
+func darwinUnrecordedRevert(ips []string) Step {
+	return Step{
+		IfAbsent: darwinNetState,
+		Shell: `( set -f; ` + darwinServices + ` | while IFS= read -r s; do ` + darwinWordsOf("-getdnsservers", "d") +
+			`; [ "$(echo $d)" = ` + shQuote(strings.Join(ips, " ")) + ` ] || continue; networksetup -setdnsservers "$s" Empty || exit 1; done ) || exit 1`,
+	}
 }
 
 // AppleMobileconfig builds the com.apple.dnsSettings.managed configuration profile

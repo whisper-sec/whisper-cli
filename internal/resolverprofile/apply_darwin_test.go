@@ -101,6 +101,23 @@ func TestT2DarwinDNS53PrivilegeRefusalIsErrNeedsRoot(t *testing.T) {
 	}
 }
 
+func TestT2DarwinDNS53FailedStepRollsBack(t *testing.T) {
+	// A step that fails part way (networksetup refusing one service's search
+	// list) must not leave the Mac half switched: the whole revert runs.
+	f := &darwinFake{failMatch: "-setsearchdomains \"$s\" $n", failWith: "exit status 1"}
+	withDarwinFake(t, f)
+	r := Profile{Mode: ModeDNS53, OS: "darwin", ResolverIPs: []string{"2a04:2a01:0:53::42"}, SearchDomains: []string{"t9ab.agents.whisper.online"}}.Render(Host{})
+	orig := darwinStat
+	darwinStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	t.Cleanup(func() { darwinStat = orig })
+	if err := (darwinApplier{}.Apply(r)); err == nil {
+		t.Fatal("a failed step must fail the apply")
+	}
+	if !f.sawContaining(`-setdnsservers "$s" Empty`) {
+		t.Fatalf("the rollback must have run the revert: %v", f.cmds)
+	}
+}
+
 func TestT2DarwinDoHOpenFailureStaysStaged(t *testing.T) {
 	// Over ssh there is no GUI session; `open` fails but the profile is
 	// staged and the error must hand over the exact remaining gesture.

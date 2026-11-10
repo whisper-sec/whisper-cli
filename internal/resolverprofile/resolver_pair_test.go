@@ -74,8 +74,8 @@ func TestSingleAddressRendersExactlyAsBefore(t *testing.T) {
 		t.Fatalf("single-address Windows step changed: %q", w.Apply[0].Shell)
 	}
 	d := renderPair("darwin", Host{}, pairA)
-	if !strings.Contains(d.Apply[0].Shell, `-setdnsservers "$s" `+pairA+`; done`) {
-		t.Fatalf("single-address macOS step changed: %q", d.Apply[0].Shell)
+	if !strings.Contains(d.Apply[1].Shell, `-setdnsservers "$s" `+pairA+` || exit 1; done`) {
+		t.Fatalf("single-address macOS step changed: %q", d.Apply[1].Shell)
 	}
 }
 
@@ -85,8 +85,8 @@ func TestPairWindowsAndMacListBoth(t *testing.T) {
 		t.Fatalf("Windows must set both, in order: %q", w.Apply[0].Shell)
 	}
 	d := renderPair("darwin", Host{}, pairA, pairB)
-	if !strings.Contains(d.Apply[0].Shell, `-setdnsservers "$s" `+pairA+" "+pairB+"; done") {
-		t.Fatalf("macOS must set both, in order: %q", d.Apply[0].Shell)
+	if !strings.Contains(d.Apply[1].Shell, `-setdnsservers "$s" `+pairA+" "+pairB+" || exit 1; done") {
+		t.Fatalf("macOS must set both, in order: %q", d.Apply[1].Shell)
 	}
 }
 

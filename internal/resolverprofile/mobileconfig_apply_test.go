@@ -157,11 +157,11 @@ func TestT2ApplyDarwinPlanIsHonestAboutApproval(t *testing.T) {
 func TestT2ApplyDarwinPlanDNS53NoGUI(t *testing.T) {
 	p := Profile{Mode: ModeDNS53, OS: "darwin", ResolverIPs: []string{"2a04:2a01:0:53::42"}}
 	r := p.Render(Host{})
-	if len(r.Apply) != 1 || !strings.Contains(r.Apply[0].Shell, `networksetup -setdnsservers "$s" 2a04:2a01:0:53::42`) {
-		t.Fatalf("darwin dns53 must apply via networksetup per service: %v", r.Apply)
+	if len(r.Apply) != 2 || !strings.Contains(r.Apply[1].Shell, `networksetup -setdnsservers "$s" 2a04:2a01:0:53::42`) {
+		t.Fatalf("darwin dns53 must record the current settings, then apply via networksetup per service: %v", r.Apply)
 	}
-	if !strings.Contains(r.Revert[0].Shell, `networksetup -setdnsservers "$s" Empty`) {
-		t.Fatalf("darwin dns53 revert must return services to automatic: %v", r.Revert)
+	if !strings.Contains(r.Revert[0].Shell, `networksetup -setdnsservers "$s" $d`) || r.Revert[0].IfPresent == "" {
+		t.Fatalf("darwin dns53 revert must restore each service's recorded servers: %v", r.Revert)
 	}
 	// Unlike DoH, no GUI gesture may be demanded here - this is the one
 	// genuinely no-approval macOS path.

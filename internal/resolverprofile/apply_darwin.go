@@ -59,6 +59,12 @@ func (a darwinApplier) Apply(r Rendered) error {
 		return nil
 	}
 	if err := a.runSteps(r.Apply); err != nil {
+		if r.Mode == ModeDNS53 {
+			// A step that failed part way (a service networksetup refused, say)
+			// must not leave some services pointed at us and others not: put
+			// back everything, the recorded search lists included.
+			_ = a.runSteps(r.Revert)
+		}
 		return err
 	}
 	if r.Mode == ModeDNS53 {
