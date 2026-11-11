@@ -2,7 +2,7 @@
 // Copyright (c) 2026 viaGraph B.V. (Whisper Security)
 module github.com/whisper-sec/whisper-cli
 
-go 1.26.10
+go 1.26.11
 
 retract [v1.0.0, v1.0.1] // v1.0.0 was published by mistake; v1.0.1 only carries the retraction. The 0.x line continues.
 
