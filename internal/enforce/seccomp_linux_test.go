@@ -173,8 +173,32 @@ func TestTheFilterIsReallyInstalled(t *testing.T) {
 	}
 	off, _ := runUnderFilter(t, SeccompOff, "status")
 	if !strings.Contains(off, "Seccomp: 0") {
+		if inherited := inheritedSeccomp(t); inherited != "0" && os.Getenv("WHISPER_CI_KERNEL") == "container" {
+			t.Skipf("needs a test process with no seccomp filter of its own: this one already runs under "+
+				"Seccomp: %s (WHISPER_CI_KERNEL=container), so --seccomp=off cannot read Seccomp: 0 here; "+
+				"the filter half above passed", inherited)
+		}
 		t.Fatalf("--seccomp=off must install nothing: %q", off)
 	}
+}
+
+// inheritedSeccomp is this test process's own seccomp mode from /proc/self/status, before any filter of
+// ours: "0" on an unconfined host, "2" inside a container runtime that applies its own filter. Only a
+// runner that declares WHISPER_CI_KERNEL=container may skip on it; anywhere else a filter the test did
+// not expect is still a failure.
+func inheritedSeccomp(t *testing.T) string {
+	t.Helper()
+	b, err := os.ReadFile("/proc/self/status")
+	if err != nil {
+		t.Fatalf("reading /proc/self/status: %v", err)
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if v, ok := strings.CutPrefix(line, "Seccomp:"); ok {
+			return strings.TrimSpace(v)
+		}
+	}
+	t.Fatal("/proc/self/status has no Seccomp: line")
+	return ""
 }
 
 func TestTheNumbersAreTheKernelsForThisArch(t *testing.T) {

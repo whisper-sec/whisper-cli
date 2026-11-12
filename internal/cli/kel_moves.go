@@ -122,13 +122,16 @@ func statementFor(kind kel.Kind, auth kel.Authority, addr netip.Addr, h chainHea
 
 // birthArgs adds a signed birth to a connect that introduces kp: the commitment to kp's next
 // key (minted and synced to disk first) and a statement bound to the current birth window.
-// Nothing is added when the next key cannot be kept, so a birth is never committed to a key
-// this host could lose.
+// The signature is what lets the service publish kp: a public key alone proves nothing about
+// who holds it. When the next key cannot be kept the birth is still signed, but sealed (it
+// commits to no next key), so a birth is never committed to a key this host could lose.
 func birthArgs(args map[string]any, kp *idkey.Keypair, now time.Time) {
+	commit := ""
 	next, err := idkey.EnsureNextKey(kp)
 	if err != nil {
 		debugf("identity birth: the next key could not be stored (%v); the chain is born sealed", err)
-		return
+	} else {
+		commit = next.Commitment()
 	}
 	var n [16]byte
 	if _, err := rand.Read(n[:]); err != nil {
@@ -139,7 +142,7 @@ func birthArgs(args map[string]any, kp *idkey.Keypair, now time.Time) {
 		return
 	}
 	st := kel.Statement{Kind: kel.ICP, Authority: kel.Birth, Sequence: 0, Prior: kel.Genesis, NewKey: kp.Digest(),
-		NextCommit: next.Commitment(), BindNonce: nonce}
+		NextCommit: commit, BindNonce: nonce}
 	b, err := st.Bytes()
 	if err != nil {
 		return
@@ -148,7 +151,10 @@ func birthArgs(args map[string]any, kp *idkey.Keypair, now time.Time) {
 	if err != nil {
 		return
 	}
-	args["next_key_commitment"] = next.Commitment()
+	if commit == "" {
+		commit = "none" // the wire spelling of a sealed commitment
+	}
+	args["next_key_commitment"] = commit
 	args["key_event_signature"] = base64.StdEncoding.EncodeToString(sig)
 	args["key_event_nonce"] = nonce
 }
