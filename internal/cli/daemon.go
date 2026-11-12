@@ -146,6 +146,7 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 		if err != nil {
 			return err
 		}
+		bindBirthFor(c, args, idKey) // the birth is good with this client's key only
 	}
 	keys := newConnectKeys(wgKey, idKey, args)
 

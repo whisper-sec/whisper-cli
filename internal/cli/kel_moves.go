@@ -159,10 +159,77 @@ func birthArgs(args map[string]any, kp *idkey.Keypair, now time.Time) {
 	args["key_event_nonce"] = nonce
 }
 
+// bindBirth binds the birth birthArgs signed to the API key this client presents: a fresh seed,
+// the client nonce the key derives from it, and the statement signed again over that nonce. The
+// service re-derives the nonce from the key on the request, so a statement seen on its way (a log,
+// a relay) is of no use with any other key. A connect that carries no signed birth, or a client
+// with no key, is left as it is.
+func bindBirth(args map[string]any, kp *idkey.Keypair, apiKey string, now time.Time) {
+	if kp == nil || strings.TrimSpace(apiKey) == "" || args["key_event_signature"] == nil {
+		return
+	}
+	if _, ok := args["key_event_nonce"].(string); !ok {
+		return
+	}
+	commit, _ := args["next_key_commitment"].(string)
+	if strings.EqualFold(commit, "none") {
+		commit = ""
+	}
+	var seed [16]byte
+	if _, err := rand.Read(seed[:]); err != nil {
+		return
+	}
+	seedHex := hex.EncodeToString(seed[:])
+	client, err := kel.BoundClientNonce(kel.BirthCallerKey(apiKey), seedHex)
+	if err != nil {
+		return
+	}
+	nonce, err := kel.BirthNonce(kel.BirthWindowFor(now.UnixMilli()), client)
+	if err != nil {
+		return
+	}
+	st := kel.Statement{Kind: kel.ICP, Authority: kel.Birth, Sequence: 0, Prior: kel.Genesis, NewKey: kp.Digest(),
+		NextCommit: commit, BindNonce: nonce}
+	b, err := st.Bytes()
+	if err != nil {
+		return
+	}
+	sig, err := kp.SignStatement(b)
+	if err != nil {
+		return
+	}
+	args["key_event_signature"] = base64.StdEncoding.EncodeToString(sig)
+	args["key_event_nonce"] = nonce
+	args["key_event_nonce_seed"] = seedHex
+}
+
+// bindBirthFor binds a connect's signed birth to the credential c presents.
+func bindBirthFor(c *client.Client, args map[string]any, kp *idkey.Keypair) {
+	if c == nil {
+		return
+	}
+	bindBirth(args, kp, c.Credential().Value, time.Now())
+}
+
+// dropUnreadSeed answers a service older than bound births, which refuses key_event_nonce_seed as
+// an argument it does not read: the statement's nonce is still a well-formed one, so the same
+// signed birth goes again without the seed and that service reads it as it always has. Reports
+// whether there was a seed to drop.
+func dropUnreadSeed(perr error, args map[string]any) bool {
+	pe, ok := client.AsProblem(perr)
+	if !ok || pe.Status != 400 || args["key_event_nonce_seed"] == nil ||
+		strings.HasPrefix(problemCode(pe), "KEY_EVENT_") ||
+		!strings.Contains(pe.Detail+" "+pe.Title, "key_event_nonce_seed") {
+		return false
+	}
+	delete(args, "key_event_nonce_seed")
+	return true
+}
+
 // stripBirthArgs removes a birth's key-event arguments, reporting whether there were any.
 func stripBirthArgs(args map[string]any) bool {
 	_, had := args["key_event_signature"]
-	for _, k := range []string{"next_key_commitment", "key_event_signature", "key_event_nonce"} {
+	for _, k := range []string{"next_key_commitment", "key_event_signature", "key_event_nonce", "key_event_nonce_seed"} {
 		delete(args, k)
 	}
 	return had

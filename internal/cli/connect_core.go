@@ -158,6 +158,8 @@ func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]a
 	if err != nil {
 		return nil, nil, err
 	}
+	// the birth is good with this client's key only
+	bindBirthFor(c, args, idKey)
 	plan, err := planAdopt(cx, c, args, idKey, sel) // --adopt-key on a held identity: the owner's signed recovery
 	if err != nil {
 		return nil, nil, err
@@ -259,6 +261,8 @@ func connectWithSelfHeal(cx context.Context, c *client.Client, args map[string]a
 		switch {
 		case idKey != nil && serverHoldsNoPin(perr) && retryAsBirthPin(args, idKey):
 			debugf("tier %s: the box holds no pin for this address, re-sending the key as a first enrolment", tier)
+		case dropUnreadSeed(perr, args):
+			debugf("tier %s: the service does not take bound births yet; sending the signed birth unbound", tier)
 		case keyEventRefusal(perr) && !signedAdopt(args) && stripBirthArgs(args):
 			// A service that read the signed birth as a move on an identity it already holds: the
 			// connect goes on as it did before key events, and the chain takes the migration path.

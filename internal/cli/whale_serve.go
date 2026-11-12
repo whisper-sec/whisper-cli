@@ -527,6 +527,7 @@ var whaleServeConnect = func(cx context.Context, c *client.Client, sel string) (
 	if err != nil {
 		return nil, nil, err
 	}
+	bindBirthFor(c, args, idKey) // the birth is good with this client's key only
 	env, err := opConnect(cx, c, args)
 	if err != nil {
 		return nil, nil, err

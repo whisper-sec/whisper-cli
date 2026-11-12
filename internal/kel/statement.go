@@ -140,6 +140,30 @@ func BirthNonce(window int64, clientNonceHex string) (string, error) {
 	return s, nil
 }
 
+// BirthCallerPrefix separates the caller key a bound birth's nonce is derived from. Versioned.
+const BirthCallerPrefix = "whisper-birth-nonce/v1\n"
+
+var nonceSeedRE = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// BirthCallerKey is SHA-256 of BirthCallerPrefix and the API key the request presents, trimmed.
+func BirthCallerKey(apiKey string) []byte {
+	sum := sha256.Sum256([]byte(BirthCallerPrefix + strings.TrimSpace(apiKey)))
+	return sum[:]
+}
+
+// BoundClientNonce is a bound birth's client nonce: the first 128 bits, as 32 lowercase hex, of
+// SHA-256(callerKey || seed). The service derives the same from the key the request presents, so
+// the statement is good with that key only; its grammar is unchanged.
+func BoundClientNonce(callerKey []byte, seedHex string) (string, error) {
+	if len(callerKey) != sha256.Size || !nonceSeedRE.MatchString(seedHex) {
+		return "", errors.New("kel: a bound nonce takes a 32-byte caller key and a 32 lowercase hex seed")
+	}
+	h := sha256.New()
+	h.Write(callerKey)
+	h.Write([]byte(seedHex))
+	return hex.EncodeToString(h.Sum(nil)[:16]), nil
+}
+
 // BirthWindowAccepted reports whether the service, at nowMillis, accepts a birth nonce: its window
 // is the current one or the one before.
 func BirthWindowAccepted(bindNonce string, nowMillis int64) bool {
