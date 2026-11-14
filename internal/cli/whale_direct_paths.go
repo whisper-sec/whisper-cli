@@ -14,8 +14,9 @@ import (
 	"github.com/whisper-sec/whisper-cli/internal/whale"
 )
 
-// whale_direct_paths.go is the direct-path half on the command layer: the two small pieces that connect
-// the tunnel to the control plane's peer map.
+// whale_direct_paths.go is the direct-path half on the command layer: reading the control plane's
+// peer map into the tunnel. The other half, saying where this node can be dialed, is the session's
+// keys (connectKeys.declareUnderlay in connect_core.go), which declare only a port a socket holds.
 //
 // The honest summary of what this buys, since it is easy to oversell. Two nodes that share a
 // LAN segment, or one node reaching another that has an untranslated public endpoint, stop
@@ -27,24 +28,6 @@ import (
 // What is still relayed: a pair where BOTH ends sit behind a NAT that gives each destination a
 // different external port, and a pair split across two boxes, which has no path at all until
 // inter-box forwarding lands. Neither becomes true because this file exists.
-
-// declaredEndpoints is what this node tells the control plane about where it can be dialed, and
-// the listen port it will actually bind. Both or neither: a declaration with no pinned port
-// would be wrong the moment the device came up on a kernel-chosen one.
-//
-// Returns (nil, 0) freely - a host with no private address, or one where no port could be
-// reserved, declares nothing and relays, which is exactly how it behaved before direct paths.
-func declaredEndpoints() ([]string, int) {
-	port := wgtun.PickListenPort()
-	if port == 0 {
-		return nil, 0
-	}
-	eps := wgtun.LocalUnderlayEndpoints(port)
-	if len(eps) == 0 {
-		return nil, 0
-	}
-	return eps, port
-}
 
 // whalePeerSource is the wgtun.Options.PeerSource for a live tunnel: one
 // op:list{kind:'whale', view:'peers'} per refresh, translated into the peers the device will
@@ -58,8 +41,8 @@ func declaredEndpoints() ([]string, int) {
 // Every row is re-validated by wgtun.ParsePeer before it is installed. That is not defensive
 // programming for its own sake: a peer entry is a routing grant, and the client is the side
 // that sends the packets, so it checks that each row names exactly one /128 inside
-// 2a04:2a01::/32 and an endpoint that is not loopback, not link-local, not the internal
-// network and not our own overlay. A row that fails is skipped and the rest are installed.
+// 2a04:2a01::/32 and an endpoint that is not loopback, not link-local, not on a tailnet and
+// not our own overlay. A row that fails is skipped and the rest are installed.
 func whalePeerSource() func(context.Context) ([]wgtun.Peer, error) {
 	return func(ctx context.Context) ([]wgtun.Peer, error) {
 		c, err := resolveClient(false, false)
@@ -189,6 +172,13 @@ func whalePeerClass(ctx context.Context, c *client.Client, addr string) string {
 //	endpoint: "203.0.113.7:51820" (the single declared endpoint)
 //	endpoints: ["10.0.0.5:51820", "203.0.113.7:41234"] (or objects with endpoint+source)
 //	observed_endpoint: "203.0.113.7:41234" (what a box saw it arrive from)
+//	punch_endpoint: "203.0.113.7:41234" (the same, as the peer map's punch advice names it)
+//
+// punch_endpoint matters most on a direct-local row. A shared segment is only the two nodes' claim
+// (two sites that both number their LAN 192.168.1.0/24 make it too), so the row also carries where
+// the box saw the peer arrive from, and if the local endpoint never answers, the train goes on to
+// that one. It is read only when the advice names the same key the row does (punch_key empty or
+// equal to public_key): an endpoint is only worth punching for the key it was observed with.
 //
 // The `observed` one is the reflexive address a STUN server would have returned, and it is the
 // candidate the punch is built around: the box is already the rendezvous for every peer, because
@@ -222,6 +212,9 @@ func candidatesFromRow(item map[string]any, path string) []wgtun.Candidate {
 		}
 	}
 	add(field(item, "observed_endpoint", "observedEndpoint"), wgtun.SourceObserved)
+	if pk := field(item, "punch_key"); pk == "" || pk == field(item, "public_key", "publicKey") {
+		add(field(item, "punch_endpoint"), wgtun.SourceObserved)
+	}
 	return out
 }
 

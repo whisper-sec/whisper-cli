@@ -102,6 +102,105 @@ func TestPeersFromRows_InstallsEveryCandidate(t *testing.T) {
 	}
 }
 
+// The peer map's own spelling of the observed endpoint is punch_endpoint, with punch_key beside it.
+// On a direct-local row it is the way out when the shared segment was only a claim: two sites that
+// both number their LAN 192.168.1.0/24 make it too.
+const peerKeyB = "YjEtcGVlci1rZXktMzItYnl0ZXMtbG9uZy1wYWQhISE="
+
+func localRowWithAdvice(punchEndpoint any, punchKey string) map[string]any {
+	return map[string]any{
+		"address":        "2a04:2a01:4::7",
+		"name":           "db-01",
+		"path":           "direct-local",
+		"public_key":     peerKeyB,
+		"endpoint":       "192.168.1.9:51820",
+		"punch":          "likely",
+		"punch_endpoint": punchEndpoint,
+		"punch_key":      punchKey,
+	}
+}
+
+func TestCandidatesFromRow_ALocalRowAlsoOffersThePunchEndpoint(t *testing.T) {
+	got := candidatesFromRow(localRowWithAdvice("198.51.100.4:51820", peerKeyB), "direct-local")
+	if len(got) != 2 {
+		t.Fatalf("got %+v, want the local endpoint and the observed one", got)
+	}
+	if got[0].Source != wgtun.SourceLocal || got[1].Endpoint != "198.51.100.4:51820" || got[1].Source != wgtun.SourceObserved {
+		t.Fatalf("got %+v, want local first and the punch endpoint classed observed", got)
+	}
+	// punch_key may also be absent from an older plane's row; the endpoint is still the row's own peer's.
+	if got := candidatesFromRow(localRowWithAdvice("198.51.100.4:51820", ""), "direct-local"); len(got) != 2 {
+		t.Fatalf("an advice row with no punch_key gave %+v", got)
+	}
+}
+
+func TestCandidatesFromRow_APunchEndpointForAnotherKeyIsIgnored(t *testing.T) {
+	// An endpoint is only worth punching for the key it was observed with.
+	got := candidatesFromRow(localRowWithAdvice("198.51.100.4:51820", "c29tZS1vdGhlci1rZXktMzItYnl0ZXMtbG9uZyEhISE="), "direct-local")
+	if len(got) != 1 || got[0].Endpoint != "192.168.1.9:51820" {
+		t.Fatalf("got %+v, want only the local endpoint", got)
+	}
+}
+
+func TestPeersFromRows_ALocalRowInstallsItsPunchEndpointAfterTheLocalOne(t *testing.T) {
+	rows := []map[string]any{
+		{"item": map[string]any{"self": true, "state": "ok"}},
+		{"item": localRowWithAdvice("198.51.100.4:51820", peerKeyB)},
+	}
+	peers := peersFromRows(rows)
+	if len(peers) != 1 {
+		t.Fatalf("got %d peers, want one", len(peers))
+	}
+	c := peers[0].Candidates
+	if len(c) != 2 || c[0].Endpoint != "192.168.1.9:51820" || c[1].Endpoint != "198.51.100.4:51820" {
+		t.Fatalf("candidates = %+v, want the local endpoint first and the observed one after it", c)
+	}
+	if peers[0].Endpoint != "192.168.1.9:51820" || peers[0].Path != "direct-local" {
+		t.Fatalf("peer = %+v, want the local endpoint primary and the plane's class kept", peers[0])
+	}
+}
+
+func TestPeersFromRows_APunchEndpointWeMustNeverDialIsDroppedAndTheRowStillInstalls(t *testing.T) {
+	// The punch endpoint goes through the same refusals as every other candidate. The row keeps its local
+	// endpoint, so a bad advice value costs nothing but itself.
+	for _, bad := range []any{
+		"127.0.0.1:51820", "[::1]:51820", "[::ffff:127.0.0.1]:51820",
+		"[2a04:2a01:4::9]:51820", "100.64.0.9:51820", "[fd7a:115c:a1e0::9]:51820",
+		"[fe80::1]:51820", "169.254.1.1:51820", "239.1.1.1:51820", "[ff02::1]:51820",
+		"255.255.255.255:51820", "240.0.0.1:51820", "0.0.0.0:51820",
+		"[fd12::1%eth0]:51820", "fd12::1:51820", "peer.example.com:51820",
+		"198.51.100.4:0", "198.51.100.4:65536", "198.51.100.4",
+		float64(51820), []any{"198.51.100.4:51820"}, map[string]any{"endpoint": "198.51.100.4:51820"},
+	} {
+		rows := []map[string]any{
+			{"item": map[string]any{"self": true, "state": "ok"}},
+			{"item": localRowWithAdvice(bad, peerKeyB)},
+		}
+		peers := peersFromRows(rows)
+		if len(peers) != 1 {
+			t.Fatalf("%v: got %d peers, want the row installed on its local endpoint", bad, len(peers))
+		}
+		if c := peers[0].Candidates; len(c) != 1 || c[0].Endpoint != "192.168.1.9:51820" {
+			t.Fatalf("%v: candidates = %+v, want only the local endpoint", bad, c)
+		}
+	}
+}
+
+func TestPeersFromRows_ARelayedRowWithAdviceIsNotInstalledYet(t *testing.T) {
+	// A relayed row carries no public_key, so this client installs nothing for it even when the plane
+	// advises a punch. Pinned here so a change to that is a decision and not an accident.
+	rows := []map[string]any{
+		{"item": map[string]any{"self": true, "state": "ok"}},
+		{"item": map[string]any{
+			"address": "2a04:2a01:4::7", "path": "relayed", "public_key": "", "endpoint": "",
+			"punch": "likely", "punch_endpoint": "198.51.100.4:51820", "punch_key": peerKeyB,
+		}},
+	}
+	if peers := peersFromRows(rows); len(peers) != 0 {
+		t.Fatalf("a relayed row was installed: %+v", peers)
+	}
+}
+
 // ==========================================================================================
 // The published record, and the wiring that reads it.
 // ==========================================================================================

@@ -166,7 +166,7 @@ func adoptSetup(t *testing.T, sealed bool) (*adoptService, *idkey.Keypair, *[]st
 
 func adoptConnect(s *adoptService) error {
 	_, _, err := connectTierEnvelope(context.Background(), nil, map[string]any{"adopt_identity_key": true,
-		"agent": adoptAddr}, tierWireGuard, adoptAddr)
+		"agent": adoptAddr}, tierWireGuard, adoptAddr, false)
 	return err
 }
 

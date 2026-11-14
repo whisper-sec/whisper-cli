@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
 // migrateacl.go turns a migration plan into the WhaleACL document `apply` publishes.
@@ -65,13 +67,6 @@ const MaxACLBytes = 49_000
 // fleet open inside its tenancy, and publishing a bare default-deny refuses every flow; which
 // of those the operator means is their decision, so neither is made for them.
 var ErrNothingToPublish = errors.New("no rule in this plan carries into a WhaleACL grant")
-
-// The two ranges their coordination server hands out. An address inside them names a node
-// of theirs or nothing at all.
-var (
-	tailnetV4 = netip.MustParsePrefix("100.64.0.0/10")
-	tailnetV6 = netip.MustParsePrefix("fd7a:115c:a1e0::/48")
-)
 
 // tagShape is the tag syntax the control plane accepts at register, after lower-casing.
 var tagShape = regexp.MustCompile(`^tag:[a-z0-9]([a-z0-9-]{0,57}[a-z0-9])?$`)
@@ -452,7 +447,7 @@ func firstLabel(fqdn string) string {
 func parseAddrOrPrefix(v string) (addr netip.Addr, single, inTailnet, ok bool) {
 	if a, err := netip.ParseAddr(v); err == nil {
 		a = a.Unmap()
-		return a, true, tailnetV4.Contains(a) || tailnetV6.Contains(a), true
+		return a, true, wgtun.InTailnet(a), true
 	}
 	pfx, err := netip.ParsePrefix(v)
 	if err != nil {
@@ -460,7 +455,7 @@ func parseAddrOrPrefix(v string) (addr netip.Addr, single, inTailnet, ok bool) {
 	}
 	a := pfx.Addr().Unmap()
 	single = pfx.Bits() == pfx.Addr().BitLen()
-	inTailnet = tailnetV4.Overlaps(pfx) || tailnetV6.Overlaps(pfx)
+	inTailnet = wgtun.TailnetOverlaps(pfx)
 	return a, single, inTailnet, true
 }
 

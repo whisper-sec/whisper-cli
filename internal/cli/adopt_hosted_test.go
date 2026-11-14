@@ -145,7 +145,7 @@ func (s *hostedService) connect(_ context.Context, _ *client.Client, args map[st
 
 func hostedConnect() error {
 	_, _, err := connectTierEnvelope(context.Background(), nil, map[string]any{"adopt_identity_key": true,
-		"agent": hostedAddr}, tierWireGuard, hostedAddr)
+		"agent": hostedAddr}, tierWireGuard, hostedAddr, false)
 	return err
 }
 

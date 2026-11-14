@@ -123,6 +123,22 @@ func (p *Proxy) Endpoint() string { return p.endpoint }
 // that wants a Proxy URL, or for a direct dial in tests).
 func (p *Proxy) Addr() string { return p.addr }
 
+// Listening reports whether the proxy's own listener is still open: false once Stop has closed
+// it. It asks the listener rather than its port. A port that has been let go belongs to nobody,
+// so a dial to it can reach whatever bound it next, which is how "after Stop nothing answers"
+// checks used to pass or fail for reasons outside the proxy.
+func (p *Proxy) Listening() bool {
+	if p.ln == nil {
+		return false
+	}
+	// Clearing a deadline the accept loop never sets changes nothing on an open listener; on a
+	// closed one it fails with net.ErrClosed.
+	if d, ok := p.ln.(interface{ SetDeadline(time.Time) error }); ok {
+		return !errors.Is(d.SetDeadline(time.Time{}), net.ErrClosed)
+	}
+	return p.life.Err() == nil
+}
+
 // Stop shuts the listener, cancels the proxy's own lifetime context (tearing any
 // in-flight tunnels), and waits for in-flight conns to drain. Idempotent. This is the
 // SOLE thing that ends a proxy's life - the control ctx never does.

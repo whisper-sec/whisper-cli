@@ -19,6 +19,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // deepentrustverify_startTLSServer serves handler over TLS on a loopback socket with a fresh
@@ -52,16 +54,12 @@ func deepentrustverify_startTLSServer(t *testing.T, handler http.Handler) (strin
 	}
 }
 
-// deepentrustverify_closedPort returns a loopback hostport that is guaranteed closed (it was
-// briefly bound, then released).
+// deepentrustverify_closedPort returns a loopback hostport that refuses TCP and UDP for the
+// whole test. It is held refused rather than bound and released: a released number can be
+// taken by another process before the dial, which then reaches a live peer.
 func deepentrustverify_closedPort(t *testing.T) string {
 	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	addr := ln.Addr().String()
-	ln.Close()
+	addr, _ := testenv.RefusedPort(t)
 	return addr
 }
 

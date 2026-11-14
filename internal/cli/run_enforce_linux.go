@@ -351,7 +351,9 @@ func bringUpEnforced(o enforcedBringUp) (_ *enforcedUp, err error) {
 
 	base := enforcedConnectBase(sel)
 	cx, cancel := ctx()
-	env, keys, err := connectTierEnvelope(cx, c, base, tierWireGuard, sel)
+	// direct=false: the enforced device installs no direct peers, so this connect declares
+	// nowhere to be dialed, and neither does any renewal of it.
+	env, keys, err := connectTierEnvelope(cx, c, base, tierWireGuard, sel, false)
 	cancel()
 	if err != nil {
 		return nil, err

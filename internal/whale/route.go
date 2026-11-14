@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net/netip"
 	"strings"
+
+	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 )
 
 // route.go is the subnet-router half of Whalenet: what happens when someone advertises a
@@ -72,13 +74,20 @@ func (r Route) String() string { return r.CIDR.String() }
 // matters most - it would let a node claim other agents' identities - and it is refused
 // here as well as by the server's own /128 rule, because two independent refusals of the
 // same catastrophe is the right number.
+//
+// The tailnet's IPv6 range is refused in ONE direction only, after this list (ParseRoute):
+// a prefix inside it, or equal to it, is refused, and a ULA prefix that merely contains it,
+// fd00::/8 or fc00::/7, is still an ordinary advertisement. On a host that also runs Tailscale,
+// a route inside the /48 collides with the tailnet's own: on a single-routing-table host it is
+// the more specific one and takes the traffic, and on Linux tailscaled's policy rule shadows it
+// and it is dead. A covering route is less specific and does neither.
 var reservedPrefixes = []struct {
 	cidr string
 	why  string
 }{
 	{"2a04:2a01::/32", "Whisper agent identity space: advertising it would let this node claim other agents' addresses"},
 	{"2a04:2a00::/32", "Whisper infrastructure space"},
-	{"100.64.0.0/10", "RFC 6598 shared address space - a carrier NAT and a Tailscale tailnet both live here, so it names a different machine on every network"},
+	{wgtun.TailnetV4().String(), "RFC 6598 shared address space - a carrier NAT and a Tailscale tailnet both live here, so it names a different machine on every network"},
 	{"127.0.0.0/8", "loopback"},
 	{"::1/128", "loopback"},
 	{"169.254.0.0/16", "link-local, which includes the cloud metadata address"},
@@ -130,6 +139,11 @@ func ParseRoute(raw string) (Route, error) {
 			return Route{}, fmt.Errorf("%s overlaps %s (%s), which nothing may advertise", masked, res.cidr, res.why)
 		}
 	}
+	if tn := wgtun.TailnetV6(); masked.Addr().Is6() && masked.Bits() >= tn.Bits() && tn.Contains(masked.Addr()) {
+		return Route{}, fmt.Errorf("%s is inside %s, the IPv6 range every Tailscale tailnet numbers its nodes "+
+			"from, so it names a different machine on every network, and on a host that also runs Tailscale "+
+			"it collides with the tailnet's own route", masked, tn)
+	}
 	return r, nil
 }
 
@@ -174,7 +188,7 @@ func scopeOf(p netip.Prefix) RouteScope {
 	if a.IsPrivate() || a.IsLinkLocalUnicast() || a.IsLoopback() {
 		return ScopePrivate
 	}
-	if a.Is4() && netip.MustParsePrefix("100.64.0.0/10").Contains(a) {
+	if wgtun.InTailnet(a) {
 		return ScopePrivate
 	}
 	if a.Is6() && netip.MustParsePrefix("fc00::/7").Contains(a) {

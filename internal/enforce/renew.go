@@ -56,7 +56,6 @@ func renewedConfig(cur, fresh wgtun.Config, resolve func(string) (string, error)
 	}
 	fresh.Endpoint = ep
 	fresh.Peers = nil
-	fresh.ListenPort = 0
 	if fresh.Keepalive <= 0 {
 		fresh.Keepalive = cur.Keepalive
 	}

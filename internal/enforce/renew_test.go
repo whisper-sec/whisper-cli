@@ -16,7 +16,7 @@ func TestRenewedConfigKeepsTheAddressAndTheKey(t *testing.T) {
 	cur := wgtun.Config{Address: tSelf, PrivateKeyHex: "aa", ServerPublicKeyHex: "s1", Endpoint: "[2001:db8::1]:51820", Keepalive: 25}
 	resolve := func(s string) (string, error) { return "[2001:db8::2]:51826", nil }
 	fresh := wgtun.Config{Address: tSelf, ServerPublicKeyHex: "s2", Endpoint: "ns2.example:51826",
-		Peers: []wgtun.Peer{{PublicKeyHex: "p"}}, ListenPort: 4000}
+		Peers: []wgtun.Peer{{PublicKeyHex: "p"}}}
 	got, err := renewedConfig(cur, fresh, resolve)
 	if err != nil {
 		t.Fatal(err)
@@ -24,7 +24,7 @@ func TestRenewedConfigKeepsTheAddressAndTheKey(t *testing.T) {
 	if got.PrivateKeyHex != "aa" || got.ServerPublicKeyHex != "s2" || got.Endpoint != "[2001:db8::2]:51826" {
 		t.Fatalf("renewed config %+v", got)
 	}
-	if got.Peers != nil || got.ListenPort != 0 || got.Keepalive != 25 {
+	if got.Peers != nil || got.Keepalive != 25 {
 		t.Fatal("direct peers stay off, and the keepalive carries over")
 	}
 	fresh.PrivateKeyHex = "bb"

@@ -68,11 +68,6 @@ type Config struct {
 	// not a measurement: newNameService still prefers RFC 7050 discovery over it, because the
 	// live path is the only thing that can prove which translator actually answers.
 	NAT64Prefix netip.Prefix
-	// ListenPort pins the UDP port the device binds. 0 ⇒ the kernel picks one, which
-	// is what it did before. It has to be pinned for a DECLARED endpoint to mean anything: the
-	// ip:port a node tells the control plane it listens on is only true if it actually listens
-	// there. A port that cannot be bound is not fatal - see Start.
-	ListenPort int
 	// Peers are the DIRECT peers known at bring-up: a second WireGuard peer per pair that
 	// can reach each other with no box in between. Empty (the default) is one peer and a fully
 	// relayed east-west plane, exactly as before direct paths. Peers learned later arrive through
@@ -129,6 +124,13 @@ type Options struct {
 	// long a revoked peer entry can survive on this client, so it is the number to argue about if
 	// the cooperative-boundary window ever matters more than the call volume.
 	PeerRefresh time.Duration
+	// Listen is the UDP socket the device binds: a ListenHold opened before the connect that
+	// declared its port, so the ip:port this node told the control plane it can be dialed on is
+	// held by this process from the declaration on and is the port the device listens on. Start
+	// owns it from the call: the device takes it over, or Start lets it go on the way out of a
+	// failed bring-up. nil ⇒ the device binds a port the kernel chooses, which is right for a
+	// tunnel that declared nothing.
+	Listen *ListenHold
 }
 
 // Tunnel is a live userspace WireGuard egress: the bearer-free local SOCKS5/HTTP endpoint a

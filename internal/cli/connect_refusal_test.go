@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strconv"
 	"strings"
@@ -90,25 +91,23 @@ func runConnect(t *testing.T, srvURL string, args ...string) (error, string) {
 	return err, stderr
 }
 
-// failVerify makes the egress check fail with err, through the REAL connectAndVerifyOnPort (a
-// pinned port binds a real local proxy, which dials nothing until asked), so the test covers
-// the wrapping in the shared connect body and not a stub of it.
+// failVerify makes the egress check fail with err, through the REAL connect body (the local
+// proxy it binds dials nothing until asked), so the test covers the wrapping in the shared
+// connect body and not a stub of it. A connect with no --port reaches that body through the
+// connectAndVerify package var, the seam other tests stub, so the var is checked here: it must
+// hold the live implementation, not a stub some earlier test left behind.
+//
+// These tests used to pin --port to reach connectAndVerifyOnPort directly, with a number read
+// from a listener that was then closed. Another process could take that number before connect
+// bound it, and the refusal recorded was then port-in-use, not the one under test.
 func failVerify(t *testing.T, err error) {
 	t.Helper()
+	if reflect.ValueOf(connectAndVerify).Pointer() != reflect.ValueOf(connectAndVerifyLive).Pointer() {
+		t.Fatal("connectAndVerify is stubbed; this test needs the live connect body")
+	}
 	saved := verifyEgress
 	verifyEgress = func(context.Context, *client.Client, *egressSession) error { return err }
 	t.Cleanup(func() { verifyEgress = saved })
-}
-
-func freePort(t *testing.T) int {
-	t.Helper()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := l.Addr().(*net.TCPAddr).Port
-	_ = l.Close()
-	return port
 }
 
 // The live shape. The saved /128 is gone from an account that still has other devices' agents,
@@ -184,8 +183,7 @@ func TestConnectRefusal_EgressCheckFailureNamesReasonAndFix(t *testing.T) {
 	failVerify(t, &client.ProblemError{Status: 502, Detail: "the Whisper egress did not accept this session " +
 		"while verifying your address - the session token may have been rejected; run `whisper connect` again to mint a fresh session"})
 
-	err, _ := runConnect(t, srv.URL, "--agent", "2a04:2a01:9::abcd", "--tier", "socks5",
-		"--port", strconv.Itoa(freePort(t)))
+	err, _ := runConnect(t, srv.URL, "--agent", "2a04:2a01:9::abcd", "--tier", "socks5")
 	if err == nil {
 		t.Fatal("a failed egress check must not hold a session")
 	}
@@ -211,8 +209,7 @@ func TestConnectRefusal_EgressCheckThatProvesTheIdentityGone(t *testing.T) {
 	failVerify(t, &client.ProblemError{Status: http.StatusProxyAuthRequired,
 		Detail: "the Whisper egress rejected this session's token (407) - run `whisper connect` again to mint a fresh session"})
 
-	err, _ := runConnect(t, srv.URL, "--agent", "2a04:2a01:9::abcd", "--tier", "socks5",
-		"--port", strconv.Itoa(freePort(t)))
+	err, _ := runConnect(t, srv.URL, "--agent", "2a04:2a01:9::abcd", "--tier", "socks5")
 	if err == nil {
 		t.Fatal("a failed egress check must not hold a session")
 	}

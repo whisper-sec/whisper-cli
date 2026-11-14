@@ -528,6 +528,12 @@ var whaleServeConnect = func(cx context.Context, c *client.Client, sel string) (
 		return nil, nil, err
 	}
 	bindBirthFor(c, args, idKey) // the birth is good with this client's key only
+	// A serve's tunnel takes direct peers, so the connect declares where it can be dialed, on a
+	// socket held from now until the tunnel takes it.
+	keys := newConnectKeys(wgKey, idKey, true)
+	keys.holdUnderlay()
+	keys.declareUnderlay(args)
+	defer keys.releaseHold() // a no-op once the bring-up has taken the socket
 	env, err := opConnect(cx, c, args)
 	if err != nil {
 		return nil, nil, err
@@ -535,7 +541,6 @@ var whaleServeConnect = func(cx context.Context, c *client.Client, sel string) (
 	if perr := envelopeError(env); perr != nil {
 		return nil, nil, perr
 	}
-	keys := newConnectKeys(wgKey, idKey, args)
 	settleIdentity(args, env.Result, keys)
 	sess, err := connectAndVerifyOnPort(cx, c, env.Result, displayName(env.Result), keys, 0)
 	if err != nil {

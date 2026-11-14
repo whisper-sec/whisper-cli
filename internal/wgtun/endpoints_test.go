@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/netip"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -22,6 +23,9 @@ func TestDeclarable_AcceptsOnlyPrivateUnicastOutsideOurOwnBlocks(t *testing.T) {
 	ok := []string{
 		"192.168.122.14", "10.0.0.2", "172.16.5.9", // RFC1918
 		"fd00:1234::a", "fdff::1", // ULA
+		// The ULAs on either side of the tailnet's /48, so the refusal below is the /48 and not
+		// a wider guess at it.
+		"fd7a:115c:a1df:ffff:ffff:ffff:ffff:ffff", "fd7a:115c:a1e1::1",
 	}
 	for _, s := range ok {
 		if !declarable(netip.MustParseAddr(s)) {
@@ -29,16 +33,20 @@ func TestDeclarable_AcceptsOnlyPrivateUnicastOutsideOurOwnBlocks(t *testing.T) {
 		}
 	}
 	bad := map[string]string{
-		"127.0.0.1":            "loopback: would aim a peer's handshakes at its own machine",
-		"::1":                  "loopback",
-		"0.0.0.0":              "unspecified",
-		"::":                   "unspecified",
-		"fe80::1":              "link-local: meaningless without a zone index",
-		"169.254.1.2":          "link-local",
-		"239.1.1.1":            "multicast",
-		"ff02::1":              "multicast",
-		"2a04:2a01:4::9":       "our own overlay: would aim a tunnel down a tunnel",
-		"100.64.0.1":           "the 100.64/10 CGNAT range, which agents never source from",
+		"127.0.0.1":           "loopback: would aim a peer's handshakes at its own machine",
+		"::1":                 "loopback",
+		"0.0.0.0":             "unspecified",
+		"::":                  "unspecified",
+		"fe80::1":             "link-local: meaningless without a zone index",
+		"169.254.1.2":         "link-local",
+		"239.1.1.1":           "multicast",
+		"ff02::1":             "multicast",
+		"2a04:2a01:4::9":      "our own overlay: would aim a tunnel down a tunnel",
+		"100.64.0.1":          "a tailnet's IPv4 range, which is also carrier NAT space",
+		"100.126.0.1":         "a tailnet's IPv4 range, inside it",
+		"fd7a:115c:a1e0::1":   "a tailnet's IPv6 range: a ULA, but another overlay carries it",
+		"fd7a:115c:a1e0:1::7": "a tailnet node's IPv6 address",
+		"fd7a:115c:a1e0:ffff:ffff:ffff:ffff:ffff": "a tailnet's IPv6 range, at its top",
 		"8.8.8.8":              "a global address: the observation is what carries the public case",
 		"2001:4860:4860::8888": "a global address",
 	}
@@ -75,6 +83,9 @@ func TestLocalUnderlayEndpoints_EverythingItReturnsIsDialableAndOnTheAskedPort(t
 		if !declarable(ip) {
 			t.Fatalf("declared %q, which declarable() refuses - the two must agree", ep)
 		}
+		if InTailnet(ip) {
+			t.Fatalf("declared %q, which is a tailnet address", ep)
+		}
 		// The server's own sanitiser has to accept everything we send, or we are declaring
 		// endpoints that are silently dropped at the other end.
 		if err := checkUnderlayEndpoint(ep); err != nil {
@@ -99,18 +110,60 @@ func TestLocalUnderlayEndpoints_ANonsensePortDeclaresNothing(t *testing.T) {
 	}
 }
 
-func TestPickListenPort_ReservesSomethingBindable(t *testing.T) {
-	port := PickListenPort()
-	if port == 0 {
-		t.Skip("no UDP port could be reserved in this environment; the caller reads that as declare-nothing")
+// A host on a tailnet, as the gathering sees it. Its tailscale0 carries one address from each
+// tailnet range and a link-local; its LAN interface carries an RFC1918 address, an ordinary ULA,
+// a global v6 and a global v4. This is the shape the bug was measured on: the IPv6 tailnet
+// address passed IsPrivate() and was declared as if it were a LAN.
+func TestEndpointsOn_AHostOnATailnetDeclaresItsLANAndNeitherTailnetAddress(t *testing.T) {
+	// The tailnet addresses sit on a NIC here on purpose: this is the address rule, proved without the
+	// point-to-point rule that would also take tailscale0 (see the interface tests below).
+	host := onNIC("eth0",
+		"100.101.102.103",      // tailscale0, v4
+		"fd7a:115c:a1e0:1::7",  // tailscale0, v6
+		"fe80::1",              // tailscale0, link-local
+		"192.168.1.20",         // eth0, RFC1918
+		"fd12:3456:789a:1::20", // eth0, an ordinary ULA
+		"2001:db8:1::20",       // eth0, global v6
+		"203.0.113.20",         // eth0, global v4
+		"::ffff:100.64.0.7",    // a tailnet v4 written mapped
+	)
+	got := endpointsOn(host, 41641)
+	want := []string{"192.168.1.20:41641", "[fd12:3456:789a:1::20]:41641"}
+	if len(got) != len(want) {
+		t.Fatalf("declared %v, want exactly %v", got, want)
 	}
-	if port < 1 || port > 65535 {
-		t.Fatalf("PickListenPort returned %d", port)
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("declared %v, want exactly %v", got, want)
+		}
 	}
-	// It was released, so it is bindable again - which is what the device will do.
-	c, err := net.ListenUDP("udp", &net.UDPAddr{Port: port})
-	if err != nil {
-		t.Fatalf("the reserved port %d could not be bound: %v", port, err)
+}
+
+// The control for the test above: the same gathering with no tailnet on the host declares the
+// same two endpoints, so the tailnet addresses are the only thing the rule took away, and an
+// ordinary ULA outside the tailnet's /48 is still declared.
+func TestEndpointsOn_TheTailnetIsTheOnlyThingTheRuleTakes(t *testing.T) {
+	onTailnet := endpointsOn(onNIC("eth0", "fd7a:115c:a1e0::5", "100.64.0.5", "192.168.1.20", "fd7a:115c:a1e1::5"), 41641)
+	without := endpointsOn(onNIC("eth0", "192.168.1.20", "fd7a:115c:a1e1::5"), 41641)
+	if len(without) != 2 {
+		t.Fatalf("the control declared %v, want the LAN v4 and the ULA just past the tailnet's /48", without)
 	}
-	_ = c.Close()
+	if strings.Join(onTailnet, ",") != strings.Join(without, ",") {
+		t.Fatalf("a host on a tailnet declared %v, the same host without one %v", onTailnet, without)
+	}
+}
+
+func TestEndpointsOn_CapsDeduplicatesAndKeepsTheHostsOrder(t *testing.T) {
+	var host []hostAddr
+	for i := 1; i <= maxDeclaredEndpoints+4; i++ {
+		a := netip.AddrFrom4([4]byte{10, 0, 0, byte(i)})
+		host = append(host, onNIC("eth0", a.String(), a.String())...) // the same address twice
+	}
+	got := endpointsOn(host, 51820)
+	if len(got) != maxDeclaredEndpoints {
+		t.Fatalf("declared %d endpoints, want the cap of %d: %v", len(got), maxDeclaredEndpoints, got)
+	}
+	if got[0] != "10.0.0.1:51820" || got[1] != "10.0.0.2:51820" {
+		t.Fatalf("declared %v, want the host's own order with each address once", got)
+	}
 }

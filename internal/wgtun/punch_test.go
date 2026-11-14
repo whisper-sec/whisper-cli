@@ -62,12 +62,13 @@ func TestParseCandidates_CollapsesADuplicateOntoItsStrongerSource(t *testing.T) 
 func TestParseCandidates_DropsEveryEndpointWeMustNeverAimAt(t *testing.T) {
 	// Same list as the single-endpoint check, because a candidate list must not be a way around
 	// it. A control plane that has been lied to or replaced must not be able to turn a node into
-	// a packet source aimed at its own loopback, at our overlay, or at the internal network.
+	// a packet source aimed at its own loopback, at our overlay, or at a tailnet.
 	bad := []Candidate{
 		{Endpoint: "127.0.0.1:51820"},
 		{Endpoint: "[::1]:51820"},
 		{Endpoint: "[2a04:2a01:4::9]:51820"},
 		{Endpoint: "100.64.0.1:51820"},
+		{Endpoint: "[fd7a:115c:a1e0:1::7]:51820"},
 		{Endpoint: "[fe80::1]:51820"},
 		{Endpoint: "239.1.1.1:51820"},
 		{Endpoint: "0.0.0.0:51820"},

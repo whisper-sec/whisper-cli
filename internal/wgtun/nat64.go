@@ -191,7 +191,7 @@ func carriable(v4 netip.Addr) error {
 			"internet, not the network you are sitting on: reach it directly, or add it to NO_PROXY. " +
 			"Advertising a LAN into Whalenet is a subnet router, and `whisper whale route advertise` " +
 			"says exactly where that stands today")
-	case inPrefix(v4, "100.64.0.0/10"):
+	case tailnetV4.Contains(v4):
 		return errors.New("100.64.0.0/10 is RFC 6598 shared address space - it is what a carrier NAT and " +
 			"a Tailscale tailnet use, so it names a different machine on every network and cannot be routed here")
 	case inPrefix(v4, "0.0.0.0/8"), inPrefix(v4, "240.0.0.0/4"):

@@ -17,14 +17,18 @@ import (
 	"crypto/tls"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // deepenegress_recordingDialer is a same-package Dialer standing in for either
@@ -344,8 +348,8 @@ func TestDeepenEgress_StartWithDialer_TierSeam(t *testing.T) {
 	if n := stops.Load(); n != 1 {
 		t.Fatalf("onStop ran %d times, want exactly 1", n)
 	}
-	if c, err := net.DialTimeout("tcp", p.Addr(), 200*time.Millisecond); err == nil {
-		c.Close()
+	// Asked of the proxy, not its port: once let go, the port belongs to whoever binds it next.
+	if p.Listening() {
 		t.Fatal("after Stop the dialer-backed proxy must no longer accept connections")
 	}
 }
@@ -358,24 +362,23 @@ func TestDeepenEgress_StartWithDialerPort(t *testing.T) {
 		t.Fatalf("nil dialer error = %v, want a clear 'nil dialer' error", err)
 	}
 
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pinned := probe.Addr().String()
-	_ = probe.Close()
-	_, portStr, _ := net.SplitHostPort(pinned)
-	var want int
-	for _, r := range portStr {
-		want = want*10 + int(r-'0')
-	}
-
+	// The proxy binds the pinned number itself, so it comes from testenv.NumberedPort, which
+	// starts over on a fresh number if another process takes it first.
 	d := &deepenegress_recordingDialer{backend: echoBackend(t)}
-	p, err := StartWithDialerPort(d, nil, want)
-	if err != nil {
-		t.Fatalf("StartWithDialerPort(pinned): %v", err)
-	}
+	var p *Proxy
+	want := testenv.NumberedPort(t, func(port int) error {
+		var err error
+		p, err = StartWithDialerPort(d, nil, port)
+		if err != nil && strings.Contains(err.Error(), "already in use") {
+			return fmt.Errorf("%w: %w", testenv.ErrPortTaken, err)
+		}
+		if err != nil {
+			return fmt.Errorf("StartWithDialerPort(pinned): %w", err)
+		}
+		return nil
+	})
 	t.Cleanup(p.Stop)
+	pinned := net.JoinHostPort("127.0.0.1", strconv.Itoa(want))
 	if p.Addr() != pinned {
 		t.Fatalf("pinned addr = %q, want %q", p.Addr(), pinned)
 	}

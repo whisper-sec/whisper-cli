@@ -97,6 +97,9 @@ type sessionRenewer struct {
 	bringUp  func(ctx context.Context, res *client.Result, name string, port int) (*egressSession, error)
 	fallback func(ctx context.Context, port int) (*egressSession, error)
 	port     int
+	// keys are the session's, shared with register and bringUp. renewNow opens the fresh
+	// session's UDP socket on them before its connect declares it (connectKeys.holdUnderlay).
+	keys *connectKeys
 	// supervised marks the installed service's daemon. A service was started on purpose and a
 	// service manager reports it active for as long as the process lives, so it never stands
 	// down for another proxy on its port: it moves to a free one, as it does at start.
@@ -111,23 +114,26 @@ type sessionRenewer struct {
 // first hour. negotiate adds the tier fallback for a foreground session that negotiated, and
 // handle is the identity handle its first connect used, so that fallback loads the same key.
 func renewerFor(c *client.Client, base map[string]any, sess *egressSession, negotiate bool, handle string) *sessionRenewer {
-	addr, keys := sess.addr, sess.keys
-	r := &sessionRenewer{
-		port: endpointPort(sess.endpoint),
-		register: func(cx context.Context, now time.Time) (*client.Result, string, error) {
-			env, err := connectWithSelfHeal(cx, c, renewalArgs(base, keys, addr, now), keys, tierWireGuard)
-			if err != nil {
-				return nil, "", err
-			}
-			return env.Result, displayName(env.Result), nil
-		},
-		bringUp: func(cx context.Context, res *client.Result, name string, port int) (*egressSession, error) {
-			fresh, err := connectAndVerifyOnPort(cx, c, res, name, keys, port)
-			if fresh != nil {
-				fresh.keys = keys
-			}
-			return fresh, err
-		},
+	addr := sess.addr
+	// Both halves read the keys from r.keys at the time of the call, never a copy taken here: a
+	// fallback that negotiates Tier 1 again comes up with keys of its own, adopt hands them to
+	// the renewer, and the next check-in has to speak for the key that tunnel runs on.
+	r := &sessionRenewer{port: endpointPort(sess.endpoint), keys: sess.keys}
+	r.register = func(cx context.Context, now time.Time) (*client.Result, string, error) {
+		keys := r.keys
+		env, err := connectWithSelfHeal(cx, c, renewalArgs(base, keys, addr, now), keys, tierWireGuard)
+		if err != nil {
+			return nil, "", err
+		}
+		return env.Result, displayName(env.Result), nil
+	}
+	r.bringUp = func(cx context.Context, res *client.Result, name string, port int) (*egressSession, error) {
+		keys := r.keys
+		fresh, err := connectAndVerifyOnPort(cx, c, res, name, keys, port)
+		if fresh != nil {
+			fresh.keys = keys
+		}
+		return fresh, err
 	}
 	if negotiate {
 		fb := make(map[string]any, len(base)+1)
@@ -161,12 +167,10 @@ func renewalArgs(base map[string]any, keys *connectKeys, addr string, now time.T
 	}
 	args["tier"] = tierWireGuard
 	args["agent"] = addr
-	if keys != nil && keys.listenPort > 0 {
-		// the same device on the same port, at the addresses the host has now
-		if eps := underlayEndpoints(keys.listenPort); len(eps) > 0 {
-			args["endpoints"] = eps
-		}
-	}
+	// At the addresses the host has now, on a port a socket holds now: the socket a fresh session
+	// will bind when renewNow opened one for it, the running tunnel's own for a check-in that
+	// leaves the tunnel in place, and nothing for a session that takes no direct peers.
+	keys.declareUnderlay(args)
 	wgPub := ""
 	if keys != nil && keys.wg != nil {
 		wgPub = keys.wg.PublicKeyBase64
@@ -230,6 +234,11 @@ type sessionSupervisor struct {
 	// pinned is the port the holder started on. A service that moved off it to a free port
 	// goes back to it at its next fresh session, once it is free again.
 	pinned int
+	// redeclare is set when the tunnel re-opened its socket: the network moved, so the addresses
+	// and possibly the port this node declared are no longer where it can be dialed. Healthy looks
+	// bring the check-in forward to say so, at most once per redeclareEvery, until one goes through.
+	redeclare    bool
+	redeclaredAt time.Time
 
 	published string // what was last written into the record, so a write happens only on a change
 	since     time.Time
@@ -302,6 +311,7 @@ func (s *sessionSupervisor) step(run context.Context) (done bool) {
 		// The tunnel re-opened its socket, which is what a moved network looks like. A retry
 		// that failed because the network did not reach the control plane gets its chance now.
 		s.rebindsSeen = rb
+		s.redeclare = true
 		if s.unreached {
 			s.nextTry = time.Time{}
 		}
@@ -312,6 +322,13 @@ func (s *sessionSupervisor) step(run context.Context) (done bool) {
 		}
 		s.tried, s.latched, s.yielded, s.refused, s.refusedNext = false, false, false, "", time.Time{}
 		s.publish(tunnelUp, "", now)
+		if s.redeclare && (s.redeclaredAt.IsZero() || now.Sub(s.redeclaredAt) >= redeclareEvery) {
+			// The tunnel came back after re-opening its socket: say where it can be dialed now,
+			// from the addresses the host has and the port the device holds, rather than leave the
+			// last declaration standing until the six-hourly check-in. One that fails, likely
+			// just after a move, is tried again after redeclareEvery, not six hours later.
+			s.redeclaredAt, s.nextCheckIn = now, now
+		}
 		return s.checkIn(run, now)
 	}
 	if !s.renewedAt.IsZero() && now.Sub(s.renewedAt) < renewGrace {
@@ -346,6 +363,10 @@ func (s *sessionSupervisor) step(run context.Context) (done bool) {
 // keeps one tunnel up for days still says it is there at least four times in every window.
 const checkInEvery = 6 * time.Hour
 
+// redeclareEvery bounds how often a re-opened socket brings a check-in forward. A network that
+// moves keeps moving for a while, and one declaration per settled move is all a peer can use.
+const redeclareEvery = 5 * time.Minute
+
 // checkIn makes the periodic signed connect of a healthy held session: the renewal's own connect,
 // with a proof made now. The tunnel is replaced only if the answer moved it to another box; a
 // failed check-in is retried at the next one and never touches a working tunnel.
@@ -369,6 +390,7 @@ func (s *sessionSupervisor) checkIn(run context.Context, now time.Time) (done bo
 		debugf("check-in for %s not made: %v", s.addr, err)
 		return false
 	}
+	s.redeclare = false // where this node can be dialed has been said
 	if got := envelopeAddress(res); got != "" && !sameIP(got, s.addr) {
 		s.wrongAddress(got, now)
 		return false
@@ -415,6 +437,12 @@ func (s *sessionSupervisor) renewNow(run context.Context, now time.Time, silent 
 	if s.sess != nil {
 		s.say("whisper: the tunnel for %s has had no handshake for %s, so the Whisper side has likely dropped it. Starting a fresh session...", s.addr, roughDuration(silent))
 	}
+	// The fresh session's UDP socket is opened now, before the connect that declares it, and the
+	// fresh tunnel binds exactly that socket. Rebinding the old tunnel's port once it has stopped
+	// would leave the port free for anyone between the two. A socket the bring-up never takes (a
+	// refused connect, a fallback to another tier) is let go on the way out.
+	s.renew.keys.holdUnderlay()
+	defer s.renew.keys.releaseHold()
 	rcx, rcancel := context.WithTimeout(run, renewRegisterTimeout)
 	res, name, err := s.renew.register(rcx, now)
 	rcancel()
@@ -483,10 +511,22 @@ func (s *sessionSupervisor) renewNow(run context.Context, now time.Time, silent 
 func (s *sessionSupervisor) adopt(fresh *egressSession, now time.Time) {
 	if fresh.renew == nil && isWireGuardTier(fresh.tier) {
 		fresh.renew = s.renew
+		if s.renew != nil && fresh.keys != nil {
+			// A fallback that landed on Tier 1 again runs on keys of its own. Renewing it, and
+			// checking it in, with the keys of the tunnel it replaced would name a WireGuard key
+			// no running tunnel holds, and declare the stopped tunnel's port.
+			s.renew.keys = fresh.keys
+		}
 	}
 	s.sess = fresh
 	s.tier = fresh.tier
 	s.renewedAt = now
+	// A fresh tunnel counts its own socket re-opens from zero, and its connect has just declared
+	// where it can be dialed.
+	s.rebindsSeen, s.redeclare = 0, false
+	if th, ok := fresh.local.(tunnelHealth); ok {
+		s.rebindsSeen = th.Rebinds()
+	}
 	s.latched, s.unreached, s.refused, s.refusedNext = false, false, "", time.Time{}
 	s.published = ""
 	if fresh.endpoint != s.endpoint {

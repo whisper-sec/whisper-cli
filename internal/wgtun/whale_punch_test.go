@@ -19,6 +19,8 @@ import (
 	"golang.zx2c4.com/wireguard/conn"
 	"golang.zx2c4.com/wireguard/device"
 	"golang.zx2c4.com/wireguard/tun/netstack"
+
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // whale_punch_test.go is the traversal against REAL devices: two wireguard-go instances on
@@ -50,8 +52,7 @@ func startRelayBox(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr,
 		t.Fatalf("box netstack: %v", err)
 	}
 	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
-	udpPort := freeUDPPort(t)
-	uapi := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", kp.PrivateKeyHex, udpPort)
+	uapi := fmt.Sprintf("private_key=%s\n", kp.PrivateKeyHex) // no listen_port: read back after Up
 	uapi += fmt.Sprintf("public_key=%s\nallowed_ip=%s/128\n", clientPubHex, clientTunnelIP.String())
 	if err := dev.IpcSet(uapi); err != nil {
 		t.Fatalf("box IpcSet: %v", err)
@@ -60,6 +61,7 @@ func startRelayBox(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr,
 		t.Fatalf("box Up: %v", err)
 	}
 	t.Cleanup(dev.Close)
+	udpPort := boundListenPort(t, dev)
 	// One echo listener per address the box delivers, so a dial to a PEER's /128 that was
 	// relayed is answered exactly as the live box's AnyIP delivery answers it.
 	for _, addr := range serve {
@@ -81,10 +83,14 @@ func startRelayBox(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr,
 	return &relayBox{dev: dev, pubB64: kp.PublicKeyBase64, udpPort: udpPort, serverIP: serve[0]}
 }
 
-// deadUDPPort returns a loopback port nothing is listening on: an endpoint that will never
-// answer a handshake, which is what a failed punch looks like from the inside. Loopback keeps
-// the test from emitting a single packet at the internet.
-func deadUDPPort(t *testing.T) int { return freeUDPPort(t) }
+// deadUDPPort returns a loopback port nothing will answer on, on 127.0.0.1 and ::1: an endpoint
+// that never answers a handshake, which is what a failed punch looks like from the inside.
+// Loopback keeps the test from emitting a single packet at the internet. The port is held
+// refused for the whole test, so no other process can start answering there.
+func deadUDPPort(t *testing.T) int {
+	_, port := testenv.RefusedPort(t)
+	return port
+}
 
 // echoThroughTunnel proves the tunnel actually carries traffic to target right now.
 func echoThroughTunnel(t *testing.T, tun *Tunnel, target string, within time.Duration) error {

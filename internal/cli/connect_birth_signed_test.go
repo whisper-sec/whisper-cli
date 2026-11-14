@@ -61,7 +61,7 @@ func keylessConnects(s *hostedService, next func(map[string]any) (*client.Envelo
 }
 
 func birthConnect() error {
-	_, _, err := connectTierEnvelope(context.Background(), nil, map[string]any{"agent": hostedAddr}, tierWireGuard, hostedAddr)
+	_, _, err := connectTierEnvelope(context.Background(), nil, map[string]any{"agent": hostedAddr}, tierWireGuard, hostedAddr, false)
 	return err
 }
 

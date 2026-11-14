@@ -21,6 +21,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // socks5Dial is a tiny inline SOCKS5 client (RFC 1928, no-auth, CONNECT by DOMAIN) so the
@@ -467,20 +469,20 @@ func TestProxy_PinnedPort(t *testing.T) {
 	backend := echoBackend(t)
 	fe := newFakeEgress(t, backend, nil)
 
-	// Grab a known-free port (bind, capture, release) and pin the proxy to it.
-	probe, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, ps, _ := net.SplitHostPort(probe.Addr().String())
-	var want int
-	fmt.Sscanf(ps, "%d", &want)
-	_ = probe.Close()
-
-	p, err := StartLocalProxy(context.Background(), fe.addr(), "et_pin", Options{Insecure: true, Port: want})
-	if err != nil {
-		t.Fatalf("StartLocalProxy(pinned): %v", err)
-	}
+	// Pin the proxy to a port nothing holds. The proxy binds the number itself, so it comes from
+	// testenv.NumberedPort, which starts over on a fresh number if another process takes it first.
+	var p *Proxy
+	want := testenv.NumberedPort(t, func(port int) error {
+		var err error
+		p, err = StartLocalProxy(context.Background(), fe.addr(), "et_pin", Options{Insecure: true, Port: port})
+		if err != nil && strings.Contains(err.Error(), "already in use") {
+			return fmt.Errorf("%w: %w", testenv.ErrPortTaken, err)
+		}
+		if err != nil {
+			return fmt.Errorf("StartLocalProxy(pinned): %w", err)
+		}
+		return nil
+	})
 	t.Cleanup(p.Stop)
 	if p.Addr() != fmt.Sprintf("127.0.0.1:%d", want) {
 		t.Fatalf("pinned proxy addr = %q, want 127.0.0.1:%d", p.Addr(), want)
@@ -509,11 +511,17 @@ func TestProxy_EndpointShapeAndStop(t *testing.T) {
 	if !strings.HasPrefix(p.Addr(), "127.0.0.1:") {
 		t.Fatalf("addr = %q, want 127.0.0.1:<port>", p.Addr())
 	}
+	if !p.Listening() {
+		t.Fatal("a started proxy must be listening")
+	}
+	if (&Proxy{}).Listening() {
+		t.Fatal("a proxy with no listener is not listening")
+	}
 	p.Stop()
 	p.Stop() // idempotent - must not panic
-	// After Stop the listener is closed: a dial is refused.
-	if c, err := net.DialTimeout("tcp", p.Addr(), 200*time.Millisecond); err == nil {
-		c.Close()
+	// After Stop the listener is closed. Asked of the proxy, not its port: once let go, the
+	// port belongs to whoever binds it next, and a dial could reach them.
+	if p.Listening() {
 		t.Fatal("after Stop the local proxy must no longer accept connections")
 	}
 }
@@ -561,9 +569,11 @@ func TestProxy_SurvivesControlCtxCancel(t *testing.T) {
 	}
 
 	// And the proxy's lifetime ends ONLY at Stop() - not at the control ctx.
+	if !p.Listening() {
+		t.Fatal("the proxy stopped listening before Stop")
+	}
 	p.Stop()
-	if c, err := net.DialTimeout("tcp", p.Addr(), 200*time.Millisecond); err == nil {
-		c.Close()
+	if p.Listening() {
 		t.Fatal("after Stop the local proxy must no longer accept connections")
 	}
 }

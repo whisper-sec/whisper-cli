@@ -24,6 +24,7 @@ import (
 	xssh "golang.org/x/crypto/ssh"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 	"github.com/whisper-sec/whisper-cli/internal/whale"
 )
 
@@ -126,9 +127,7 @@ func TestTheProxyDialReportsAClosedPortAsNotAccepting(t *testing.T) {
 	saved := whaleSSHVia
 	whaleSSHVia = func() (int, string) { return 0, "" }
 	t.Cleanup(func() { whaleSSHVia = saved })
-	ln, _ := net.Listen("tcp", "127.0.0.1:0")
-	port := ln.Addr().(*net.TCPAddr).Port
-	ln.Close()
+	_, port := testenv.RefusedPort(t) // held refused: nothing else can start listening there
 	_, _, err := whaleSSHProxyDial("127.0.0.1", port, "db-01")
 	if err == nil || !strings.Contains(err.Error(), "db-01 is not accepting") {
 		t.Fatalf("err = %v", err)

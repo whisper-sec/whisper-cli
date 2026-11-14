@@ -118,10 +118,13 @@ func debugf(format string, args ...any) {
 // the Tier-1.5 retry. It is the one connect body BOTH the forced --tier path and each
 // auto-negotiation leg run, so the two modes can never drift apart.
 func connectTierAttempt(cx context.Context, c *client.Client, base map[string]any, tier, sel string, port int) (*egressSession, error) {
-	env, keys, err := connectTierEnvelope(cx, c, base, tier, sel)
+	env, keys, err := connectTierEnvelope(cx, c, base, tier, sel, true)
 	if err != nil {
 		return nil, err
 	}
+	// The socket the connect declared is the tunnel's once the bring-up takes it; one the bring-up
+	// never reached (an answer that was not a tunnel, a stubbed bring-up) is let go here.
+	defer keys.releaseHold()
 	// A pinned port binds a REAL socket, so it goes through connectAndVerifyOnPort
 	// directly; the free-port path rides the connectAndVerify var (the test stub seam).
 	var sess *egressSession
@@ -141,7 +144,12 @@ func connectTierAttempt(cx context.Context, c *client.Client, base map[string]an
 // bring-up the caller runs. connectTierAttempt hands them to the local proxy or tunnel; the
 // enforced run hands them to its namespace. One body, so the two can never disagree about
 // how an agent connects.
-func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]any, tier, sel string) (*client.Envelope, *connectKeys, error) {
+//
+// direct says whether that bring-up takes direct peers. Only then does the connect declare where
+// the node can be dialed, on a socket held from before the connect is sent until the tunnel takes
+// it (connectKeys.declareUnderlay); the keys carry it to the bring-up, and every way out of here
+// that returns no keys lets it go.
+func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]any, tier, sel string, direct bool) (_ *client.Envelope, _ *connectKeys, err error) {
 	args := make(map[string]any, len(base)+3)
 	for k, v := range base {
 		args[k] = v
@@ -170,7 +178,14 @@ func connectTierEnvelope(cx context.Context, c *client.Client, base map[string]a
 	if err := storeAdoptedKey(sel, idKey); err != nil {
 		return nil, nil, err
 	}
-	keys := newConnectKeys(wgKey, idKey, args)
+	keys := newConnectKeys(wgKey, idKey, direct)
+	defer func() {
+		if err != nil {
+			keys.releaseHold()
+		}
+	}()
+	keys.holdUnderlay()
+	keys.declareUnderlay(args)
 	env, err := connectWithSelfHeal(cx, c, args, keys, tier)
 	if err != nil {
 		env, err = resignHostedAdopt(cx, c, args, keys, plan, tier, err)
@@ -390,29 +405,14 @@ var prepareWireGuard = func(tier string, args map[string]any) (*wgtun.Keypair, e
 	// The server reads `public_key` (alias publicKey) and binds a peer to our /128. We send
 	// ONLY the public half; the private key stays in kp (in-memory) for the device bring-up.
 	args["public_key"] = kp.PublicKeyBase64
-	// tell the control plane where this node can be dialed on the underlay, and
-	// pin the port we will actually listen on. Both or neither - a declared ip:port that the
-	// device does not bind is a lie, and a peer would send handshakes into a void. Declaring
-	// nothing is the ordinary case (no private address, or no port reservable) and simply
-	// means every east-west packet keeps being relayed, exactly as before direct paths.
-	if eps, port := declaredEndpoints(); port > 0 {
-		args["endpoints"] = eps
-		wgListenPort = port
-	} else {
-		wgListenPort = 0
-	}
+	// Where this node can be dialed is not said here. It is said by the session's keys right
+	// before each connect is sent (connectKeys.declareUnderlay), from a socket that is open at
+	// that moment, because only the caller knows whether the tunnel it brings up takes direct
+	// peers at all.
 	// Normalise the tier the server sees to the canonical token (so "wg" still selects WG).
 	args["tier"] = "wireguard"
 	return &kp, nil
 }
-
-// wgListenPort is the UDP port prepareWireGuard reserved and declared, read by
-// bringUpWireGuard when it builds the device. It is package state rather than a threaded
-// argument because prepareWireGuard is a package var a test stubs, and the two halves have to
-// agree on ONE number: the port we told the control plane about must be the port we bind, or
-// the declaration is worthless. A connect that declared nothing leaves it 0, which means "let
-// the kernel choose", which is what it did before the port was declared.
-var wgListenPort int
 
 // prepareIdentityKey is the command-layer pre-step, run ALONGSIDE prepareWireGuard: for the
 // routed (WireGuard) tier ONLY it decides what the connect says about the agent's identity key.
@@ -735,27 +735,126 @@ type connectKeys struct {
 	// the connect answer's identity_pin, on a signed reconnect as well; a service without
 	// that column is read by its "was not adopted" sentence, which a signed reconnect cannot carry.
 	unpinned bool
-	// listenPort is the UDP port this session's connect declared its underlay on (prepareWireGuard),
-	// or 0 when it declared none. A renewal declares again on the same port from the host's
-	// addresses as they are then: the service reads a connect with no declaration as a node with
-	// no direct path, so a check-in without one would drop the node back to the relay, and one
-	// that replayed the first connect's addresses would declare a dead path after a roam.
-	listenPort int
+	// direct marks a session whose tunnel takes direct peers, which is the only kind that may say
+	// where it can be dialed. The enforced run's device installs none, so a peer sent to its port
+	// would handshake into nothing: it declares nothing.
+	direct bool
+
+	// mu guards the two halves of the underlay a connect declares (declareUnderlay).
+	mu sync.Mutex
+	// hold is the UDP socket the next bring-up binds, opened before the connect that declares its
+	// port and held until the device takes it over, so nothing else on the host can take the port
+	// in between (wgtun.ListenHold). pending says a bring-up is coming, and while it is only its
+	// own socket may be declared: hold is nil when nothing could be opened or there was nothing
+	// to declare, and then the connect declares nothing rather than the running tunnel's port.
+	hold    *wgtun.ListenHold
+	pending bool
+	// live is the tunnel this session runs on. A check-in that leaves it in place declares the
+	// port it holds now, read back from its device, not a number remembered from its connect.
+	live listenPorter
 }
 
-// newConnectKeys is the one way a session's keys are built from its prepared connect args, so
-// every holder that renews (connect, the daemon, whale serve) keeps the port its underlay was
-// declared on, and none can leave it out.
-func newConnectKeys(wg *wgtun.Keypair, identity *idkey.Keypair, args map[string]any) *connectKeys {
-	keys := &connectKeys{wg: wg, identity: identity}
-	if _, declared := args["endpoints"]; declared {
-		keys.listenPort = wgListenPort
-	}
-	return keys
+// listenPorter is the running tunnel as a declaration sees it: the UDP port its device holds.
+type listenPorter interface{ ListenPort() int }
+
+// newConnectKeys is the one way a session's keys are built, so every holder that renews
+// (connect, the daemon, whale serve, the enforced run) says once, here, whether its tunnel takes
+// direct peers, and none can declare an underlay its device will not answer on.
+func newConnectKeys(wg *wgtun.Keypair, identity *idkey.Keypair, direct bool) *connectKeys {
+	return &connectKeys{wg: wg, identity: identity, direct: direct}
 }
 
 // underlayEndpoints is the host's underlay endpoints on a port; a package var so a test can pin it.
 var underlayEndpoints = wgtun.LocalUnderlayEndpoints
+
+// holdListenPort opens the socket a bring-up will bind; a package var so a test can count holds.
+var holdListenPort = wgtun.HoldListenPort
+
+// holdUnderlay opens the UDP socket the session's next bring-up binds, before the connect that
+// declares it, unless one is already open: a connect that is sent again (a self-heal, a declined
+// birth, the daemon's next attempt) declares the same held port. A session that takes no direct
+// peers holds nothing, and so does one with no WireGuard key, which is not a tunnel at all. So does
+// a host with no address to declare: its socket is let go at once, and its device opens one of its
+// own, exactly as wireguard-go would with nothing in between.
+func (k *connectKeys) holdUnderlay() {
+	if k == nil || !k.direct || k.wg == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.pending {
+		return
+	}
+	h := holdListenPort() // nil when nothing could be opened: then nothing is declared
+	if h != nil && len(underlayEndpoints(h.Port())) == 0 {
+		h.Release()
+		h = nil
+	}
+	k.hold, k.pending = h, true
+}
+
+// declareUnderlay writes where this session can be dialed into a connect's args, on a port a
+// socket holds at that moment: the one opened for the next bring-up when one is pending, the
+// running tunnel's own when not, which is a check-in that leaves the tunnel in place. Whatever the
+// args carried before is dropped first, so a declaration is never replayed. Nothing is declared
+// for a session that takes no direct peers, for a host with no private address, or when no socket
+// could be opened; the service reads that as a node with no direct path, which is the truth.
+func (k *connectKeys) declareUnderlay(args map[string]any) {
+	delete(args, "endpoints")
+	port := k.underlayPort()
+	if port == 0 {
+		return
+	}
+	if eps := underlayEndpoints(port); len(eps) > 0 {
+		args["endpoints"] = eps
+	}
+}
+
+// underlayPort is the port declareUnderlay names, or 0 for none.
+func (k *connectKeys) underlayPort() int {
+	if k == nil || !k.direct {
+		return 0
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.pending {
+		return k.hold.Port() // 0 for a nil hold: the coming tunnel binds a port nobody declared
+	}
+	if k.live != nil {
+		return k.live.ListenPort()
+	}
+	return 0
+}
+
+// takeHold hands the pending socket to the bring-up that binds it. From here wgtun.Start owns it.
+func (k *connectKeys) takeHold() *wgtun.ListenHold {
+	if k == nil {
+		return nil
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	h := k.hold
+	k.hold, k.pending = nil, false
+	return h
+}
+
+// releaseHold lets go of a socket no bring-up took: the connect failed, the answer was not a
+// tunnel, or the attempt ended some other way first. A no-op when the bring-up took it.
+func (k *connectKeys) releaseHold() {
+	if h := k.takeHold(); h != nil {
+		h.Release()
+	}
+}
+
+// setLive records the tunnel this session now runs on, for the next check-in's declaration.
+func (k *connectKeys) setLive(t listenPorter) {
+	if k == nil {
+		return
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	k.live = t
+}
 
 // localEndpoint is the shared surface BOTH egress tiers expose: the bearer/key-free local
 // SOCKS5/HTTP endpoint a caller hands to tools, and a Stop() that tears it down. The Tier-1.5
@@ -1119,18 +1218,22 @@ func bringUpWireGuard(ce connectEnvelope, keys *connectKeys, port int) (*egressS
 	if !g.quiet {
 		logf = func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) }
 	}
-	// bind the port we declared, and keep the direct-peer map refreshed from the
-	// control plane. PeerSource returning nothing - no key, no network, an empty map - leaves
-	// every east-west packet relayed, which is the behaviour this shipped with before direct paths.
-	cfg.ListenPort = wgListenPort
+	// bind the socket the connect declared (held since before it was sent, so its port cannot
+	// have gone to anyone else), and keep the direct-peer map refreshed from the control plane.
+	// PeerSource returning nothing - no key, no network, an empty map - leaves every east-west
+	// packet relayed, which is the behaviour this shipped with before direct paths. Start owns the
+	// socket from here, and lets it go if the bring-up fails.
 	tun, err := wgtun.Start(cfg, wgtun.Options{
 		Logf:       logf,
 		Port:       port,
 		PeerSource: whalePeerSource(),
+		Listen:     keys.takeHold(),
 	})
 	if err != nil {
 		return nil, &client.ProblemError{Status: 502, Detail: cleanWgError(err)}
 	}
+	// A check-in that leaves this tunnel in place declares the port its device holds from now on.
+	keys.setLive(tun)
 	// serve the agent-held identity leaf on the tunnel's own /128:443, now that the server has
 	// returned the assigned address + canonical/friendly FQDN. Best-effort - never fails bring-up.
 	if keys != nil && keys.identity != nil && !keys.unpinned {

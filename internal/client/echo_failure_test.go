@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // echo_failure_test.go: a failed egress verify must name its cause truthfully. The
@@ -110,16 +112,12 @@ func TestObservedEgressIP_UpstreamRefusalNamesTheSessionProblem(t *testing.T) {
 // the honest message is that the LOCAL proxy is gone (a crashed/stopped session), with the
 // remediation, distinct from an upstream refusal.
 func TestObservedEgressIP_DeadLocalProxyIsNamedDistinctly(t *testing.T) {
-	// Bind-then-release a loopback port so it is almost certainly dead.
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	port := ln.Addr().(*net.TCPAddr).Port
-	_ = ln.Close()
+	// A port held refused for the whole test, so it is dead and stays dead: a port merely let
+	// go of could be taken by another process before the dial.
+	_, port := testenv.RefusedPort(t)
 
 	c := New(Config{})
-	_, err = c.ObservedEgressIP(context.Background(), "socks5h://127.0.0.1:"+strconv.Itoa(port))
+	_, err := c.ObservedEgressIP(context.Background(), "socks5h://127.0.0.1:"+strconv.Itoa(port))
 	if err == nil {
 		t.Fatal("a dead local proxy must be an error")
 	}

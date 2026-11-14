@@ -59,19 +59,20 @@ func TestParsePeer_RefusesAnAddressOutsideTheAgentBlock(t *testing.T) {
 
 func TestParsePeer_RefusesEveryEndpointWeMustNotAimATunnelAt(t *testing.T) {
 	cases := map[string]string{
-		"loopback v4":      "127.0.0.1:51820",
-		"loopback v6":      "[::1]:51820",
-		"our own overlay":  "[2a04:2a01:4::9]:51820",
-		"internal tailnet": "100.64.0.1:51820",
-		"link-local":       "[fe80::1]:51820",
-		"multicast":        "239.1.1.1:51820",
-		"unspecified":      "0.0.0.0:51820",
-		"a hostname":       "peer.example.com:51820",
-		"no port":          "192.168.1.2",
-		"port zero":        "192.168.1.2:0",
-		"port too large":   "192.168.1.2:70000",
-		"bare v6 literal":  "fd00::1:51820",
-		"empty":            "",
+		"loopback v4":     "127.0.0.1:51820",
+		"loopback v6":     "[::1]:51820",
+		"our own overlay": "[2a04:2a01:4::9]:51820",
+		"tailnet v4":      "100.64.0.1:51820",
+		"tailnet v6":      "[fd7a:115c:a1e0:1::7]:51820",
+		"link-local":      "[fe80::1]:51820",
+		"multicast":       "239.1.1.1:51820",
+		"unspecified":     "0.0.0.0:51820",
+		"a hostname":      "peer.example.com:51820",
+		"no port":         "192.168.1.2",
+		"port zero":       "192.168.1.2:0",
+		"port too large":  "192.168.1.2:70000",
+		"bare v6 literal": "fd00::1:51820",
+		"empty":           "",
 	}
 	for why, endpoint := range cases {
 		if _, err := ParsePeer(testPeerKeyB64, endpoint, "2a04:2a01:4::7", "x", ""); err == nil {
@@ -226,8 +227,7 @@ func startPeerSide(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr)
 		t.Fatalf("peer netstack: %v", err)
 	}
 	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
-	udpPort := freeUDPPort(t)
-	uapi := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", kp.PrivateKeyHex, udpPort)
+	uapi := fmt.Sprintf("private_key=%s\n", kp.PrivateKeyHex) // no listen_port: read back after Up
 	// The far side keeps the session warm the way a real agent that has armed us does (it sets
 	// directKeepalive on its direct peer), at a test cadence. Its keepalives are what keep a
 	// promoted path promoted between WireGuard's two-minute rekeys.
@@ -240,7 +240,7 @@ func startPeerSide(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr)
 		t.Fatalf("peer Up: %v", err)
 	}
 	t.Cleanup(dev.Close)
-	return &peerSide{dev: dev, pubHex: pubHex, udpPort: udpPort}
+	return &peerSide{dev: dev, pubHex: pubHex, udpPort: boundListenPort(t, dev)}
 }
 
 func TestDirectPeer_PromotesOnARealHandshakeAndFallsBackToTheRelayWhenItDies(t *testing.T) {

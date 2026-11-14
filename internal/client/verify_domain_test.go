@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // verifyDomainServer is a mock /verify-domain/<apex> endpoint. It asserts the request the
@@ -201,9 +203,8 @@ func TestVerifyDomainBlankApex(t *testing.T) {
 
 // TestVerifyDomainUnreachable names the endpoint it could not reach.
 func TestVerifyDomainUnreachable(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	base := srv.URL
-	srv.Close() // nothing listens there any more
+	addr, _ := testenv.RefusedPort(t) // nothing listens there, and nothing else can start to
+	base := "http://" + addr
 
 	_, _, _, err := New(Config{VerifyURL: base, HTTPClient: &http.Client{}}).
 		VerifyDomain(context.Background(), "example.com")

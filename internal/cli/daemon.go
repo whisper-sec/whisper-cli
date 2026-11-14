@@ -148,7 +148,7 @@ var runConnectDaemon = func(p projcfg.Paths, cfg projcfg.Config, supervised bool
 		}
 		bindBirthFor(c, args, idKey) // the birth is good with this client's key only
 	}
-	keys := newConnectKeys(wgKey, idKey, args)
+	keys := newConnectKeys(wgKey, idKey, true) // the daemon's tunnel takes direct peers
 
 	// Connect + verify with BOUNDED retry (the false-"up" companion fix): a failed op:connect
 	// or a failed egress verify used to kill the daemon on the spot, so a transient serving-side
@@ -261,6 +261,12 @@ var daemonRetryBackoff = []time.Duration{
 func daemonConnectAttempt(c *client.Client, cfg projcfg.Config, keys *connectKeys, args map[string]any) (*egressSession, error) {
 	cx, cancel := ctx()
 	defer cancel()
+	// Each attempt declares the socket it will bind. A failed attempt's tunnel took its socket
+	// down with it, so the next one opens and declares another rather than resending a port that
+	// nothing holds any more; one the bring-up never took is let go on the way out.
+	keys.holdUnderlay()
+	keys.declareUnderlay(args)
+	defer keys.releaseHold()
 	env, err := opConnect(cx, c, args)
 	if err != nil {
 		return nil, err

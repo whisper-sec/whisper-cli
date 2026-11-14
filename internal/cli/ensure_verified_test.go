@@ -5,12 +5,15 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/projcfg"
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // ensure_verified_test.go: the verified-handshake gate behind `--ensure` / `init claude`.
@@ -172,9 +175,29 @@ func TestRunConnectDaemon_RetriesFailedVerifyThenHolds(t *testing.T) {
 	holdDaemonUntilSignal = func(_ projcfg.Paths, sess *egressSession) { held = sess; sess.Stop() }
 	t.Cleanup(func() { holdDaemonUntilSignal = savedHold })
 
-	p := projcfg.PathsFor(t.TempDir())
-	port := freeEphemeralPort(t)
-	if err := runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01:9::abcd", Tier: "socks5"}, false); err != nil {
+	// The daemon binds its pinned port on every attempt, so the number goes to it by
+	// testenv.NumberedPort, which runs the whole thing again if another process takes it.
+	var err error
+	testenv.NumberedPort(t, func(port int) error {
+		*verifies, held = 0, nil // each attempt starts clean
+		p := projcfg.PathsFor(t.TempDir())
+		err = runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01:9::abcd", Tier: "socks5"}, false)
+		if lost := pinnedPortLost(err); lost != nil {
+			return lost
+		}
+		// A number taken before the daemon's first look makes it serve on a free port instead,
+		// which passes without the pinned rebind across retries this test is here for; and one
+		// taken by another Whisper proxy (another package's test) makes it stand down as already
+		// up, holding nothing.
+		if want := "socks5h://127.0.0.1:" + strconv.Itoa(port); err == nil && held != nil && held.endpoint != want {
+			return fmt.Errorf("%w: the daemon served %s, not its pinned %s", testenv.ErrPortTaken, held.endpoint, want)
+		}
+		if err == nil && held == nil {
+			return fmt.Errorf("%w: the daemon found a Whisper proxy on %d and held nothing", testenv.ErrPortTaken, port)
+		}
+		return nil
+	})
+	if err != nil {
 		t.Fatalf("the daemon must retry a failed verify and succeed, got %v", err)
 	}
 	if *verifies != 3 {
@@ -204,9 +227,13 @@ func TestRunConnectDaemon_RetryIsBounded(t *testing.T) {
 	}
 	t.Cleanup(func() { holdDaemonUntilSignal = savedHold })
 
-	p := projcfg.PathsFor(t.TempDir())
-	port := freeEphemeralPort(t)
-	err := runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01:9::abcd", Tier: "socks5"}, false)
+	var err error
+	testenv.NumberedPort(t, func(port int) error {
+		*verifies = 0 // each attempt starts clean
+		p := projcfg.PathsFor(t.TempDir())
+		err = runConnectDaemon(p, projcfg.Config{Port: port, Agent: "2a04:2a01:9::abcd", Tier: "socks5"}, false)
+		return pinnedPortLost(err)
+	})
 	if err == nil {
 		t.Fatal("an exhausted retry schedule must surface the failure")
 	}

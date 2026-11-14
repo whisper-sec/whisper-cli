@@ -110,7 +110,6 @@ func startTunnel(cfg wgtun.Config, pol Policy, opts Options, place func(netip.Ad
 	}
 	cfg.Endpoint = ep
 	cfg.Peers = nil
-	cfg.ListenPort = 0
 	pol.Self = cfg.Address
 
 	ns, err := place(cfg.Address)

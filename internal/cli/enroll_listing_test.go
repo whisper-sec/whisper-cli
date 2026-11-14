@@ -61,10 +61,12 @@ func failingListing(t *testing.T, f listingFailure) func() []string {
 			`"rows":[["ag_new","2a04:2a01:9::1","ag-new.agents.whisper.online."]]}}`)(w, r)
 	}))
 	url := srv.URL
+	t.Cleanup(srv.Close)
 	if f.serve == nil {
-		srv.Close()
-	} else {
-		t.Cleanup(srv.Close)
+		// No server at all: a port held refused for the whole test. A server that was started
+		// and closed would leave its number free for another process to answer on.
+		addr, _ := testenv.RefusedPort(t)
+		url = "http://" + addr
 	}
 	savedG := g
 	g = globalFlags{controlURL: url, key: "whisper_live_test", timeout: 400 * time.Millisecond, quiet: true}

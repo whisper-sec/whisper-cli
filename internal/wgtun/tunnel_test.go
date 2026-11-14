@@ -72,10 +72,10 @@ func startServerSide(t *testing.T, clientPubHex string, clientTunnelIP netip.Add
 	}
 	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
 
-	// Configure the server: its private key, a fixed listen port, and the client as a peer
-	// keyed by the client's public key with the client's tunnel /128 as allowed-ip.
-	udpPort := freeUDPPort(t)
-	uapi := fmt.Sprintf("private_key=%s\nlisten_port=%d\n", srvPrivHex, udpPort)
+	// Configure the server: its private key and the client as a peer keyed by the client's
+	// public key with the client's tunnel /128 as allowed-ip. No listen port: the device binds
+	// one the kernel picks when it comes up, and the client is pointed at what it bound.
+	uapi := fmt.Sprintf("private_key=%s\n", srvPrivHex)
 	uapi += fmt.Sprintf("public_key=%s\nallowed_ip=%s/128\n", clientPubHex, clientTunnelIP.String())
 	if err := dev.IpcSet(uapi); err != nil {
 		t.Fatalf("server IpcSet: %v", err)
@@ -84,6 +84,7 @@ func startServerSide(t *testing.T, clientPubHex string, clientTunnelIP netip.Add
 		t.Fatalf("server Up: %v", err)
 	}
 	t.Cleanup(dev.Close)
+	udpPort := boundListenPort(t, dev)
 
 	// Echo backend INSIDE the server netstack: the client dials [serverIP]:echoPort through the
 	// tunnel and we echo its bytes back.
@@ -106,17 +107,27 @@ func startServerSide(t *testing.T, clientPubHex string, clientTunnelIP netip.Add
 	return &serverSide{dev: dev, tnet: tnet, pubB64: kp.PublicKeyBase64, udpPort: udpPort, serverIP: serverIP}
 }
 
-// freeUDPPort grabs an ephemeral UDP port on loopback and frees it, returning the number so the
-// server device can bind it as its WireGuard listen_port and the client can tunnel to it.
-func freeUDPPort(t *testing.T) int {
+// boundListenPort is the UDP port a device bound when it came up. A test device is given no
+// listen_port, so the kernel picks the port and the device holds it from its first moment. A
+// number read from a socket that was then closed, and handed to the device afterwards, could
+// be taken by another process in between.
+func boundListenPort(t *testing.T, dev *device.Device) int {
 	t.Helper()
-	c, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv6loopback, Port: 0})
+	cfg, err := dev.IpcGet()
 	if err != nil {
-		t.Fatalf("free udp port: %v", err)
+		t.Fatalf("IpcGet: %v", err)
 	}
-	port := c.LocalAddr().(*net.UDPAddr).Port
-	_ = c.Close()
-	return port
+	for _, line := range strings.Split(cfg, "\n") {
+		if v, ok := strings.CutPrefix(line, "listen_port="); ok {
+			p, err := strconv.Atoi(v)
+			if err != nil || p <= 0 {
+				t.Fatalf("the device reports listen_port=%q", v)
+			}
+			return p
+		}
+	}
+	t.Fatal("the device reports no listen_port: it did not bind one when it came up")
+	return 0
 }
 
 // TestTunnel_EndToEndEgress is the headline test: a REAL userspace WireGuard handshake on
@@ -221,11 +232,14 @@ func TestTunnel_StopIsCleanAndIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
-	addr := tun.Addr()
+	if !tun.proxy.Listening() {
+		t.Fatal("a started tunnel's local SOCKS5 endpoint must be listening")
+	}
 	tun.Stop()
 	tun.Stop() // idempotent - must not panic
-	if c, err := net.DialTimeout("tcp", addr, 200*time.Millisecond); err == nil {
-		c.Close()
+	// Asked of the endpoint's own listener, not its port: once let go, the port belongs to
+	// whoever binds it next, and a dial could reach them.
+	if tun.proxy.Listening() {
 		t.Fatal("after Stop the local SOCKS5 endpoint must no longer accept connections")
 	}
 }

@@ -5,6 +5,7 @@ package cli
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"os"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/projcfg"
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // session_renew_minors_test.go: the five renewal behaviours a review of the hold left open: a
@@ -138,46 +140,53 @@ func TestAMissingMachineRegistryIsRecreatedReadable(t *testing.T) {
 // 4a. A service that moved off its pinned port goes back at its next fresh session once the port
 // is free, and stays where it is while something still holds it.
 func TestAMovedServiceReturnsToItsPinnedPortWhenItIsFree(t *testing.T) {
-	// The pinned port, really bound, so the "still held" half sees it held.
-	hold, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	pinned := hold.Addr().(*net.TCPAddr).Port
-	h := newRenewHarness(t)
-	h.sup.renew.supervised = true
-	h.sup.pinned, h.sup.listen = pinned, pinned
 	const moved = 41999
-	h.sup.renew.bringUp = func(_ context.Context, _ *client.Result, _ string, port int) (*egressSession, error) {
-		h.bringUps = append(h.bringUps, port)
-		p := port
-		if p == 0 {
-			p = moved
+	// The pinned port is really bound, so the "still held" half sees it held, and it is released
+	// halfway through. Another process could bind it in that moment, before the service looks
+	// again, so the scenario runs under testenv.NumberedPort and starts over on a fresh number
+	// when the released port turns out to be held.
+	pinned := testenv.NumberedPort(t, func(pinned int) error {
+		hold, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(pinned)))
+		if err != nil {
+			return fmt.Errorf("%w: %w", testenv.ErrPortTaken, err)
 		}
-		ep := "socks5h://127.0.0.1:" + strconv.Itoa(p)
-		ft := &fakeTunnel{healthy: true, endpoint: ep}
-		h.built = append(h.built, ft)
-		return &egressSession{endpoint: ep, addr: renewAddr, tier: "wireguard", verified: true, local: ft}, nil
-	}
-	h.sup.listen = 0 // the move: the service found its port taken and asked for a free one
-	h.first.set(false, true)
-	h.advance(5 * time.Second)
-	if h.sup.listen != moved {
-		t.Fatalf("setup: the service serves %d, want the free port %d", h.sup.listen, moved)
-	}
-	// Still held: the next fresh session stays on the free port.
-	h.built[len(h.built)-1].set(false, true)
-	h.advance(renewSettled + time.Minute)
-	if last := h.bringUps[len(h.bringUps)-1]; last != moved {
-		t.Fatalf("asked for %d while the pinned port is still held, want %d", last, moved)
-	}
-	// Freed: the next fresh session asks for the pinned port again.
-	_ = hold.Close()
-	h.built[len(h.built)-1].set(false, true)
-	h.advance(renewSettled + time.Minute)
-	if last := h.bringUps[len(h.bringUps)-1]; last != pinned {
-		t.Fatalf("asked for %d once the pinned port %d was free, want the pinned port", last, pinned)
-	}
+		defer hold.Close()
+		h := newRenewHarness(t)
+		h.sup.renew.supervised = true
+		h.sup.pinned, h.sup.listen = pinned, pinned
+		h.sup.renew.bringUp = func(_ context.Context, _ *client.Result, _ string, port int) (*egressSession, error) {
+			h.bringUps = append(h.bringUps, port)
+			p := port
+			if p == 0 {
+				p = moved
+			}
+			ep := "socks5h://127.0.0.1:" + strconv.Itoa(p)
+			ft := &fakeTunnel{healthy: true, endpoint: ep}
+			h.built = append(h.built, ft)
+			return &egressSession{endpoint: ep, addr: renewAddr, tier: "wireguard", verified: true, local: ft}, nil
+		}
+		h.sup.listen = 0 // the move: the service found its port taken and asked for a free one
+		h.first.set(false, true)
+		h.advance(5 * time.Second)
+		if h.sup.listen != moved {
+			t.Fatalf("setup: the service serves %d, want the free port %d", h.sup.listen, moved)
+		}
+		// Still held: the next fresh session stays on the free port.
+		h.built[len(h.built)-1].set(false, true)
+		h.advance(renewSettled + time.Minute)
+		if last := h.bringUps[len(h.bringUps)-1]; last != moved {
+			t.Fatalf("asked for %d while the pinned port is still held, want %d", last, moved)
+		}
+		// Freed: the next fresh session asks for the pinned port again.
+		_ = hold.Close()
+		h.built[len(h.built)-1].set(false, true)
+		h.advance(renewSettled + time.Minute)
+		if last := h.bringUps[len(h.bringUps)-1]; last != pinned {
+			return fmt.Errorf("%w: asked for %d once the pinned port %d was released, want the pinned port",
+				testenv.ErrPortTaken, last, pinned)
+		}
+		return nil
+	})
 	// Control: a holder that is not a service never moves back on its own.
 	h2 := newRenewHarness(t)
 	h2.sup.pinned, h2.sup.listen = pinned, moved

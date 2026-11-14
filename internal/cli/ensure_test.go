@@ -4,13 +4,16 @@
 package cli
 
 import (
+	"fmt"
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/projcfg"
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // TestEnsureDaemon_ReusesLiveProxy: when a live whisper proxy already serves the port AND the
@@ -113,8 +116,10 @@ func TestProbeWhisperProxy_RealHandshake(t *testing.T) {
 		t.Fatal("probe must REJECT a listener that doesn't speak our SOCKS5 select")
 	}
 
-	// A dead port (nothing listening) is rejected.
-	if probeWhisperProxy(freeEphemeralPort(t)) {
+	// A dead port (nothing listening) is rejected. It is held refused, so no other process can
+	// start listening there while the probe runs.
+	_, dead := testenv.RefusedPort(t)
+	if probeWhisperProxy(dead) {
 		t.Fatal("probe must reject a port with no listener")
 	}
 }
@@ -155,18 +160,15 @@ func startFakeListener(t *testing.T, handle func(net.Conn)) *fakeListener {
 	return &fakeListener{ln: ln, port: p}
 }
 
-// freeEphemeralPort returns a port that was briefly bound then released (so almost certainly
-// free for the duration of the test).
-func freeEphemeralPort(t *testing.T) int {
-	t.Helper()
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
+// pinnedPortLost is a testenv.NumberedPort verdict for a run of code that binds a pinned
+// port: the run's error when egress could not bind the number because something else had it
+// (a lost port, so the run is tried again on another number), and nil otherwise, leaving the
+// run's own result for the test to judge.
+func pinnedPortLost(err error) error {
+	if err != nil && strings.Contains(err.Error(), "is already in use") {
+		return fmt.Errorf("%w: %w", testenv.ErrPortTaken, err)
 	}
-	_, ps, _ := net.SplitHostPort(ln.Addr().String())
-	p, _ := strconv.Atoi(ps)
-	_ = ln.Close()
-	return p
+	return nil
 }
 
 // TestRunConnectDaemon_BindFirstGuard: a duplicate daemon spawned onto a port ANOTHER

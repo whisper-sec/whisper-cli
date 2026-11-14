@@ -121,11 +121,18 @@ func (p Peer) candidateList() []Candidate {
 	return []Candidate{{Endpoint: p.Endpoint, Source: SourcePublic}}
 }
 
-// sameCandidates reports whether two peers offer the same endpoints in the same order. It is
-// what decides whether a control-plane refresh may leave a live path alone: an unchanged
-// candidate list must never reset a peer that is working.
+// sameCandidates reports whether two peers offer the same endpoints in the same order, leaving
+// out the observed ones. It is what decides whether a control-plane refresh may leave a peer's
+// train alone: an unchanged list must never reset a peer that is working or punching.
+//
+// The observed endpoints are left out because they are one box's view. An active/active pair
+// answers the peer map from either box, and only the box a peer's tunnel lands on has seen where
+// it arrives from, so the observed endpoint comes and goes from one refresh to the next. If that
+// counted as a change, an unpromoted peer would be re-armed from scratch every other minute and
+// its train would never get as far as the observed endpoint, which it tries last. The new list is
+// still adopted; it just does not restart the train.
 func sameCandidates(a, b Peer) bool {
-	x, y := a.candidateList(), b.candidateList()
+	x, y := declaredCandidates(a.candidateList()), declaredCandidates(b.candidateList())
 	if len(x) != len(y) {
 		return false
 	}
@@ -136,6 +143,45 @@ func sameCandidates(a, b Peer) bool {
 	}
 	return true
 }
+
+func declaredCandidates(in []Candidate) []Candidate {
+	out := make([]Candidate, 0, len(in))
+	for _, c := range in {
+		if c.Source != SourceObserved {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// pathClass is the class a promoted peer reports: the one the control plane offered, except that
+// a peer offered as direct-local whose handshake landed at the endpoint a box OBSERVED, or that
+// WireGuard roamed to a public address nobody offered, did not take the local path. That is a punch
+// through a NAT, and the PATH column says so rather than claiming a shared segment that never
+// answered. A roam to another private address is a LAN peer answering from a second address (or a
+// renumbered one), and stays direct-local; so does a win at a row's single endpoint, which a row
+// with no candidate list classes public.
+func (d *directPeer) pathClass() string {
+	class := orText(d.peer.Path, "direct")
+	if class != pathDirectLocal || d.punch == nil || !d.punch.won {
+		return class
+	}
+	switch d.punch.winner.Source {
+	case SourceObserved:
+		return pathDirectPunch
+	case SourceRoamed:
+		if ap, err := netip.ParseAddrPort(d.punch.winner.Endpoint); err == nil && !ap.Addr().Unmap().IsPrivate() {
+			return pathDirectPunch
+		}
+	}
+	return class
+}
+
+// The two path tokens pathClass reads and writes, spelled as the control plane and whale.Path* spell them.
+const (
+	pathDirectLocal = "direct-local"
+	pathDirectPunch = "direct-punch"
+)
 
 // ParsePeer validates one control-plane peer row into a Peer, or explains why it will not be
 // installed. The client re-checks everything the server checked, on purpose: this is the side
@@ -158,7 +204,7 @@ func ParsePeer(publicKeyB64, endpoint, allowedIP, name, path string) (Peer, erro
 //
 // The client re-checks every candidate the server already checked, on purpose. This is the side
 // that will actually emit the packets, so it is the side that has to be sure it is not being
-// pointed at loopback, at the internal network, at our own overlay, or at multicast.
+// pointed at loopback, at a tailnet, at our own overlay, or at multicast.
 func ParsePeerCandidates(publicKeyB64 string, cands []Candidate, allowedIP, name, path string) (Peer, error) {
 	var p Peer
 	keyHex, err := keyBase64ToHex(publicKeyB64)
@@ -206,22 +252,43 @@ func agentBlock() netip.Prefix {
 //
 // - loopback: would aim our handshakes at our own machine's services.
 // - our own overlay 2a04:2a01::/32: would aim the tunnel down the tunnel.
-// - the internal tailnet 100.64.0.0/10: agents never join it.
-// - link-local, multicast, unspecified: not dialable, or not ours to dial.
+// - a tailnet, either range (tailnet.go): another overlay carries it, so it is not a direct path.
+// - link-local, multicast, unspecified, reserved IPv4 (240.0.0.0/4, the limited broadcast with
+// it): not dialable, or not ours to dial.
+// - a zone (%eth0): it names an interface on one host, and no prefix contains a zoned address.
 func checkUnderlayEndpoint(endpoint string) error {
+	_, err := parseUnderlayEndpoint(endpoint)
+	return err
+}
+
+// parseUnderlayEndpoint is checkUnderlayEndpoint that also hands back what passed, so a caller
+// stores and writes the canonical form (an IPv4-mapped address as plain IPv4, lower case, no
+// leading zeros in the port) and never the text it was given.
+func parseUnderlayEndpoint(endpoint string) (netip.AddrPort, error) {
 	host, portStr, err := splitHostPortLiteral(strings.TrimSpace(endpoint))
 	if err != nil {
-		return err
+		return netip.AddrPort{}, err
 	}
 	port, err := strconv.Atoi(portStr)
 	if err != nil || port < 1 || port > 65535 {
-		return errors.New("the peer's endpoint has no usable port")
+		return netip.AddrPort{}, errors.New("the peer's endpoint has no usable port")
 	}
 	ip, err := netip.ParseAddr(host)
 	if err != nil {
-		return errors.New("the peer's endpoint is not a literal address")
+		return netip.AddrPort{}, errors.New("the peer's endpoint is not a literal address")
+	}
+	if ip.Zone() != "" {
+		return netip.AddrPort{}, errors.New("the peer's endpoint carries an interface zone, which only means something on one host")
 	}
 	ip = ip.Unmap()
+	if err := refuseUnderlayAddr(ip); err != nil {
+		return netip.AddrPort{}, err
+	}
+	return netip.AddrPortFrom(ip, uint16(port)), nil
+}
+
+// refuseUnderlayAddr is the address half of parseUnderlayEndpoint, for an unmapped, unzoned address.
+func refuseUnderlayAddr(ip netip.Addr) error {
 	switch {
 	case ip.IsLoopback():
 		return errors.New("the peer's endpoint is a loopback address")
@@ -229,17 +296,14 @@ func checkUnderlayEndpoint(endpoint string) error {
 		return errors.New("the peer's endpoint is not a dialable unicast address")
 	case ip.IsUnspecified():
 		return errors.New("the peer's endpoint is the unspecified address")
+	case ip.Is4() && ip.As4()[0] >= 240:
+		return errors.New("the peer's endpoint is in reserved IPv4 space")
 	case agentBlock().Contains(ip):
 		return errors.New("the peer's endpoint is inside the Whisper overlay")
-	case tailnetBlock().Contains(ip):
-		return errors.New("the peer's endpoint is inside the internal network")
+	case InTailnet(ip):
+		return errors.New("the peer's endpoint is a tailnet address, which another overlay carries")
 	}
 	return nil
-}
-
-func tailnetBlock() netip.Prefix {
-	p, _ := netip.ParsePrefix("100.64.0.0/10")
-	return p
 }
 
 // splitHostPortLiteral splits "ip:port" or "[ip]:port". It refuses a bare unbracketed IPv6
@@ -575,7 +639,7 @@ func (t *Tunnel) DirectPeers() []PeerState {
 		path := "relayed"
 		endpoint := d.peer.Endpoint
 		if d.promoted {
-			path = orText(d.peer.Path, "direct")
+			path = d.pathClass()
 			if d.punch != nil && d.punch.won {
 				endpoint = d.punch.winner.Endpoint
 			}
@@ -604,7 +668,7 @@ func (t *Tunnel) PathTo(addr netip.Addr) string {
 	defer t.mu.Unlock()
 	for _, d := range t.direct {
 		if d.peer.Address == addr && d.promoted {
-			return orText(d.peer.Path, "direct")
+			return d.pathClass()
 		}
 	}
 	return "relayed"

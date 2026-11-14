@@ -164,7 +164,7 @@ func (s CandidateSource) Why() string {
 // Every candidate goes through the SAME checkUnderlayEndpoint the single declared endpoint does.
 // That is the load-bearing part: a candidate list is a list of places we will send UDP to, so a
 // control plane that has been lied to (or replaced) must not be able to turn this node into a
-// packet source aimed at loopback, at the internal network, at our own overlay, or at multicast.
+// packet source aimed at loopback, at a tailnet, at our own overlay, or at multicast.
 //
 // Liberal in what it accepts (Postel): duplicates collapse, blanks are dropped, an entry that
 // fails validation is skipped rather than failing the whole peer, and the list is truncated to
@@ -174,13 +174,16 @@ func ParseCandidates(in []Candidate) ([]Candidate, error) {
 	seen := map[string]int{} // endpoint -> index in out, so a duplicate can upgrade its source
 	var out []Candidate
 	for _, c := range in {
-		ep := strings.TrimSpace(c.Endpoint)
-		if ep == "" {
+		if strings.TrimSpace(c.Endpoint) == "" {
 			continue
 		}
-		if err := checkUnderlayEndpoint(ep); err != nil {
+		ap, err := parseUnderlayEndpoint(c.Endpoint)
+		if err != nil {
 			continue
 		}
+		// The canonical form, not the row's text: two spellings of one endpoint collapse, and what
+		// reaches the device's UAPI document is only ever what netip printed.
+		ep := ap.String()
 		src := c.Source
 		if src == "" {
 			src = SourcePublic

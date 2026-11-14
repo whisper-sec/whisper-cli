@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // TestListenerOwnedByReadsTheRealKernel: a listener this process opens is owned by this pid, and
@@ -24,12 +26,9 @@ func TestListenerOwnedByReadsTheRealKernel(t *testing.T) {
 	if owned, known := listenerOwnedBy(port, os.Getpid()); !owned || !known {
 		t.Fatalf("this process's own listener: owned=%v known=%v", owned, known)
 	}
-	ln2, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	free := ln2.Addr().(*net.TCPAddr).Port
-	ln2.Close()
+	// Held refused: bound, never listening, so the kernel's table has no row for it and no other
+	// process can start listening there in the meantime.
+	_, free := testenv.RefusedPort(t)
 	if owned, known := listenerOwnedBy(free, os.Getpid()); owned || known {
 		t.Fatalf("a port nobody listens on is unknown: owned=%v known=%v", owned, known)
 	}

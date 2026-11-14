@@ -13,6 +13,7 @@ import (
 
 	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/model"
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // deepentui_control spins an httptest control plane that answers every POST with the
@@ -76,10 +77,10 @@ func TestLoadFleetErrors(t *testing.T) {
 		t.Errorf("an ok:false reply must surface its detail; got %v", msg.err)
 	}
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
-	dead := client.New(client.Config{ControlURL: srv.URL,
-		Cred: client.Credential{Value: "whisper-0000000000000000"}, HTTPClient: srv.Client()})
-	srv.Close()
+	// A control plane that is not there: a port held refused for the whole test.
+	addr, _ := testenv.RefusedPort(t)
+	dead := client.New(client.Config{ControlURL: "http://" + addr,
+		Cred: client.Credential{Value: "whisper-0000000000000000"}, HTTPClient: &http.Client{}})
 	if msg := loadFleet(dead)().(fleetMsg); msg.err == nil {
 		t.Error("a transport failure must come back as an error, never an empty fleet")
 	}

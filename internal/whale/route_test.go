@@ -21,6 +21,11 @@ func TestParseRouteAcceptsRealAdvertisements(t *testing.T) {
 		{"172.16.0.0/12", "172.16.0.0/12", ScopePrivate},
 		{"2001:db8:1::/48", "2001:db8:1::/48", ScopeGlobal},
 		{"fd00::/8", "fd00::/8", ScopePrivate},
+		// A ULA prefix that only COVERS the tailnet's IPv6 range is less specific than the
+		// tailnet's own route, so it is still an ordinary advertisement.
+		{"fc00::/7", "fc00::/7", ScopePrivate},
+		{"fd7a:115c::/32", "fd7a:115c::/32", ScopePrivate},
+		{"fd7a:115c:a1e1::/48", "fd7a:115c:a1e1::/48", ScopePrivate},
 		{"  2001:DB8:1::/48  ", "2001:db8:1::/48", ScopeGlobal},
 		{"203.0.113.0/24", "203.0.113.0/24", ScopeGlobal},
 	}
@@ -82,6 +87,9 @@ func TestParseRouteRefusalsNameTheReason(t *testing.T) {
 		{"2a04:2a00:5::/48", "Whisper infrastructure space"},
 		{"100.64.0.0/10", "RFC 6598"},
 		{"100.100.0.0/16", "RFC 6598"},
+		{"fd7a:115c:a1e0::/48", "every Tailscale tailnet"},
+		{"fd7a:115c:a1e0:1::/64", "every Tailscale tailnet"},
+		{"fd7a:115c:a1e0::5/128", "every Tailscale tailnet"},
 		{"127.0.0.0/8", "loopback"},
 		{"169.254.0.0/16", "link-local"},
 		{"fe80::/10", "link-local"},

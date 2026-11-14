@@ -16,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/whisper-sec/whisper-cli/internal/testenv"
 )
 
 // --- helpers ---------------------------------------------------------------------------
@@ -308,10 +310,8 @@ func TestAcceptEnforcesThePerCallerLimit(t *testing.T) {
 
 func TestAcceptReportsALocalTargetThatDoesNotAnswer(t *testing.T) {
 	log := &logSink{}
-	// A port that was just free on loopback: nothing listens there.
-	probe, _ := net.Listen("tcp", "127.0.0.1:0")
-	dead := probe.Addr().String()
-	probe.Close()
+	// A port held refused for the whole test: nothing listens there, and nothing else can start to.
+	dead, _ := testenv.RefusedPort(t)
 	tun, addr := acceptOnLoopback(t, dead, AcceptOptions{Permit: permitAll, Logf: log.logf})
 	if got, _ := requestReply(t, addr, "x"); got != "" {
 		t.Fatalf("read %q from a target that is not there", got)

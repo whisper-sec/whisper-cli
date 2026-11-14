@@ -37,7 +37,15 @@ const defaultMTU = 1280
 // On ANY setup error it tears down whatever it built and returns a clean, non-leaky error
 // (never the private key, never a stack trace). The returned tunnel's lifetime is Stop()
 // ONLY - the front-end proxy is Background-rooted, so a short control ctx can never kill it.
-func Start(cfg Config, opts Options) (*Tunnel, error) {
+func Start(cfg Config, opts Options) (_ *Tunnel, err error) {
+	// The held socket is this call's from here. A bring-up that fails anywhere lets it go: before
+	// the device has taken it nothing else would, and after, the device's Close already has and
+	// Release is a no-op.
+	defer func() {
+		if err != nil {
+			opts.Listen.Release()
+		}
+	}()
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
@@ -66,24 +74,21 @@ func Start(cfg Config, opts Options) (*Tunnel, error) {
 
 	// 2. The wireguard-go device. Silent logger - wireguard-go's own logs would be noise and
 	// could surface peer/key detail; we emit only our own safe one-liners via opts.Logf.
-	dev := device.NewDevice(tunDev, conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
+	//
+	// Its UDP socket is the one held since the connect declared its port (opts.Listen,
+	// listenhold.go), so the device comes up on exactly the port this node told the control plane
+	// about and nothing could have taken it in between. The device is never given a listen_port
+	// by number: whenever it opens its bind, the netstack's own up event or the Up below, it takes
+	// over sockets that are already open. A tunnel that declared nothing is handed no hold and
+	// binds a port the kernel picks, as it always did.
+	var bind conn.Bind = conn.NewDefaultBind()
+	if opts.Listen != nil {
+		bind = opts.Listen
+	}
+	dev := device.NewDevice(tunDev, bind, device.NewLogger(device.LogLevelSilent, ""))
 	if err := dev.IpcSet(uapiConfig(cfg)); err != nil {
-		// the one part of that document that can fail for an environmental reason is
-		// the pinned listen_port - something else may have taken it since PickListenPort released
-		// it. Losing the port costs this session's direct paths and nothing else, so retry once
-		// without it rather than fail a whole connect over a latency optimisation. Conservative
-		// in what we do: a node that could not bind its declared port stops claiming it, so
-		// cfg.ListenPort is cleared and the declaration it already sent is simply never used (the
-		// peer never handshakes, and the monitor never promotes it).
-		retried := false
-		if cfg.ListenPort > 0 {
-			cfg.ListenPort = 0
-			retried = dev.IpcSet(uapiConfig(cfg)) == nil
-		}
-		if !retried {
-			dev.Close() // closes the netstack TUN too
-			return nil, errors.New("could not configure the WireGuard tunnel - please try again")
-		}
+		dev.Close() // closes the netstack TUN too
+		return nil, errors.New("could not configure the WireGuard tunnel - please try again")
 	}
 
 	// 3. Bring the device up: this kicks off the handshake and the persistent keepalive.
@@ -247,13 +252,9 @@ func uapiConfig(cfg Config) string {
 		keepalive = 25 // the server default; keeps the NAT/UDP path warm
 	}
 	var b strings.Builder
+	// No listen_port, ever: the port is whatever the device's bind already holds (Options.Listen),
+	// and a listen_port here would make the device close that socket and bind the number again.
 	fmt.Fprintf(&b, "private_key=%s\n", cfg.PrivateKeyHex)
-	if cfg.ListenPort > 0 {
-		// pin the port, so the ip:port this node declared at connect is the one it
-		// actually listens on. Without this the device binds an ephemeral port and every declared
-		// endpoint is a lie by the time the tunnel is up.
-		fmt.Fprintf(&b, "listen_port=%d\n", cfg.ListenPort)
-	}
 	fmt.Fprintf(&b, "public_key=%s\n", cfg.ServerPublicKeyHex)
 	fmt.Fprintf(&b, "endpoint=%s\n", cfg.Endpoint)
 	// The default route for the family this interface can source, and no wider (see above).

@@ -336,10 +336,10 @@ func TestRun_ProxyLiveAfterControlCtxCancel(t *testing.T) {
 	if err := dialThroughProxy(t, sess.endpoint, "example.com:80", "after-cancel-run"); err != nil {
 		t.Fatalf("the proxy a child would inherit is DEAD after the control ctx was cancelled (the ctx-cancellation bug): %v", err)
 	}
-	// And Stop() (the owner's job, after the child) ends it.
+	// And Stop() (the owner's job, after the child) ends it. Asked of the proxy, not its port:
+	// once let go, the port belongs to whoever binds it next, and a dial could reach them.
 	sess.Stop()
-	if conn, err := net.DialTimeout("tcp", strings.TrimPrefix(sess.endpoint, "socks5h://"), 200*time.Millisecond); err == nil {
-		conn.Close()
+	if p.Listening() {
 		t.Fatal("after Stop the proxy must no longer accept")
 	}
 }
