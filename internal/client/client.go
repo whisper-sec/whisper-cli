@@ -35,6 +35,18 @@ const (
 	// is the default sign-in surface for `whisper login` (overridable with --console-url
 	// for pre-prod - Postel: liberal in, sane zero-config default).
 	DefaultConsoleURL = "https://console.whisper.security"
+	// APIKeysURL is the page on that same console where a signed-in user creates and
+	// copies an API key. Every "get a key" hint prints it (or its --console-url twin), so
+	// a hint can never send the user to a different console from the one `whisper login`
+	// signs in at. A signed-out visitor is sent through sign-in and brought back here.
+	APIKeysURL = DefaultConsoleURL + APIKeysPath
+	// APIKeysPath is that page's path, shared by every console the CLI may be pointed at.
+	APIKeysPath = "/api-keys"
+	// EndpointConsoleURL is the Endpoint Security console, where an account's
+	// administrator manages its fleet (enrolled devices, containment, policy). It signs
+	// people in through DefaultConsoleURL and returns them, but it issues no API keys and
+	// runs no device flow, so it is named only where the reader manages endpoints.
+	EndpointConsoleURL = "https://edr.whisper.security"
 	// DefaultVerifyURL is the public, KEYLESS one-call identity-verification surface
 	// GET /verify-identity?ip=<addr> runs the full agent-trust chain
 	// server-side (reverse-DNS + FCrDNS + DANE-TLSA pin + the JWS identity doc) and

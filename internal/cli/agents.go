@@ -442,7 +442,7 @@ func cypherQuoted(v string) string {
 func lifecycleNote(state, actor, reason string, reversible, reversibleKnown bool, agent, address string) string {
 	if actor == "operator" && reason == "containment" {
 		return "This identity was suspended by your account's administrator. They manage it at " +
-			"https://edr.whisper.security."
+			client.EndpointConsoleURL + "."
 	}
 	switch state {
 	case "revoked":

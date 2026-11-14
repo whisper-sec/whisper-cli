@@ -57,9 +57,6 @@ var (
 	resolverProbe53     = defaultResolverProbe53
 )
 
-// resolverKeyURL is where a key comes from - the one URL login/root already print.
-const resolverKeyURL = "https://edr.whisper.security/settings"
-
 // errResolverNeedsKey is the keyless-apply fail-soft: Tier-2 resolution is keyed
 // BY DESIGN (the resolver identifies the tenant to apply THEIR policy; the DoH
 // endpoint refuses anonymous queries), so a keyless apply would wire a profile
@@ -67,7 +64,7 @@ const resolverKeyURL = "https://edr.whisper.security/settings"
 func errResolverNeedsKey() error {
 	return fmt.Errorf("Tier-2 DNS applies your per-tenant policy, so it needs a Whisper key - "+
 		"get one free at %s, then run `whisper resolver` (save the key with `whisper login <key>`; "+
-		"preview the exact profile without a key: `whisper resolver --print`)", resolverKeyURL)
+		"preview the exact profile without a key: `whisper resolver --print`)", apiKeysURL())
 }
 
 // defaultResolverProbe53 answers "is the dedicated :53 resolver reachable from
@@ -179,7 +176,7 @@ func newResolverCmd() *cobra.Command {
 			"YOUR tenant's DNS policy applied. One command applies the best resolver\n" +
 			"profile for this OS, and `whisper resolver --off` puts everything back.\n\n" +
 			"Tier-2 resolution is per-tenant (the answers follow your policy), so applying\n" +
-			"needs a Whisper key - get one free at " + resolverKeyURL + ".\n" +
+			"needs a Whisper key - get one free at " + client.APIKeysURL + ".\n" +
 			"--print previews every profile without a key and changes nothing. A\n" +
 			"resolve-only device token is minted once and reused; --off revokes it.\n\n" +
 			"  whisper resolver             apply the best profile for this OS (needs a key)\n" +
@@ -310,7 +307,7 @@ func runResolver(o resolverOpts) error {
 			notes = append(notes, "Linux default: the dedicated :53 resolver (no forwarder needed); apply verifies it answers first and falls back to the encrypted DoH forwarder profile when it does not (force that with --doh)")
 		}
 		if !keyed {
-			notes = append(notes, "applying needs a Whisper key (Tier-2 DNS applies YOUR per-tenant policy) - get one free at "+resolverKeyURL+", then run `whisper resolver`")
+			notes = append(notes, "applying needs a Whisper key (Tier-2 DNS applies YOUR per-tenant policy) - get one free at "+apiKeysURL()+", then run `whisper resolver`")
 		}
 		if mintPlanned {
 			notes = append(notes, "dry run: apply will mint a resolve-only device token (op:register {device:true}) and use its real DoH URL in place of YOUR-DEVICE-TOKEN")

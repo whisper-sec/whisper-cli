@@ -48,6 +48,20 @@ func GenerateKeypair() (Keypair, error) {
 	}, nil
 }
 
+// publicKeyHexOf is the public half of a hex private key, in hex, or "" when it is not a key. The
+// tunnel holds it so a peer row naming our own key can be refused (SetDirectPeers).
+func publicKeyHexOf(privHex string) string {
+	priv, err := hex.DecodeString(strings.TrimSpace(privHex))
+	if err != nil || len(priv) != 32 {
+		return ""
+	}
+	pub, err := curve25519.X25519(priv, curve25519.Basepoint)
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(pub)
+}
+
 // FromWgQuick builds a Config from the op:connect{tier:wireguard} result fields plus the
 // locally-held private key (hex). It is LIBERAL in what it accepts (Postel): it prefers the
 // structured fields the control plane returns (server_public_key, endpoint, address, dns,

@@ -217,17 +217,17 @@ func TestDeepenCLI_PromptForKeyReadsOneTrimmedLine(t *testing.T) {
 			t.Errorf("promptForKey = %q, %v", k, err)
 		}
 	})
-	// The key page is a DESTINATION, so it must name the EDR console. The
-	// sign-in satellite serves only /sign-in and /sign-up and 404s /settings,
-	// so the old host sent a user who already had an account to a dead page.
-	// Asserted as the full path rather than the host alone: naming the host
-	// would still pass if the path were dropped, and the path is the half
-	// that 404s.
-	if !strings.Contains(stderr, "https://edr.whisper.security/settings") {
+	// The key page lives on the console the device flow signs in at, which is
+	// the only console that issues keys. The Endpoint Security console has a
+	// settings page too, but it shows no key to copy, so naming it here sent
+	// the user to sign in at one console to look for a key minted by another.
+	// Asserted as the full URL rather than the host alone: naming the host
+	// would still pass if the path were dropped.
+	if !strings.Contains(stderr, "https://console.whisper.security/api-keys") {
 		t.Fatalf("the prompt must tell the user where to get a key: %q", stderr)
 	}
-	if strings.Contains(stderr, "console.whisper.security") {
-		t.Fatalf("the prompt points at the sign-in satellite, which 404s this path: %q", stderr)
+	if strings.Contains(stderr, "edr.whisper.security") {
+		t.Fatalf("the prompt names the endpoint console, which issues no keys: %q", stderr)
 	}
 }
 

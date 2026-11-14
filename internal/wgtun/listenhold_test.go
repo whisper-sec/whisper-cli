@@ -140,8 +140,12 @@ func TestHoldListenPort_AReleasedHoldIsFreeAgain(t *testing.T) {
 //
 // Old: a number is declared, something else is bound on it by the time the device comes up, and
 // the device is asked for it by number (listen_port), which is what Start did before this fix.
-// The device does not end up listening there: measured, either Up fails with the address in use,
-// or a device the netstack already brought up loses the socket it had and is left with none.
+// The device does not end up listening there. Three outcomes have been measured, and each one is
+// the bug: Up fails with the address in use; a device the netstack already brought up loses the
+// socket it had and is left with none; or the netstack's own EventUp, which brings the device up
+// on a goroutine of its own, lands between IpcSet and Up, fails on the taken number and zeroes it,
+// so the explicit Up binds a port the kernel picks, with no error, and the device listens on a
+// number nobody declared.
 //
 // New: the device is built on the hold, and listens on exactly the declared port.
 func TestDeclaredNumberVersusHeldSocket(t *testing.T) {
@@ -171,13 +175,23 @@ func TestDeclaredNumberVersusHeldSocket(t *testing.T) {
 	old := newDev(t, conn.NewDefaultBind())
 	setErr := old.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\n", kp.PrivateKeyHex, declared))
 	upErr := old.Up()
-	if got := deviceListenPort(old); got == declared {
+	oldPort := deviceListenPort(old)
+	if oldPort == declared {
 		t.Fatalf("control failed: a device bound port %d while another socket held it", declared)
 	}
-	if setErr == nil && upErr == nil && deviceListenPort(old) != 0 {
-		t.Fatalf("control failed: binding a taken number went through cleanly (listening on %d)", deviceListenPort(old))
+	// The control's teeth: the number really was taken for the whole attempt, so whichever outcome
+	// the race produced, the old way was asked for a held number and did not get it.
+	if got := strangerBinds(t, declared); got != "" {
+		t.Fatalf("control failed: port %d was free again by the end of the old attempt (a %s bind took it)", declared, got)
 	}
-	t.Logf("old: IpcSet err=%v, Up err=%v, device listens on %d (declared %d)", setErr, upErr, deviceListenPort(old), declared)
+	outcome := "listens on a port nobody declared, with no error"
+	switch {
+	case setErr != nil || upErr != nil:
+		outcome = "refused with the address in use"
+	case oldPort == 0:
+		outcome = "left with no socket"
+	}
+	t.Logf("old: %s (IpcSet err=%v, Up err=%v, device listens on %d, declared %d)", outcome, setErr, upErr, oldPort, declared)
 
 	h := mustHold(t)
 	declaredNow := h.Port()

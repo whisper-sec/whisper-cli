@@ -130,7 +130,7 @@ func TestT2Resolver_KeylessPrintPreviewsWithPlaceholders(t *testing.T) {
 	if !strings.Contains(stdout, resolverPrintPlaceholderIP) {
 		t.Fatalf("keyless linux preview must carry the :53 stand-in on stdout:\n%s", stdout)
 	}
-	if !strings.Contains(stderr, "needs a Whisper key") || !strings.Contains(stderr, resolverKeyURL) {
+	if !strings.Contains(stderr, "needs a Whisper key") || !strings.Contains(stderr, apiKeysURL()) {
 		t.Fatalf("keyless preview must state the get-a-key step:\n%s", stderr)
 	}
 	if len(fake.applied) != 0 || len(fake.reverted) != 0 {
@@ -176,7 +176,7 @@ func TestT2Resolver_KeylessApplyFailsSoftWithKeyGuidance(t *testing.T) {
 	if err == nil {
 		t.Fatalf("keyless apply must fail soft (non-zero), got success")
 	}
-	for _, want := range []string{"needs a Whisper key", resolverKeyURL, "whisper resolver"} {
+	for _, want := range []string{"needs a Whisper key", apiKeysURL(), "whisper resolver"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("the fail-soft message must carry %q, got: %v", want, err)
 		}

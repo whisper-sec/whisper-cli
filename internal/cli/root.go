@@ -40,7 +40,7 @@ import (
 // In a release's source tree the fallback is that release, so a plain build of a release tag
 // reports it, and a tag whose source reports any other version names source that was never
 // released under it.
-const versionFallback = "0.267.3"
+const versionFallback = "0.267.4"
 
 var Version = versionFallback
 
@@ -353,7 +353,7 @@ func resolveClientFrom(needKey, promptOK bool, keyFile string) (*client.Client, 
 	if needKey && cred.IsZero() {
 		return nil, &client.ProblemError{Status: 401, Title: "no key",
 			Detail: "no API key - run 'whisper login', set WHISPER_API_KEY, or pass --key " +
-				"(get one at https://edr.whisper.security/settings)"}
+				"(get one at " + apiKeysURL() + ")"}
 	}
 	return client.New(client.Config{
 		ControlURL: g.controlURL,

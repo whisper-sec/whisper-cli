@@ -270,7 +270,7 @@ func colorEnabled() bool {
 
 // promptForKey reads one line from the terminal (the key-ladder last rung).
 func promptForKey() (string, error) {
-	fmt.Fprint(os.Stderr, "Enter your Whisper API key (https://edr.whisper.security/settings): ")
+	fmt.Fprintf(os.Stderr, "Enter your Whisper API key (get one at %s): ", apiKeysURL())
 	sc := bufio.NewScanner(os.Stdin)
 	if sc.Scan() {
 		return strings.TrimSpace(sc.Text()), nil

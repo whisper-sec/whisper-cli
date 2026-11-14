@@ -173,11 +173,17 @@ type Tunnel struct {
 	stallRebinds  int
 	reboundBefore bool
 
+	// selfPubHex is this tunnel's own public key in hex, so a peer row can never name it.
+	selfPubHex string
+
 	// directDead / directRearm are the direct-path windows, resolved once from Options at
 	// bring-up; punchEvery is the traversal cadence (see punch.go).
 	directDead  time.Duration
 	directRearm time.Duration
 	punchEvery  time.Duration
+	// preludes is when a first (untimed) punch train last started per peer key, guarded by mu and pruned to
+	// the last directRearmAfter (peers.go, lastPrelude).
+	preludes map[string]time.Time
 
 	// pathDir / pathFP / pathAt are the published path record (see pathstate.go): where it goes,
 	// a fingerprint of what was last written, and when. pathFP and pathAt are guarded by mu.

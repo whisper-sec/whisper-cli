@@ -71,6 +71,8 @@ func TestParsePeer_RefusesEveryEndpointWeMustNotAimATunnelAt(t *testing.T) {
 		"no port":         "192.168.1.2",
 		"port zero":       "192.168.1.2:0",
 		"port too large":  "192.168.1.2:70000",
+		"a signed port":   "192.168.1.2:+51820",
+		"a negative port": "192.168.1.2:-1",
 		"bare v6 literal": "fd00::1:51820",
 		"empty":           "",
 	}

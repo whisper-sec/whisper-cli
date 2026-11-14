@@ -186,21 +186,6 @@ func TestPeersFromRows_APunchEndpointWeMustNeverDialIsDroppedAndTheRowStillInsta
 	}
 }
 
-func TestPeersFromRows_ARelayedRowWithAdviceIsNotInstalledYet(t *testing.T) {
-	// A relayed row carries no public_key, so this client installs nothing for it even when the plane
-	// advises a punch. Pinned here so a change to that is a decision and not an accident.
-	rows := []map[string]any{
-		{"item": map[string]any{"self": true, "state": "ok"}},
-		{"item": map[string]any{
-			"address": "2a04:2a01:4::7", "path": "relayed", "public_key": "", "endpoint": "",
-			"punch": "likely", "punch_endpoint": "198.51.100.4:51820", "punch_key": peerKeyB,
-		}},
-	}
-	if peers := peersFromRows(rows); len(peers) != 0 {
-		t.Fatalf("a relayed row was installed: %+v", peers)
-	}
-}
-
 // ==========================================================================================
 // The published record, and the wiring that reads it.
 // ==========================================================================================

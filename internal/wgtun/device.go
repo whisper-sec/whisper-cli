@@ -111,6 +111,7 @@ func Start(cfg Config, opts Options) (_ *Tunnel, err error) {
 		logf:        opts.Logf,
 		stop:        make(chan struct{}),
 		started:     time.Now(),
+		selfPubHex:  publicKeyHexOf(cfg.PrivateKeyHex),
 	}
 	t.rebindUDP = dev.BindUpdate
 
@@ -165,13 +166,13 @@ func Start(cfg Config, opts Options) (_ *Tunnel, err error) {
 		t.direct = peerSet{}
 		armedAt := time.Now()
 		for _, p := range cfg.Peers {
-			if p.PublicKeyHex == "" || p.PublicKeyHex == cfg.ServerPublicKeyHex {
+			if p.Listed || p.PublicKeyHex == "" || p.PublicKeyHex == cfg.ServerPublicKeyHex {
 				continue
 			}
 			t.direct[p.PublicKeyHex] = &directPeer{
 				peer:    p,
 				armedAt: armedAt,
-				punch:   newPunchTrain(p.candidateList(), armedAt),
+				punch:   newPunchTrainFor(p, cfg.Address, armedAt, punchCarry{}, orDur(opts.DirectRearmAfter, directRearmAfter)),
 			}
 		}
 	}
@@ -261,12 +262,17 @@ func uapiConfig(cfg Config) string {
 	b.WriteString("allowed_ip=" + boxDefaultRoute(cfg.Address) + "\n")
 	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", keepalive)
 	for _, p := range cfg.Peers {
-		if p.PublicKeyHex == "" || p.PublicKeyHex == cfg.ServerPublicKeyHex {
+		if p.Listed || p.PublicKeyHex == "" || p.PublicKeyHex == cfg.ServerPublicKeyHex {
 			continue // never let a peer row rewrite the box peer and take ::/0 with it
 		}
 		fmt.Fprintf(&b, "public_key=%s\n", p.PublicKeyHex)
 		fmt.Fprintf(&b, "endpoint=%s\n", p.Endpoint)
-		fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", directKeepalive)
+		// A peer with a window waits for it silent (armDirectPeer); every other one is kicked now.
+		ka := directKeepalive
+		if !p.Rendezvous.IsZero() {
+			ka = 0
+		}
+		fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", ka)
 	}
 	return b.String()
 }

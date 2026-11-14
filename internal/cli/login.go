@@ -7,6 +7,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -31,10 +32,11 @@ func newLoginCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "login [key]",
-		Short: "Sign in at edr.whisper.security (or save an API key) to ~/.config/whisper/key",
+		Short: "Sign in at " + hostOf(client.DefaultConsoleURL) + " (or save an API key) to ~/.config/whisper/key",
 		Long: "Sign in to Whisper. With NO key argument on a terminal you can just press Enter to\n" +
-			"open edr.whisper.security in your browser and approve the login (the device\n" +
-			"flow, RFC 8628) - or paste an API key instead. Pass the key as an argument to skip\n" +
+			"open " + hostOf(client.DefaultConsoleURL) + " in your browser and approve the login (the\n" +
+			"device flow, RFC 8628) - or paste an API key instead, which you can get at\n" +
+			client.APIKeysURL + ". Pass the key as an argument to skip\n" +
 			"the prompt entirely. The key is saved to the key file (mode 600) so every later\n" +
 			"command uses it with no further config, then verified with a quick op:list.\n\n" +
 			"  whisper login                 # press Enter to sign in via browser, or paste a key\n" +
@@ -71,7 +73,7 @@ func newLoginCmd() *cobra.Command {
 			// 3) --manual forces the bare key prompt (interactive) or errors with guidance.
 			if manual {
 				if !isInteractive() {
-					return usageErr("no key supplied - usage: whisper login <key> (get one at https://edr.whisper.security/settings)")
+					return usageErr("no key supplied - usage: whisper login <key> (get one at %s)", apiKeysURL())
 				}
 				k, err := promptForKey()
 				if err != nil {
@@ -99,7 +101,7 @@ func newLoginCmd() *cobra.Command {
 			}
 
 			// 5) No TTY and no key: a clear, helpful error (never an opaque hang).
-			return usageErr("no key supplied - usage: whisper login <key>, or 'whisper login --web' to sign in via browser (get a key at https://edr.whisper.security/settings)")
+			return usageErr("no key supplied - usage: whisper login <key>, or 'whisper login --web' to sign in via browser (get a key at %s)", apiKeysURL())
 		},
 	}
 	cmd.Flags().BoolVar(&web, "web", false, "force the browser sign-in (device flow) - useful with no key on hand")
@@ -114,12 +116,42 @@ func newLoginCmd() *cobra.Command {
 // stdin mirrors promptForKey (the key-ladder last rung) so it behaves identically on a
 // terminal.
 func promptLoginChoice() (string, error) {
-	fmt.Fprint(os.Stderr, "Press Enter to sign in at edr.whisper.security (opens your browser), or paste your API key: ")
+	fmt.Fprintf(os.Stderr, "Press Enter to sign in at %s (opens your browser), or paste your API key: ", hostOf(effectiveConsoleURL()))
 	sc := bufio.NewScanner(os.Stdin)
 	if sc.Scan() {
 		return strings.TrimSpace(sc.Text()), nil
 	}
 	return "", sc.Err()
+}
+
+// effectiveConsoleURL is the console this run signs in at: the --console-url override, else
+// the default. The device flow dials exactly this, so every line that tells a person where to
+// sign in or where to get a key is built from it too, and the two can never name different
+// consoles.
+func effectiveConsoleURL() string {
+	if u := strings.TrimRight(strings.TrimSpace(g.consoleURL), "/"); u != "" {
+		return u
+	}
+	return client.DefaultConsoleURL
+}
+
+// apiKeysURL is the keys page on that console: where a person who wants to paste a key
+// instead of signing in through the browser gets one.
+func apiKeysURL() string {
+	if u := effectiveConsoleURL(); u != client.DefaultConsoleURL {
+		return u + client.APIKeysPath
+	}
+	return client.APIKeysURL
+}
+
+// hostOf is a console URL's bare host, for prose that names where to go ("sign in at
+// console.whisper.security") rather than linking it. A value that does not parse is
+// returned as given, so a bad override still prints what the user typed.
+func hostOf(u string) string {
+	if p, err := url.Parse(u); err == nil && p.Host != "" {
+		return p.Host
+	}
+	return u
 }
 
 // runDeviceFlow runs the RFC 8628 device-authorization grant against the console: start
@@ -175,7 +207,7 @@ func deviceCallTimeout(timeout time.Duration) time.Duration {
 // is reported but is not fatal, exactly like the prior behaviour.
 func saveAndVerify(key string) error {
 	if key == "" {
-		return usageErr("no key supplied - usage: whisper login <key> (get one at https://edr.whisper.security/settings)")
+		return usageErr("no key supplied - usage: whisper login <key> (get one at %s)", apiKeysURL())
 	}
 	path := g.keyFile
 	if path == "" {
