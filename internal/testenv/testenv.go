@@ -15,7 +15,7 @@
 //
 // That is a correctness bug and a safety bug at once, so the answer is not to fix
 // the sites one at a time. It is one helper, used everywhere, with a gate that
-// fails the build if a twenty-fourth site sets HOME by hand (ci/hermeticenv).
+// fails the build if a twenty-fourth site sets HOME by hand.
 //
 // The helpers are deliberately not clever. They set the whole family of variables
 // together, because the failure mode is always a variable somebody did not think

@@ -39,9 +39,10 @@ import (
 //
 // Everything here that can be decided without a Mac is decided without one: which
 // bundle to open, and the exact argv. Only the exec itself is behind a build tag.
-// That is deliberate. The Windows lesson in ci/windowslane is the same lesson, and a
-// path-search that could only be exercised on the platform nobody runs tests on is
-// how it starts.
+// That is deliberate. A test behind a platform tag runs only where some CI job runs
+// that platform, and this codebase has already had a Windows-only test that compiled
+// on every build and ran on none. A path-search that could only be exercised on the
+// platform nobody runs tests on is how that starts.
 
 // panelAppSupported says whether this build can open the panel at all. The panel is
 // the macOS menu bar extra; there is no Linux or Windows one to open yet, and
