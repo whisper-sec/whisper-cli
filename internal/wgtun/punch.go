@@ -228,6 +228,10 @@ const (
 	// PunchTrying: a train is running, or a timed one is waiting for its first window. The relay
 	// is carrying this peer meanwhile.
 	PunchTrying PunchPhase = "punching"
+	// PunchResting: the direct path was just withdrawn, and this end is silent towards the peer for its
+	// quiet hold (Tunnel.quietHold), so the far end lets go of its half too. The relay carries the
+	// peer, and the train or the window follows the hold. Nothing is in flight meanwhile.
+	PunchResting PunchPhase = "resting"
 	// PunchEstablished: a handshake landed and the /128 is routed to this peer.
 	PunchEstablished PunchPhase = "established"
 	// PunchGaveUp: a full train, or an attended window, produced no handshake. The relay carries
@@ -254,6 +258,9 @@ type PunchInfo struct {
 	WinnerSource CandidateSource `json:"winner_source,omitempty"`
 	// Since is when this phase began.
 	Since time.Time `json:"since,omitempty"`
+	// Timed is set for a train that punches inside the plane's windows, whose next attempt after a hold
+	// waits for a window.
+	Timed bool `json:"timed,omitempty"`
 }
 
 // Established reports whether a direct path is actually carrying this peer.
@@ -302,6 +309,14 @@ type punchTrain struct {
 	// never ran one.
 	fallback  Rendezvous
 	preludeAt time.Time
+
+	// holdUntil is the end of the quiet hold after this peer's path was withdrawn: until then the
+	// train sends nothing at all, neither an untimed attempt nor a window, so the far end hears nothing from
+	// this end and withdraws its own half (Tunnel.quietHold). Zero, or in the past, when no hold is running.
+	holdUntil time.Time
+	// withdrawnAt is when the path that hold follows was withdrawn: what a resting peer reports as its
+	// phase's start, kept across a re-arm inside the hold (punchCarry).
+	withdrawnAt time.Time
 }
 
 // punchCarry is what one key's train hands the next when its row is re-armed, or installed again soon
@@ -314,6 +329,11 @@ type punchCarry struct {
 	// window is the last pair's window the train had for a direct row, kept for a re-armed row whose read
 	// carried none (a slow read, a plane mid-upgrade): the window is a pure function of the pair.
 	window Rendezvous
+	// holdUntil is a quiet hold still running for the key (Tunnel.lastHold): a row re-armed, or installed
+	// again, inside the hold keeps it, so no refresh can make this end send at a far end that still has
+	// to withdraw. withdrawnAt is when the withdrawal it follows was.
+	holdUntil   time.Time
+	withdrawnAt time.Time
 }
 
 // carry is this train's punchCarry.
@@ -342,6 +362,7 @@ func newPunchTrain(cands []Candidate, now time.Time) *punchTrain {
 func newPunchTrainFor(p Peer, self netip.Addr, now time.Time, c punchCarry, rearm time.Duration) *punchTrain {
 	tr := newPunchTrain(p.candidateList(), now)
 	tr.opener = self.Less(p.Address)
+	tr.holdUntil, tr.withdrawnAt = c.holdUntil, c.withdrawnAt
 	if c.missed > 0 {
 		tr.missed = min(c.missed, maxWindowBackoff)
 	}
@@ -404,6 +425,44 @@ func (tr *punchTrain) adoptFallback(r Rendezvous) {
 
 // timed reports whether this train punches inside the plane's windows.
 func (tr *punchTrain) timed() bool { return tr != nil && !tr.window.IsZero() }
+
+// holdFor starts (or lengthens) the quiet hold: nothing is sent before until.
+func (tr *punchTrain) holdFor(until time.Time) {
+	if tr != nil && until.After(tr.holdUntil) {
+		tr.holdUntil = until
+	}
+}
+
+// holding reports whether the quiet hold is still running at now.
+func (tr *punchTrain) holding(now time.Time) bool { return tr != nil && now.Before(tr.holdUntil) }
+
+// keepalive is the persistent keepalive this train punches with: untimedKeepalive for an untimed train, the
+// tunnel's own for a timed one, whose window orders the two ends instead. A promoted peer is written back to
+// the tunnel's interval (promoteDirectPeer).
+func (tr *punchTrain) keepalive(base int) int {
+	if tr == nil || tr.timed() {
+		return base
+	}
+	return untimedKeepalive(tr.opener, base)
+}
+
+// untimedKeepalive is the persistent keepalive an untimed train punches with: the tunnel's at the end that
+// opens the pair's windows (the lower address), and one second more at the other. Two untimed trains
+// whose initiations land within a round trip of each other cross their handshakes: each answers the other's,
+// and neither answer matches. The retries that follow come from the keepalive, which the crossing re-armed
+// at both ends at once, and at the production interval, WireGuard's RekeyTimeout, nothing else gets in
+// first, so with one interval at both ends the two cross again for as long as they punch. With the opener's
+// a second shorter its retry usually arrives first and the other end, whose own has not yet fired, answers
+// it; when the other end's jittered retransmit gets in first they cross once more, and the order comes back
+// on the next round, so a crossing costs an interval or a few, never a lockstep. On a path whose round trip
+// exceeds the second the order no longer holds and only the jitter breaks a tie; such a pair is left to the
+// window it falls back to.
+func untimedKeepalive(opener bool, base int) int {
+	if opener {
+		return base
+	}
+	return base + 1
+}
 
 // punchAction is what one step of a timed train asks the tunnel to do.
 type punchAction int
@@ -499,6 +558,13 @@ func (tr *punchTrain) windowStep(now time.Time, period, lookahead time.Duration,
 	}
 	if sendAt.Before(now) {
 		sendAt = now // joined late (a node that read its peer map mid-window): send now, not never
+	}
+	if tr.holding(sendAt) {
+		// A window whose send would fall inside the quiet hold is neither joined nor counted as missed: the
+		// far end may still be routing this pair directly, and an initiation from here would be evidence it
+		// keeps it on. Judged at the send instant, not this tick, so a window that opens just after the hold
+		// is still scheduled at its own point in it rather than joined late on the next tick.
+		return punchNothing, Candidate{}, time.Time{}
 	}
 	quietAt := end.Add(period)
 	if cover := sendAt.Add(retransmitCover); cover.After(quietAt) {
@@ -596,7 +662,7 @@ func (tr *punchTrain) takeWindow(r Rendezvous) {
 // back), and waiting a period before the first packet is a period the far side spends unable to
 // reach us for no reason.
 func (tr *punchTrain) due(now time.Time, period time.Duration) (Candidate, bool) {
-	if tr == nil || len(tr.cands) == 0 || tr.gaveUp {
+	if tr == nil || len(tr.cands) == 0 || tr.gaveUp || tr.holding(now) {
 		return Candidate{}, false
 	}
 	if tr.attempts >= punchTrainAttempts {
@@ -716,11 +782,17 @@ func (tr *punchTrain) info(promoted bool) PunchInfo {
 		in.Winner = tr.winner.Endpoint
 		in.WinnerSource = tr.winner.Source
 	}
+	in.Timed = tr.timed()
 	switch {
 	case promoted:
 		in.Phase = PunchEstablished
 	case len(tr.cands) == 0:
 		in.Phase = PunchIdle
+	case tr.holding(time.Now()):
+		in.Phase = PunchResting
+		if !tr.withdrawnAt.IsZero() {
+			in.Since = tr.withdrawnAt // the withdrawal, even when a re-arm inside the hold built a new train
+		}
 	case tr.gaveUp:
 		in.Phase = PunchGaveUp
 	default:
@@ -743,8 +815,25 @@ func (tr *punchTrain) info(promoted bool) PunchInfo {
 // session is a handshake initiation. It also resets the peer's handshake-attempt counter, so
 // our train keeps the device initiating long past the ninety seconds after which it would
 // otherwise go quiet by itself.
-func (t *Tunnel) punchAt(p Peer, c Candidate) error {
-	return t.dev.IpcSet(punchDoc(p, c))
+//
+// It is written under the peer-write lock and only while the entry the decision was made for is still the
+// tracked one, unpromoted, untimed and not in a quiet hold at the pass's own clock (now), with the keepalive
+// that entry punches with at that moment: a refresh that re-armed the key in between (as a timed peer armed
+// silent, say) must not be handed a live keepalive and the old row's endpoint.
+func (t *Tunnel) punchAt(p Peer, decided *directPeer, c Candidate, now time.Time) {
+	t.peerWrite.Lock()
+	defer t.peerWrite.Unlock()
+	t.mu.Lock()
+	d := t.direct[p.PublicKeyHex]
+	ok := d != nil && d == decided && !d.promoted && !d.punch.timed() && !d.punch.holding(now)
+	ka := 0
+	if ok {
+		ka = d.punch.keepalive(t.directKeepaliveSecs())
+	}
+	t.mu.Unlock()
+	if ok {
+		_ = t.dev.IpcSet(punchDoc(p, c, ka))
+	}
 }
 
 // punchOnce is the timed train's punch: one handshake aimed at the candidate, after which the device's
@@ -752,7 +841,7 @@ func (t *Tunnel) punchAt(p Peer, c Candidate) error {
 // keepalive that fires on the same beat at both ends (see retransmitCover). Both writes are
 // update_only, so a peer removed underneath cannot be recreated, and neither touches allowed-ips.
 func (t *Tunnel) punchOnce(p Peer, c Candidate) error {
-	if err := t.dev.IpcSet(punchDoc(p, c)); err != nil {
+	if err := t.dev.IpcSet(punchDoc(p, c, t.directKeepaliveSecs())); err != nil {
 		return err
 	}
 	return t.dev.IpcSet(unkeepDoc(p))
@@ -776,7 +865,10 @@ func (t *Tunnel) punchAtInstant(p Peer, c Candidate, at time.Time, slot int64) {
 		defer t.peerWrite.Unlock()
 		t.mu.Lock()
 		d := t.direct[p.PublicKeyHex]
-		ok := d != nil && !d.promoted && d.punch != nil && d.punch.attending && d.punch.slot == slot
+		// The hold check is belt and braces: a demotion clears attending (restartFor), so a timer scheduled
+		// before it already finds nothing to send.
+		ok := d != nil && !d.promoted && d.punch != nil && d.punch.attending && d.punch.slot == slot &&
+			!d.punch.holding(time.Now())
 		t.mu.Unlock()
 		if ok {
 			_ = t.punchOnce(p, c)
@@ -796,13 +888,13 @@ func unkeepDoc(p Peer) string {
 
 // punchDoc is the UAPI document a punch writes, separated from the device so a test can assert
 // what is in it - and, far more importantly, what is NOT.
-func punchDoc(p Peer, c Candidate) string {
+func punchDoc(p Peer, c Candidate, keepalive int) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "public_key=%s\n", p.PublicKeyHex)
 	b.WriteString("update_only=true\n")
 	fmt.Fprintf(&b, "endpoint=%s\n", c.Endpoint)
 	b.WriteString("persistent_keepalive_interval=0\n")
-	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", directKeepalive)
+	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", keepalive)
 	return b.String()
 }
 
@@ -832,16 +924,17 @@ func quietDoc(p Peer, endpoint string) string {
 	return b.String()
 }
 
-// peerEndpoint reads back where the device currently believes a peer is. After a handshake this
-// is the endpoint that actually carried it, INCLUDING the case where WireGuard roamed to a
-// source we never configured - which is precisely the symmetric-NAT case, and the only way to
-// learn the address that worked. Read once per promotion, not per tick.
-func (t *Tunnel) peerEndpoint(keyHex string) string {
+// peerReadback reads back where the device currently believes a peer is, and the allowed-ips it holds
+// for it. After a handshake the endpoint is the one that actually carried it, INCLUDING the case where
+// WireGuard roamed to a source we never configured - which is precisely the symmetric-NAT case, and the
+// only way to learn the address that worked. The allowed-ips say whether the promotion write took. Read
+// once per promotion, not per tick; a failed read answers nothing for either.
+func (t *Tunnel) peerReadback(keyHex string) (string, []netip.Prefix) {
 	dump, err := t.dev.IpcGet()
 	if err != nil {
-		return ""
+		return "", nil
 	}
-	return endpointFromDump(dump, keyHex)
+	return endpointFromDump(dump, keyHex), parseAllowedDump(dump)[keyHex]
 }
 
 // endpointFromDump pulls one peer's endpoint out of a UAPI dump. Separated from the device read

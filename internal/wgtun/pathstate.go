@@ -4,10 +4,15 @@
 package wgtun
 
 import (
+	"crypto/rand"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -70,6 +75,7 @@ type PathPunchRecord struct {
 	Winner       string    `json:"winner,omitempty"`
 	WinnerSource string    `json:"winner_source,omitempty"`
 	Since        time.Time `json:"since,omitempty"`
+	Timed        bool      `json:"timed,omitempty"`
 }
 
 // PathPeerRecord is what this node knows about the path to one peer, from the device itself.
@@ -81,6 +87,12 @@ type PathPeerRecord struct {
 	Promoted bool            `json:"promoted"`
 	LastSeen time.Time       `json:"last_seen,omitempty"`
 	Punch    PathPunchRecord `json:"punch"`
+	// RouteEpoch and RoutedSince name the routed period Promoted belongs to (PeerState.RouteEpoch).
+	// Promoted is the device read back, not the tunnel's decision, and a record without an
+	// epoch comes from a holder that did not read it back, so a reader must not take its Promoted as a
+	// path.
+	RouteEpoch  uint64    `json:"route_epoch,omitempty"`
+	RoutedSince time.Time `json:"routed_since,omitempty"`
 }
 
 // PathStateRecord is one node's published path table.
@@ -89,6 +101,15 @@ type PathStateRecord struct {
 	PID     int              `json:"pid"`
 	Updated time.Time        `json:"updated"`
 	Peers   []PathPeerRecord `json:"peers"`
+
+	// Instance names the tunnel that wrote this record: random, and new for every tunnel, including
+	// a renewal inside the same process. Two tunnels for one /128 share the file (it is keyed by
+	// address), so a reader comparing two reads (`whale ping`) needs it to know both came from the
+	// one tunnel it measured through, and a tunnel going away needs it to remove only its own record.
+	Instance string `json:"instance,omitempty"`
+	// ProxyPort is the local proxy port of the tunnel that wrote the record, so a reader that measured
+	// through a proxy can tell this record is that tunnel's and not another one's for the same address.
+	ProxyPort int `json:"proxy_port,omitempty"`
 
 	// TunnelHealthy is the holder's OWN reading of whether the tunnel has handshaked recently.
 	//
@@ -221,22 +242,34 @@ func (t *Tunnel) pathStateDir() string {
 	return t.pathDir
 }
 
-// publishPaths writes this node's path table, if it has changed or the heartbeat is due.
+// publishPaths writes this node's path table, if it has changed or the heartbeat is due, and reports
+// whether the record on disk now says what the tunnel does (true also when nothing needed writing).
 //
 // Called from the health monitor after each reconcile, which is deliberate: the monitor is the
 // one place that has just read the device, so the record can only ever describe an observation
-// rather than an intention. It is best-effort throughout - a filesystem that will not take the
-// write costs a diagnostic, never a path.
-func (t *Tunnel) publishPaths() {
+// rather than an intention. The refresh loop publishes too, before it takes a route away
+// (publishBeforeUnroute), so the whole publish runs under pubMu: two snapshots renamed into place
+// out of order would leave the older one on disk. It is best-effort throughout - a filesystem that
+// will not take the write costs a diagnostic, never a path - and a write that fails is tried again on
+// the next call rather than remembered as written. Nothing is published once the tunnel has begun to
+// stop (retirePaths).
+func (t *Tunnel) publishPaths() bool {
 	dir := t.pathStateDir()
 	if dir == "" {
-		return
+		return true
+	}
+	t.pubMu.Lock()
+	defer t.pubMu.Unlock()
+	if t.pathsRetired {
+		return true
 	}
 	peers := t.DirectPeers()
 	healthy := t.Healthy()
 	rec := PathStateRecord{
 		Address:       t.cfg.Address.String(),
 		PID:           os.Getpid(),
+		Instance:      t.instance,
+		ProxyPort:     t.proxyPort(),
 		Updated:       time.Now(),
 		TunnelHealthy: &healthy,
 		Reconnects:    t.Reconnects(),
@@ -244,12 +277,14 @@ func (t *Tunnel) publishPaths() {
 	}
 	for _, p := range peers {
 		rec.Peers = append(rec.Peers, PathPeerRecord{
-			Address:  p.Address.String(),
-			Name:     p.Name,
-			Path:     p.Path,
-			Endpoint: p.Endpoint,
-			Promoted: p.Promoted,
-			LastSeen: p.LastSeen,
+			Address:     p.Address.String(),
+			Name:        p.Name,
+			Path:        p.Path,
+			Endpoint:    p.Endpoint,
+			Promoted:    p.Promoted,
+			LastSeen:    p.LastSeen,
+			RouteEpoch:  p.RouteEpoch,
+			RoutedSince: p.RoutedSince,
 			Punch: PathPunchRecord{
 				Phase:        string(p.Punch.Phase),
 				Attempts:     p.Punch.Attempts,
@@ -259,6 +294,7 @@ func (t *Tunnel) publishPaths() {
 				Winner:       p.Punch.Winner,
 				WinnerSource: string(p.Punch.WinnerSource),
 				Since:        p.Punch.Since,
+				Timed:        p.Punch.Timed,
 			},
 		})
 	}
@@ -270,22 +306,58 @@ func (t *Tunnel) publishPaths() {
 	fp := pathFingerprint(rec)
 	t.mu.Lock()
 	unchanged := fp == t.pathFP && time.Since(t.pathAt) < pathStateHeartbeat
-	if !unchanged {
-		t.pathFP, t.pathAt = fp, rec.Updated
-	}
 	t.mu.Unlock()
 	if unchanged {
-		return
+		return true
 	}
 
 	b, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {
-		return
+		return false
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return
+		return false
 	}
-	_ = writePathRecord(pathRecordPath(dir, rec.Address), append(b, '\n'))
+	if err := writeRecordFile(pathRecordPath(dir, rec.Address), append(b, '\n')); err != nil {
+		return false
+	}
+	t.mu.Lock()
+	t.pathFP, t.pathAt = fp, rec.Updated
+	t.mu.Unlock()
+	return true
+}
+
+// writeRecordFile is writePathRecord, as a seam so a test can make the write fail.
+var writeRecordFile = writePathRecord
+
+// dropPaths removes this tunnel's record, for a publish that could not say what is about to change
+// (publishBeforeUnroute): no record is true, a record still claiming a route is not. The fingerprint is
+// forgotten, so the next publish writes the record again in full.
+func (t *Tunnel) dropPaths() {
+	t.pubMu.Lock()
+	defer t.pubMu.Unlock()
+	t.removeOwnRecord()
+	// A record that cannot even be read to check whose it is goes too, here and only here: the write that
+	// failed was about to take a route away, and a record still claiming it is worse than a missing one.
+	if dir := t.pathStateDir(); dir != "" {
+		path := pathRecordPath(dir, t.cfg.Address.String())
+		if _, err := os.ReadFile(path); err != nil && !os.IsNotExist(err) {
+			_ = os.Remove(path)
+		}
+	}
+	t.mu.Lock()
+	t.pathFP, t.pathAt = "", time.Time{}
+	t.mu.Unlock()
+}
+
+// retirePaths ends publishing for a tunnel that is stopping, and removes its record, BEFORE the device
+// closes: a closed device routes nothing, and a record that outlived it would claim a route through a
+// tunnel that is gone - to a renewal in the same process, on the same local port, above all.
+func (t *Tunnel) retirePaths() {
+	t.pubMu.Lock()
+	defer t.pubMu.Unlock()
+	t.pathsRetired = true
+	t.removeOwnRecord()
 }
 
 // writePathRecord publishes one record so that a reader never sees a state between two of
@@ -343,6 +415,12 @@ func writePathRecord(path string, b []byte) error {
 // A record we cannot read, or one naming another process, is not ours to unlink; the pid sweep
 // in ReadPathStates already retires it the moment its holder is gone.
 func (t *Tunnel) clearPaths() {
+	t.retirePaths()
+}
+
+// removeOwnRecord removes the record file when this tunnel wrote it: our pid and our instance. Called
+// with pubMu held.
+func (t *Tunnel) removeOwnRecord() {
 	dir := t.pathStateDir()
 	if dir == "" {
 		return
@@ -359,6 +437,11 @@ func (t *Tunnel) clearPaths() {
 	if rec.PID != 0 && rec.PID != os.Getpid() {
 		return
 	}
+	// The same pid is not enough: a renewal in this process writes the same file, and the tunnel it
+	// replaced must not remove the new one's record on its way out.
+	if rec.Instance != "" && rec.Instance != t.instance {
+		return
+	}
 	_ = os.Remove(path)
 }
 
@@ -368,8 +451,8 @@ func (t *Tunnel) clearPaths() {
 func pathFingerprint(rec PathStateRecord) string {
 	var b strings.Builder
 	for _, p := range rec.Peers {
-		fmt.Fprintf(&b, "%s|%s|%s|%t|%s|%s\n",
-			p.Address, p.Path, p.Endpoint, p.Promoted, p.Punch.Phase, p.Punch.Winner)
+		fmt.Fprintf(&b, "%s|%s|%s|%t|%d|%s|%s\n", // the instance is fixed for a tunnel, so not in here
+			p.Address, p.Path, p.Endpoint, p.Promoted, p.RouteEpoch, p.Punch.Phase, p.Punch.Winner)
 	}
 	return b.String()
 }
@@ -388,3 +471,36 @@ func sortPathPeers(peers []PathPeerRecord) {
 // a pid this user may not signal counts as alive, because calling a live holder dead deletes a
 // true record. Exported for the session registry, which has the same question about its holders.
 func ProcessAlive(pid int) bool { return processIsAlive(pid) }
+
+// newInstanceID is a tunnel's random name for its record: 64 bits, so two tunnels never share one.
+func newInstanceID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return strconv.FormatInt(time.Now().UnixNano(), 16)
+	}
+	return hex.EncodeToString(b[:])
+}
+
+// newRouteEpochBase is where a tunnel's routed periods start counting: random, in the low 62 bits so
+// the counter cannot wrap, and never zero. A reader compares a routed period between two reads, and a
+// renewal in the same process writes the same record file, so a counter that started at one in every
+// tunnel would let the new tunnel's first period read as the old one's.
+func newRouteEpochBase() uint64 {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return uint64(time.Now().UnixNano())>>2 | 1
+	}
+	return binary.BigEndian.Uint64(b[:])>>2 | 1
+}
+
+// proxyPort is the local proxy's port, or 0 when there is none (a tunnel built by a test).
+func (t *Tunnel) proxyPort() int {
+	if t.proxy == nil {
+		return 0
+	}
+	ap, err := netip.ParseAddrPort(t.proxy.Addr())
+	if err != nil {
+		return 0
+	}
+	return int(ap.Port())
+}

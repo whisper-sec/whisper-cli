@@ -20,24 +20,31 @@ import (
 // moved into a cgroup, and a cgroup can carry BPF programs that the kernel runs for every socket
 // made inside it. A containment is three of those, all on one cgroup of its own:
 //
-//  1. at socket creation, the socket is given a mark, and the mark selects a routing table whose
-//     only route is the containment's tunnel device, with the agent's /128 as preferred source.
-//     So a new connection leaves from the /128 without the program knowing or agreeing;
+//  1. at socket creation, the socket is given the containment's own mark, and the mark selects a
+//     routing table whose only route is the containment's tunnel device, with the agent's /128 as
+//     preferred source. So a new connection leaves from the /128 without the program knowing or
+//     agreeing;
 //  2. at egress, a packet from the cgroup passes only if it leaves through that device or
 //     through loopback. Anything else (a flushed rule, a socket bound to another interface, the
 //     tunnel gone) is refused with EPERM at the socket, never sent;
 //  3. sockets made BEFORE the move keep their old cgroup, so neither program sees them. Each is
-//     found through the process's file table and either kept (loopback, unix, netlink), pinned to
-//     the tunnel device (a listener, an unconnected datagram socket: from then on every packet it
-//     sends reaches the tunnel's filter, which passes only the /128), or cut (a connection to
-//     somewhere else: pinned, then shut down). A socket family that no route reaches (packet,
-//     vsock, ...) makes the containment refuse and undo itself.
+//     found in every descriptor table of the tree, given the mark and adopted by the tunnel's gate
+//     on the root cgroup (hostroute_linux.go), which holds it wherever it is, and either kept
+//     (loopback, unix, netlink), pinned to the tunnel device (a listener, an unconnected socket),
+//     or cut (a connection to somewhere else: pinned, then shut down). Anything the containment
+//     cannot reach or judge (a family no route reaches, descriptors in flight, a socket an io_uring
+//     holds, a table a thread keeps that this kernel gives no way into) refuses it.
+//
+// The mark is the containment's identity on the wire: only a packet that carries it enters the
+// tunnel, it is carried only by the containment's sockets, and it leaves the host only through
+// the tunnel or loopback.
 //
 // What it does not cover, and says so: a process that can become root again (a saved uid 0, a
-// capability, sudo, a setuid program it may run) can move itself out; another process on the host
-// that dials on the contained one's behalf (over loopback, a unix socket or a passed descriptor)
-// is outside it; a process the tree already detached from itself (a daemon that double-forked) is
-// not followed. `whisper run --enforce` has none of those gaps, which is why this is a separate verb.
+// capability, sudo, a setuid program or one with file capabilities it may run) can move itself
+// out; another process on the host that dials on the contained one's behalf (over loopback, a
+// unix socket or a passed descriptor) is outside it; a process the tree already detached from
+// itself (a daemon that double-forked) is not followed. `whisper run --enforce` has none of those
+// gaps, which is why this is a separate verb.
 
 // ContainError is a containment refusal the CLI reports as a usage-class error: the process was
 // left exactly as it was.
@@ -217,7 +224,9 @@ func cgroup2Mount(mountinfo string) (string, error) {
 			continue
 		}
 		pf, qf := strings.Fields(pre), strings.Fields(post)
-		if len(pf) < 5 || len(qf) < 1 || qf[0] != "cgroup2" {
+		// pf[3] is the root of the mount within its filesystem: a bind of a subtree is not the
+		// hierarchy's root, and a gate attached there would not see every socket.
+		if len(pf) < 5 || len(qf) < 1 || qf[0] != "cgroup2" || pf[3] != "/" {
 			continue
 		}
 		mp := unescapeMount(pf[4])
@@ -330,6 +339,20 @@ func familyName(f int) string {
 		return "vsock (AF_VSOCK)"
 	case 44:
 		return "XDP (AF_XDP)"
+	case 29:
+		return "CAN (AF_CAN)"
+	case 30:
+		return "TIPC (AF_TIPC)"
+	case 31:
+		return "Bluetooth (AF_BLUETOOTH)"
+	case 21:
+		return "RDS (AF_RDS)"
+	case 41:
+		return "KCM (AF_KCM)"
+	case 42:
+		return "Qualcomm IPC router (AF_QIPCRTR)"
+	case 43:
+		return "SMC (AF_SMC)"
 	}
 	return "family " + strconv.Itoa(f)
 }

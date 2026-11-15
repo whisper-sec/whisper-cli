@@ -122,7 +122,8 @@ func TestPunch_ALocalPathThatNeverAnswersFallsToTheObservedEndpointAndSaysPunch(
 	if err := tun.SetDirectPeers([]Peer{peer}); err != nil {
 		t.Fatalf("SetDirectPeers: %v", err)
 	}
-	if !waitFor(15*time.Second, func() bool { return tun.PathTo(peerIP) != "relayed" }) {
+	// About seven seconds alone, and nine under the race detector; twenty leaves room for a loaded box.
+	if !waitFor(20*time.Second, func() bool { return tun.PathTo(peerIP) != "relayed" }) {
 		t.Fatalf("the train never reached the observed endpoint: %+v", tun.DirectPeers())
 	}
 	if !routedTo(t, tun, other.pubHex, peerIP) {

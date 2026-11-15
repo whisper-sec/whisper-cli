@@ -249,7 +249,7 @@ func buildWhaleStatus(cx context.Context, agentFile string, wantPeers, probe boo
 	for _, p := range peers {
 		sp := whaleStatusPeer{whalePeer: p, Self: view.Self.Address != "" && sameIP(p.Address, view.Self.Address)}
 		if !sp.Self {
-			obs := evidence.Observation(p.Address, "")
+			obs := evidence.Observation(p.Address)
 			sp.evidence = obs.Punch
 			sp.Path = whale.PathFor(obs)
 			sp.Why = whale.ReasonFor(obs)
@@ -259,7 +259,7 @@ func buildWhaleStatus(cx context.Context, agentFile string, wantPeers, probe boo
 		view.Peers = append(view.Peers, sp)
 	}
 	if probe {
-		probeWhalePeers(cx, view.Peers)
+		probeWhalePeers(cx, view.Peers, view.Self.Address)
 	}
 	return view
 }
@@ -271,8 +271,7 @@ const whaleStatusProbeConcurrency = 8
 // probeWhalePeers measures one round trip per peer, in parallel, and fills PATH and RTT
 // from what actually happened. A peer that does not answer becomes `no path`, never a
 // blank cell that reads as "fine".
-func probeWhalePeers(cx context.Context, peers []whaleStatusPeer) {
-	probe := whale.NewNetProber(whaleProbeTimeout)
+func probeWhalePeers(cx context.Context, peers []whaleStatusPeer, self string) {
 	sem := make(chan struct{}, whaleStatusProbeConcurrency)
 	var wg sync.WaitGroup
 	for i := range peers {
@@ -285,12 +284,13 @@ func probeWhalePeers(cx context.Context, peers []whaleStatusPeer) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
+			// Through this node's own session, so the probe takes the path its tunnel routes the
+			// peer on and the PATH cell is that tunnel's record read around the answer. A
+			// host without one probes from its own address, and the cell says `edge`.
+			probe, tunnel, source := whaleProbeVantage(whaleProbeTimeout, addr, self)
 			sum := whale.Ping(cx, addr, whale.PingOptions{
 				Target: peers[i].Name, Address: addr.String(), Count: 1, Interval: time.Millisecond,
-				// Without this the measurement would REPLACE a path the device proved with one
-				// inferred from a single TCP connect, and a direct peer would print as relayed
-				// for no better reason than that nothing is listening on 443.
-				Evidence: peers[i].evidence,
+				Tunnel: tunnel, HostSource: source,
 			}, probe, nil)
 			peers[i].Path = sum.Path
 			peers[i].Why = sum.Why

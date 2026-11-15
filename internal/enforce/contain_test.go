@@ -106,6 +106,16 @@ func TestCgroup2MountFindsTheHierarchy(t *testing.T) {
 	if got, _ := cgroup2Mount(escaped); got != "/mnt/cg two" {
 		t.Fatalf("escaped mount point %q", got)
 	}
+	// A bind of a subtree (a container's view, shorter than the real mount) is not the hierarchy's
+	// root: a gate attached there would not see every socket on the host.
+	subtree := "40 30 0:22 /system.slice/x.service /c rw - cgroup2 cgroup2 rw\n" +
+		"25 30 0:22 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n"
+	if got, err := cgroup2Mount(subtree); err != nil || got != "/sys/fs/cgroup" {
+		t.Fatalf("a subtree bind must not be taken for the root: %q %v", got, err)
+	}
+	if _, err := cgroup2Mount("40 30 0:22 /system.slice/x.service /c rw - cgroup2 cgroup2 rw\n"); !errors.Is(err, ErrNoCgroup2) {
+		t.Fatalf("only a subtree of the hierarchy is not the hierarchy, got %v", err)
+	}
 }
 
 func TestCgroupPathReadsTheV2Line(t *testing.T) {

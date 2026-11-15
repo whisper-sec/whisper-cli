@@ -213,11 +213,14 @@ func writePathRecord(t *testing.T, dir string, rec wgtun.PathStateRecord) {
 	}
 }
 
+// directRecord is a record as a current holder writes it: the peer read back from the device as routed,
+// in a routed period with its epoch.
 func directRecord(self, peer, endpoint string) wgtun.PathStateRecord {
 	return wgtun.PathStateRecord{
-		Address: self, PID: os.Getpid(), Updated: time.Now(),
+		Address: self, PID: os.Getpid(), Updated: time.Now(), Instance: "test-tunnel",
 		Peers: []wgtun.PathPeerRecord{{
 			Address: peer, Name: "db-01", Path: "direct-punch", Endpoint: endpoint, Promoted: true,
+			RouteEpoch: 11, RoutedSince: time.Now(),
 			Punch: wgtun.PathPunchRecord{
 				Phase: string(wgtun.PunchEstablished), Attempts: 3, Candidates: 2,
 				Winner: endpoint, WinnerSource: string(wgtun.SourceObserved), Since: time.Now(),

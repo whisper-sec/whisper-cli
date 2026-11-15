@@ -577,6 +577,9 @@ func echoInside(ctx context.Context, ns *enforce.Namespace, family string) (stri
 		}
 		var last error
 		for _, ip := range ips {
+			if cerr := ctx.Err(); cerr != nil {
+				return nil, cerr // cancelled (see CloseIdleConnections below): no further address is tried
+			}
 			c, derr := ns.DialContext(ctx, "tcp", net.JoinHostPort(ip.Unmap().String(), port))
 			if derr == nil {
 				return c, nil
@@ -591,6 +594,12 @@ func echoInside(ctx context.Context, ns *enforce.Namespace, family string) (stri
 		ForceAttemptHTTP2: true,
 		Proxy:             nil,
 	}}
+	// The transport keeps dialling after a request gives up (so a later request could use the
+	// connection), and keeps an answered connection idle. Neither is wanted once this returns, so
+	// the dial is cancelled here and the answered connection closed. Cancelling does not wait for
+	// the dial: a step it is already taking may still reach the namespace after the caller stopped
+	// the tunnel, and the namespace refuses it then.
+	defer hc.CloseIdleConnections()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, echo, nil)
 	if err != nil {
 		return "", err

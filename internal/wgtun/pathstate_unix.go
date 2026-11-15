@@ -23,6 +23,9 @@ func processIsAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
+	// On Linux FindProcess holds a pidfd until Release; without it every probe kept a descriptor
+	// until the garbage collector ran, and a loop of path-state reads ran the process out of them.
+	defer p.Release()
 	err = p.Signal(syscall.Signal(0))
 	if err == nil {
 		return true

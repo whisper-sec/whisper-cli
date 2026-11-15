@@ -90,6 +90,52 @@ func (r *rtnl) do(typ, flags uint16, body []byte) error {
 	}
 }
 
+// dump sends one NLM_F_DUMP request and hands each answer's payload to each, until the kernel says
+// it is done.
+func (r *rtnl) dump(typ uint16, body []byte, each func(data []byte)) error {
+	seq := nlSeq.Add(1)
+	msg := make([]byte, unix.SizeofNlMsghdr+len(body))
+	binary.NativeEndian.PutUint32(msg[0:4], uint32(len(msg)))
+	binary.NativeEndian.PutUint16(msg[4:6], typ)
+	binary.NativeEndian.PutUint16(msg[6:8], unix.NLM_F_REQUEST|unix.NLM_F_DUMP)
+	binary.NativeEndian.PutUint32(msg[8:12], seq)
+	copy(msg[unix.SizeofNlMsghdr:], body)
+	if err := unix.Sendto(r.fd, msg, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		return err
+	}
+	buf := make([]byte, 1<<16)
+	for {
+		n, _, err := unix.Recvfrom(r.fd, buf, 0)
+		if err != nil {
+			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			return err
+		}
+		msgs, err := syscall.ParseNetlinkMessage(buf[:n])
+		if err != nil {
+			return err
+		}
+		for _, m := range msgs {
+			if m.Header.Seq != seq {
+				continue
+			}
+			switch m.Header.Type {
+			case syscall.NLMSG_DONE:
+				return nil
+			case syscall.NLMSG_ERROR:
+				if len(m.Data) >= 4 {
+					if code := int32(binary.NativeEndian.Uint32(m.Data[0:4])); code != 0 {
+						return unix.Errno(-code)
+					}
+				}
+				return nil
+			}
+			each(m.Data)
+		}
+	}
+}
+
 func nlAttr(typ uint16, data []byte) []byte {
 	l := unix.SizeofRtAttr + len(data)
 	out := make([]byte, (l+3)&^3)

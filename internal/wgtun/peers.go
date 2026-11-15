@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"golang.zx2c4.com/wireguard/device"
 )
 
 // peers.go is the direct-path half: a second WireGuard peer, so two nodes that can already reach each
@@ -59,25 +61,44 @@ import (
 // traffic is direct, and it is direct because something proved the path, not because a
 // control-plane row claimed one.
 //
-// Demotion is the same move backwards: the /128 is withdrawn, the box's ::/0 covers it again
-// within the health window, and the peer stays armed so it can re-promote when the path
-// returns. Established flows survive it - both ends keep the same overlay addresses, only the
-// encryption path underneath changed - modulo the packets in flight during detection.
+// Demotion is the same move backwards: the /128 is withdrawn and the box's ::/0 covers it again.
+// Established flows survive it - both ends keep the same overlay addresses, only the encryption
+// path underneath changed - modulo the packets in flight during detection.
+//
+// # A withdrawal has to reach both ends, so the end that withdraws goes quiet
+//
+// Staying promoted rests on bytes received from the peer, and those prove only one direction: the
+// far end's packets reach us. That is enough only because an end that stops hearing its peer goes
+// SILENT towards it. A path that dies one way (a firewall rule, a NAT that lost the mapping) is
+// noticed by the end that stopped hearing; if that end kept sending, the far end would keep counting
+// its keepalives and handshake initiations as a live path, keep routing the first end's /128 to the
+// dead direction, and drop what the box delivers from it, because wireguard-go accepts a packet only
+// from the peer that holds its source address. Each end would then be routed differently and the
+// pair cut both ways for as long as the asymmetry lasted. So every demotion is the quiet write (the
+// session goes with it), and the peer is held silent for quietHold: the far end's evidence runs out,
+// it withdraws too, and both ends relay, which works. Only then does the punch resume, on the same
+// train and window schedule as before. A handshake the far end starts is still answered, and a
+// completed one still promotes at once: a completed handshake is a round trip, so it cannot be one-way.
 
 const (
 	// directKeepalive is the PersistentKeepalive for a direct peer, in seconds. Shorter than
 	// the 25s we use towards the box, because this is the timer the promote/demote decision
-	// rides on: the far side's keepalive every 5 seconds (it arms us with the same value) is the
-	// evidence a promoted path is alive between WireGuard's two-minute rekeys, so a path that dies
-	// is noticed and withdrawn within directDeadAfter rather than within a minute. (A keepalive is
-	// not a handshake: a live session handshakes only on rekey.) On a LAN this is one small
-	// packet every five seconds; the latency it buys back is three orders of magnitude larger.
+	// rides on: what the far side sends (it arms us with the same value) is the evidence a
+	// promoted path is alive between WireGuard's two-minute rekeys, so a path that dies is noticed
+	// and withdrawn within directDeadAfter rather than within a minute. (A keepalive is not a
+	// handshake: a live session handshakes only on rekey.) WireGuard re-arms the timer on every
+	// packet received as well as sent, so an end whose timer keeps losing that race may send
+	// nothing; keepHeard sends for it. On a LAN this is one small packet every few seconds; the
+	// latency it buys back is three orders of magnitude larger.
 	directKeepalive = 5
 
 	// directDeadAfter is how long a promoted peer may go with neither a new handshake nor a single
 	// authenticated packet from it before its /128 is withdrawn and the box carries it again. Four
 	// of the far side's keepalives.
 	directDeadAfter = 20 * time.Second
+
+	// directQuietHoldFactor is the quiet hold after a demotion, in dead-path windows (Tunnel.quietHold).
+	directQuietHoldFactor = 2
 
 	// directRearmAfter is how long a peer whose untimed punch train has been SPENT waits before
 	// another train starts, which rotates the endpoints from the top again. It applies only to a row
@@ -408,14 +429,23 @@ func splitHostPortLiteral(s string) (string, string, error) {
 
 // PeerState is what a caller (status, ping) may ask about one direct peer. It reports what is
 // TRUE on the device right now, never what the control plane wished for: Promoted is set only
-// while the /128 is actually routed to this peer, which only happens after a handshake.
+// while the device itself, read back, holds the /128 on this peer, which only happens after
+// a handshake. Our own bookkeeping saying "promoted" is not enough, because it is the device's
+// allowed-ips that pick the peer a packet goes to.
 type PeerState struct {
 	Address  netip.Addr
 	Name     string
-	Path     string // the direct class while promoted, "relayed" otherwise
+	Path     string // the direct class while routed, "relayed" otherwise
 	Endpoint string
 	Promoted bool
 	LastSeen time.Time
+	// RouteEpoch names the current routed period: it is set when a read of the device first finds the
+	// /128 on this peer, and a later period gets a larger one. Zero while the peer is not routed. A
+	// reader that sees the same epoch, routed, before and after a measurement knows the device held the
+	// /128 on this peer throughout it (a write that takes it away publishes first, see unroutePublish).
+	RouteEpoch uint64
+	// RoutedSince is when that read was.
+	RoutedSince time.Time
 	// Punch is what the traversal machinery did for this peer, so a surface can say "relayed
 	// because the punch failed, after 12 attempts at 2 endpoints" rather than printing the
 	// absence of a direct path and leaving the reader to guess which of the reasons it was.
@@ -424,8 +454,19 @@ type PeerState struct {
 
 // directPeer is one candidate's live state inside the tunnel.
 type directPeer struct {
-	peer     Peer
+	peer Peer
+	// promoted is OUR decision: a handshake proved the path, so the /128 is handed to this peer.
 	promoted bool
+	// routed is the DEVICE's answer: the /128 is in this peer's allowed-ips as the device last
+	// reported them, read back after the promotion write and on every monitor tick. It is what every
+	// surface reports, because wireguard-go picks the peer for a packet from its allowed-ips and from
+	// nothing we hold. epoch and routedSince name the current routed period (PeerState.RouteEpoch).
+	routed      bool
+	epoch       uint64
+	routedSince time.Time
+	// lostNoted is set once the device has been found without a /128 we had routed to this peer, so the
+	// note is said once per peer rather than on every tick a misbehaving device repeats it.
+	lostNoted bool
 	// lastSeen is when this node last OBSERVED evidence that the path works: a new handshake, or,
 	// while promoted, more authenticated bytes from the peer. It is the observation time, not the
 	// handshake's own timestamp: WireGuard writes last_handshake_time only on a handshake,
@@ -437,7 +478,20 @@ type directPeer struct {
 	rx         uint64    // rx_bytes at the last read
 	armedAt    time.Time // when we last kicked a handshake attempt
 	promotedAt time.Time // when the path was last promoted (zero when it never was)
+	demotedAt  time.Time // when the path was last withdrawn (zero when it never was)
 	demotes    int
+	// tx is tx_bytes at the last read, txSeen when that read was, txAt the earliest the last send can have
+	// left, and kicked whether keepHeard sent the last keepalive itself (whose bytes then do not restart the
+	// count).
+	tx     uint64
+	txSeen time.Time
+	txAt   time.Time
+	kicked bool
+	// provenAt is when this node last OBSERVED a completed handshake with the peer: the one piece of
+	// evidence that proves both directions (an initiator saw the response, a responder saw the
+	// confirmation). Received bytes prove only the far end's direction, so a promoted peer must also have
+	// a handshake within sessionProof.
+	provenAt time.Time
 	// punch is the traversal train for this peer: which candidate endpoint the next attempt
 	// aims at, how many attempts this train has made, and how it ended. The promote/demote decision
 	// below is unchanged by it.
@@ -469,12 +523,21 @@ func (t *Tunnel) SetDirectPeers(peers []Peer) error {
 	}
 	t.peerWrite.Lock()
 	defer t.peerWrite.Unlock()
+	select {
+	case <-t.stop:
+		return errors.New("the tunnel has stopped") // a refresh that outlived Stop writes nothing
+	default:
+	}
 
 	wanted := make(map[string]Peer, len(peers))
 	wantedAt := make(map[netip.Addr]bool, len(peers))
 	held := map[netip.Addr]heldRow{} // a row the answering box had no evidence for, by address
 	var timed []Peer
-	for _, p := range peers {
+	order := make(map[string]int, len(peers)) // each key's place in the read, for dedupeByAddress
+	for i, p := range peers {
+		if _, seen := order[p.PublicKeyHex]; !seen {
+			order[p.PublicKeyHex] = i
+		}
 		if p.Listed {
 			if p.Hold && p.Address.IsValid() {
 				held[p.Address] = heldRow{named: p.PublicKeyHex, vouched: p.Vouched, vouchedKey: p.VouchedKeyHex}
@@ -505,9 +568,11 @@ func (t *Tunnel) SetDirectPeers(peers []Peer) error {
 		wanted[p.PublicKeyHex] = p
 		wantedAt[p.Address] = true
 	}
+	dedupeByAddress(wanted, t.direct, order)
 	var remove []string
 	var arm []Peer
 	carry := map[string]punchCarry{}
+	unrouted := false // a peer the record says is routed is about to lose its /128 on the device
 	for key, cur := range t.direct {
 		if next, ok := wanted[key]; !ok {
 			switch keepsHeld(cur, held, wantedAt, key, time.Now()) {
@@ -522,9 +587,11 @@ func (t *Tunnel) SetDirectPeers(peers []Peer) error {
 				continue
 			}
 			remove = append(remove, key)
+			unrouted = unrouted || cur.routed
 		} else if next.Address != cur.peer.Address ||
 			(!cur.promoted && !sameCandidates(next, cur.peer)) {
 			arm = append(arm, next) // the row changed materially: re-arm it from scratch
+			unrouted = unrouted || cur.routed
 			// ...but not its backoff: a row that keeps changing must not buy a fresh run of attempts each
 			// time it does (punchCarry). A handshake is what starts the backoff over, and a promoted peer
 			// is never re-armed here.
@@ -569,6 +636,13 @@ func (t *Tunnel) SetDirectPeers(peers []Peer) error {
 		}
 	}
 	t.mu.Unlock()
+	if unrouted || len(remove) > 0 || len(arm) > 0 {
+		// The record stops claiming the path BEFORE the device stops carrying it. Any removal or re-arm
+		// publishes, not only one of a peer this read saw routed: a monitor pass that has just withdrawn a
+		// route may not have published yet, and this write would otherwise take the /128 off the device
+		// first. An unchanged record is not written again (publishPaths' fingerprint).
+		t.publishBeforeUnroute()
+	}
 
 	var firstErr error
 	for _, key := range remove {
@@ -576,14 +650,28 @@ func (t *Tunnel) SetDirectPeers(peers []Peer) error {
 			firstErr = errors.New("could not remove a direct peer")
 		}
 	}
+	// A re-arm that is not silent leaves the device's peer, and the stamp of its last handshake, in place.
+	// The new entry starts from that stamp, so only a handshake completed after the arm counts as evidence.
+	var stamps map[string]time.Time
+	if len(arm) > 0 {
+		if dump, err := t.dev.IpcGet(); err == nil {
+			stamps = parseHandshakeDump(dump)
+		}
+	}
 	for _, p := range arm {
 		now := time.Now()
 		c := carry[p.PublicKeyHex]
 		t.mu.Lock()
 		c.preludeAt = t.lastPrelude(p.PublicKeyHex, now)
+		c.holdUntil = t.lastHold(p.PublicKeyHex, now)
+		if !c.holdUntil.IsZero() {
+			c.withdrawnAt = t.withdrawals[p.PublicKeyHex]
+		}
 		t.mu.Unlock()
 		tr := newPunchTrainFor(p, t.cfg.Address, now, c, orDur(t.directRearm, directRearmAfter))
-		if err := t.armDirectPeer(p, tr.timed()); err != nil {
+		// A key inside its quiet hold is armed silent like a timed one: its path was withdrawn a moment
+		// ago and the far end may not have let go of it yet.
+		if err := t.armDirectPeer(p, tr.timed() || tr.holding(now), tr.keepalive(t.directKeepaliveSecs())); err != nil {
 			// Leave nothing half-installed: an untracked peer on the device is one nothing will
 			// ever remove, and the reconciler cannot promote or demote what it does not know about.
 			_ = t.dev.IpcSet("public_key=" + p.PublicKeyHex + "\nremove=true\n")
@@ -601,10 +689,48 @@ func (t *Tunnel) SetDirectPeers(peers []Peer) error {
 			peer:    p,
 			armedAt: now,
 			punch:   tr,
+			lastHS:  stamps[p.PublicKeyHex],
 		}
 		t.mu.Unlock()
 	}
 	return firstErr
+}
+
+// dedupeByAddress keeps one wanted peer per overlay address. Two rows for one /128 with
+// different keys (a node mid-renewal, two holders of one address) would each be promoted in turn, and
+// wireguard-go's allowed-ips moves the /128 to whichever peer was written last: a route taken away
+// from a promoted peer with nothing published first, and a flap on every tick once the device is read
+// back. The one kept is the one already promoted here, else the earlier row in the read. The others are not installed, and one already installed is removed like any row the
+// read did not ask for.
+func dedupeByAddress(wanted map[string]Peer, cur map[string]*directPeer, order map[string]int) {
+	// Only a promotion outranks the plane's order: a key merely tracked here may be the one that went
+	// dead, and preferring it would starve the live key the plane now lists first.
+	rank := func(key string) int {
+		if d := cur[key]; d != nil && d.promoted {
+			return 0
+		}
+		return 1
+	}
+	better := func(a, b string) bool {
+		if ra, rb := rank(a), rank(b); ra != rb {
+			return ra < rb
+		}
+		if order[a] != order[b] {
+			return order[a] < order[b]
+		}
+		return a < b
+	}
+	keep := make(map[netip.Addr]string, len(wanted))
+	for key, p := range wanted {
+		if k, ok := keep[p.Address]; !ok || better(key, k) {
+			keep[p.Address] = key
+		}
+	}
+	for key, p := range wanted {
+		if keep[p.Address] != key {
+			delete(wanted, key)
+		}
+	}
 }
 
 // lastPrelude is when a first (untimed) train last started for this key, kept across a removal and a
@@ -630,6 +756,192 @@ func (t *Tunnel) notePrelude(keyHex string, at time.Time) {
 		}
 	}
 	t.preludes[keyHex] = at
+}
+
+// keepHeard makes sure this end is heard on every path it routes directly. The far end keeps the
+// path on what it receives from here, and that is sound only while an end that can hear goes on being
+// heard. WireGuard re-arms a peer's persistent keepalive on every packet it receives as well as on every one
+// it sends, so of two ends whose keepalives run at the same interval, the one whose timer keeps losing the
+// race to the other's packets sends nothing at all on an idle path, and the far end withdraws a path that
+// works (seen on real devices: one end silent for nine seconds against an eight-second window while the
+// other sent every two). So a routed peer this end has sent nothing to for kickEvery is sent a keepalive at
+// once. A send is counted from the read before the one that saw it, the earliest it can have left, and the
+// kick's own bytes do not restart the count, so no gap between two sends from here exceeds kickEvery and a
+// tick. An end whose own timer works may now and then be sent an extra keepalive besides its own: one
+// 32-byte packet, against a far end that would otherwise withdraw a working path.
+func (t *Tunnel) keepHeard(now time.Time, sent map[string]uint64) {
+	select {
+	case <-t.stop:
+		return
+	default:
+	}
+	t.mu.Lock()
+	every := t.kickEvery()
+	type kick struct {
+		p Peer
+		d *directPeer
+	}
+	var kicks []kick
+	for key, d := range t.direct {
+		tx, ok := sent[key]
+		if !ok {
+			continue
+		}
+		seen := d.txSeen
+		d.txSeen = now
+		if tx != d.tx || d.txAt.IsZero() {
+			d.tx = tx // grew, or a peer written back fresh counts from zero again
+			if !d.kicked {
+				d.txAt = now
+				if !seen.IsZero() {
+					d.txAt = seen // it left after the last read that did not see it
+				}
+			}
+			d.kicked = false // the growth that follows a kick is the kick's: the count runs from the kick
+			continue
+		}
+		if d.promoted && d.routed && now.Sub(d.txAt) >= every {
+			d.txAt, d.kicked = now, true
+			kicks = append(kicks, kick{d.peer, d})
+		}
+	}
+	t.mu.Unlock()
+	for _, k := range kicks {
+		t.kickKeepalive(k.p, k.d)
+	}
+}
+
+// kickEvery is keepHeard's interval: half the dead-path window less a tick (five seconds in production). The
+// far end withdraws once nothing has reached it for its window less one of its ticks (a packet is observed
+// on the tick after it lands), and a gap between two sends from here can be kickEvery and one tick of this
+// end's, so this keeps every gap at about half the far end's window. Two keepalive intervals would leave no
+// margin at production's ratio, where the tick is a keepalive interval and the window four. Never shorter
+// than a tick.
+func (t *Tunnel) kickEvery() time.Duration {
+	tick := orDur(t.healthEvery, 5*time.Second)
+	return max(tick, orDur(t.directDead, directDeadAfter)/2-tick)
+}
+
+// kickKeepalive sends one keepalive to a routed peer now: the keepalive turned off and on again, which is
+// what makes wireguard-go send one at once (punchDoc does the same). Under the peer-write lock and only
+// while the entry is still the tracked one and still promoted, so it cannot land on a peer a demotion has
+// just silenced. It changes nothing else.
+func (t *Tunnel) kickKeepalive(p Peer, decided *directPeer) {
+	t.peerWrite.Lock()
+	defer t.peerWrite.Unlock()
+	t.mu.Lock()
+	d := t.direct[p.PublicKeyHex]
+	ok := d != nil && d == decided && d.promoted
+	t.mu.Unlock()
+	if !ok {
+		return
+	}
+	_ = t.dev.IpcSet("public_key=" + p.PublicKeyHex + "\nupdate_only=true\npersistent_keepalive_interval=0\n" +
+		fmt.Sprintf("persistent_keepalive_interval=%d\n", t.directKeepaliveSecs()))
+}
+
+// quietHold is how long an end that withdrew a direct path stays silent towards the peer. The far
+// end withdraws its own half once nothing has arrived from this end for directDeadAfter, which it notices
+// on its next read of the device, so within directDeadAfter and two of its monitor ticks of this end's
+// last packet (30 s in production: 20 s and two 5 s ticks). Two dead-path windows (40 s) outlast that with
+// room, and the hold is never shorter than the dead-path window and three ticks, whatever the options say.
+// Anything sent sooner would be received there as a live path and keep it routed.
+func (t *Tunnel) quietHold() time.Duration {
+	dead := orDur(t.directDead, directDeadAfter)
+	return max(directQuietHoldFactor*dead, dead+3*orDur(t.healthEvery, 5*time.Second))
+}
+
+// holdLength is one end's quiet hold towards a peer: quietHold, plus the pair's jitter (holdJitter), plus,
+// for an untimed train at the end that does not open the pair's windows (the higher address,
+// punchTrain.opener), turn more. A path cut both ways makes both ends withdraw together, and two untimed
+// trains that start within a round trip of each other cross their handshakes: each answers the other's
+// initiation, neither answer matches, and the retries that follow keep them in step, since the keepalive
+// that drives them has no jitter. The jitter is the pair's, the same at both ends, so it cannot undo the
+// difference, and the difference outlasts the ticks on which the two ends decide: when they withdraw within
+// a tick of each other, the opener's first attempt comes first by at least half a punch period, and the
+// other end, which has sent nothing yet, answers it. A wider skew usually orders the two ends by itself. A
+// timed train is not given the difference, because its window already orders the two ends.
+func (t *Tunnel) holdLength(opener, untimed bool, peer netip.Addr) time.Duration {
+	hold := t.quietHold()
+	hold += holdJitter(hold, pairRank(t.cfg.Address, peer))
+	if untimed && !opener {
+		hold += t.turn()
+	}
+	return hold
+}
+
+// turn is how much later than the opener the other end of a pair restarts an untimed train after a
+// withdrawal (holdLength): two monitor ticks, because each end decides on its own ticks (the two may
+// withdraw up to a tick apart, and each takes its first attempt on the first tick after it may send), and
+// half a punch period, so the two trains' attempts stay out of step.
+func (t *Tunnel) turn() time.Duration {
+	return 2*orDur(t.healthEvery, 5*time.Second) + orDur(t.punchEvery, punchPeriod)/2
+}
+
+// holdJitter is up to an eighth of the hold, taken from the pair's rank (pairRank, which both ends compute
+// alike), so the pairs a site-wide outage withdraws together do not all come back to punching in the same
+// instant, while the two ends of one pair get the same.
+func holdJitter(hold time.Duration, rank uint64) time.Duration {
+	if hold < 8 {
+		return 0
+	}
+	return time.Duration(rank % uint64(hold/8))
+}
+
+// sessionProof is how long a promoted peer may go without a completed handshake before it is withdrawn,
+// whatever bytes keep arriving from it. It cannot withdraw a path that carries anything: a
+// session's keypair is never younger than the handshake that completed it (an initiator's is made at the
+// response, a responder's becomes current at the confirmation, which is when the device stamps the
+// handshake), and WireGuard refuses to send or receive on a keypair RejectAfterTime (180 s) old. So past
+// that, nothing but handshake initiations can arrive, and an initiation that never completes is a far end
+// sending into a direction that does not answer. A healthy session re-handshakes before it: the initiator
+// rekeys on its next send after RekeyAfterTime (120 s), or on a receive after 165 s if the far end's
+// keepalives keep resetting its own. The dead-path window on top covers the tick that observes it. This is
+// the bound for a far end that does not go quiet when it stops hearing (an older whisper, or a node that
+// restarted and lost its hold); quietHold is what makes the common case fast.
+func (t *Tunnel) sessionProof() time.Duration {
+	if t.directProof > 0 {
+		return t.directProof
+	}
+	return device.RejectAfterTime + orDur(t.directDead, directDeadAfter)
+}
+
+// lastHold is when the quiet hold for this key ends, kept across a re-arm, a removal and a re-install, so
+// no refresh can make this end send at a far end that may still route the pair directly. Zero when no
+// hold is running. Called with mu held.
+func (t *Tunnel) lastHold(keyHex string, now time.Time) time.Time {
+	at, ok := t.holds[keyHex]
+	if !ok || !now.Before(at) {
+		return time.Time{}
+	}
+	return at
+}
+
+// noteHold records a quiet hold for lastHold, only ever lengthening the one running, and the withdrawal it
+// follows (so a re-arm inside the hold still says when the path was withdrawn), and drops the ones already
+// over, so the maps are bounded by the keys withdrawn in the last quietHold. Called with mu held.
+func (t *Tunnel) noteHold(keyHex string, until, withdrawn, now time.Time) {
+	if t.holds == nil {
+		t.holds, t.withdrawals = map[string]time.Time{}, map[string]time.Time{}
+	}
+	for k, v := range t.holds {
+		if !now.Before(v) {
+			delete(t.holds, k)
+			delete(t.withdrawals, k)
+		}
+	}
+	if until.After(t.holds[keyHex]) {
+		t.holds[keyHex] = until
+	}
+	if !withdrawn.IsZero() {
+		t.withdrawals[keyHex] = withdrawn
+	}
+}
+
+// forgetHold drops a key's hold, when a handshake has ended it. Called with mu held.
+func (t *Tunnel) forgetHold(keyHex string) {
+	delete(t.holds, keyHex)
+	delete(t.withdrawals, keyHex)
 }
 
 // maxHeldReads and maxHeldAge bound how long a peer may be kept on rows that carry no evidence
@@ -796,7 +1108,7 @@ func sameEndpoints(a, b []Candidate) bool {
 // then leaves at the same moment as the far side's, which is the whole of what makes a punch through two
 // NATs work. Written with the peer-write lock held, by SetDirectPeers, so the create in it cannot race a
 // removal.
-func (t *Tunnel) armDirectPeer(p Peer, silent bool) error {
+func (t *Tunnel) armDirectPeer(p Peer, silent bool, keepalive int) error {
 	endpoint := p.Endpoint
 	if cands := p.candidateList(); len(cands) > 0 {
 		endpoint = cands[0].Endpoint
@@ -809,8 +1121,17 @@ func (t *Tunnel) armDirectPeer(p Peer, silent bool) error {
 	fmt.Fprintf(&b, "endpoint=%s\n", endpoint)
 	b.WriteString("replace_allowed_ips=true\n")
 	b.WriteString("persistent_keepalive_interval=0\n")
-	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", directKeepalive)
+	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", keepalive)
 	return t.dev.IpcSet(b.String())
+}
+
+// directKeepaliveSecs is the direct peers' keepalive in seconds: the tunnel's own (Options.DirectKeepalive),
+// or directKeepalive for a tunnel built without one.
+func (t *Tunnel) directKeepaliveSecs() int {
+	if t.directKA > 0 {
+		return t.directKA
+	}
+	return directKeepalive
 }
 
 // promoteDirectPeer hands the peer its /128. From this line on, cryptokey routing sends that
@@ -818,20 +1139,24 @@ func (t *Tunnel) armDirectPeer(p Peer, silent bool) error {
 //
 // It also sets the keepalive. A silent peer (one with a window, between windows) can be promoted by a
 // handshake the FAR side started, and with no keepalive of its own it would send nothing on an idle
-// path, so the far side would see no packet from us and withdraw its end within directDeadAfter. For
-// a peer that already has the keepalive this line changes nothing and sends nothing extra.
+// path, so the far side would see no packet from us and withdraw its end within directDeadAfter. At
+// the end that does not open the pair it also puts the punching keepalive, a second longer
+// (untimedKeepalive), back to the tunnel's. Either way it sends nothing extra: only a keepalive
+// going from off to on makes wireguard-go send one.
 func (t *Tunnel) promoteDirectPeer(p Peer) error {
 	cfg := "public_key=" + p.PublicKeyHex + "\n" +
 		"update_only=true\n" +
 		"replace_allowed_ips=true\n" +
 		"allowed_ip=" + p.Address.String() + "/128\n" +
-		fmt.Sprintf("persistent_keepalive_interval=%d\n", directKeepalive)
+		fmt.Sprintf("persistent_keepalive_interval=%d\n", t.directKeepaliveSecs())
 	return t.dev.IpcSet(cfg)
 }
 
-// demoteDirectPeer withdraws the /128. The box peer's ::/0 covers it again immediately, so the
-// flow continues over the relay rather than stopping. The peer stays installed and armed, so it
-// re-promotes on its own when the direct path comes back.
+// demoteDirectPeer withdraws the /128 and changes nothing else: the box peer's ::/0 covers it again
+// immediately. It is the write for a stray /128 on a peer this tunnel never promoted (withdrawStray), and
+// for a withdrawal overtaken by a handshake (quietDirectPeer). A promoted peer whose path died is demoted
+// by the quiet write instead, which also drops its session and keepalive, because an end that keeps
+// sending at a peer it cannot hear keeps the far end's half of the path alive.
 func (t *Tunnel) demoteDirectPeer(p Peer) error {
 	cfg := "public_key=" + p.PublicKeyHex + "\n" +
 		"update_only=true\n" +
@@ -847,35 +1172,83 @@ func (t *Tunnel) demoteDirectPeer(p Peer) error {
 // What counts as evidence is deliberately asymmetric. PROMOTION needs a handshake newer than
 // any seen before: that is the one thing that proves our packets reach the peer AND its answers
 // reach us, and it is what keeps a /128 from being routed at a peer that never answered. STAYING
-// promoted also accepts authenticated bytes from the peer: its keepalives (directKeepalive, every
-// five seconds from a far side that has armed us) are what prove a live session between the
-// two-minute rekeys. Either is stamped with the time this pass observed it, so a late tick cannot
+// promoted also accepts authenticated bytes from the peer: its keepalives (directKeepalive, or the
+// ones keepHeard sends for it when its own timer is kept from firing) are what prove a live session
+// between the two-minute rekeys. Either is stamped with the time this pass observed it, so a late tick cannot
 // age a handshake out before the monitor has seen it.
-func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, received map[string]uint64) {
-	t.mu.Lock()
-	if len(t.direct) == 0 {
-		t.mu.Unlock()
-		// Still publish: a node whose last direct peer was revoked must stop claiming one, and
-		// an empty table published by a live monitor is a different fact from no table at all.
-		t.publishPaths()
-		return
+//
+// Received bytes prove only the far end's direction. They stand for both because an end that stops
+// hearing goes quiet when it withdraws (quietHold), so a far end that cannot hear us stops
+// sending within directDeadAfter and this end withdraws in turn. For a far end that keeps sending
+// anyway, a promoted peer also needs a completed handshake within sessionProof.
+//
+// allowed is what the same read found in each peer's allowed-ips (nil when the caller has no
+// reading), and it is checked against the decision on every pass. The decision is ours;
+// where a packet goes is the device's, so the device wins the report and the device is brought back
+// in line with the decision:
+//
+//   - a /128 we routed that the device no longer holds clears the promotion, and the path reads
+//     relayed. If the path is still live by the evidence that keeps a path promoted, it is handed back
+//     on the same pass, as a new routed period. Not waiting for a fresh handshake is deliberate: the
+//     far side still routes our /128 to us directly, and wireguard-go drops a packet whose source
+//     address the delivering peer does not hold, so a pair routed on one side only is cut in both
+//     directions, not relayed. Restoring the route is what stops that;
+//   - a /128 the device holds on a peer we did not promote (a demotion write that failed) is adopted
+//     the same way when the path is live, for the same reason, and withdrawn when it is not;
+//   - any other prefix on a direct peer is not a grant this tunnel made: a promoted peer is written
+//     again with its own /128 alone, and an unpromoted one is cleared;
+//   - a peer on the device that this tunnel does not track at all is removed, and the box peer's
+//     default route is put back if it is missing.
+func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, received map[string]uint64, allowed map[string][]netip.Prefix) {
+	select {
+	case <-t.stop:
+		return // a closing device reads as having lost every route; that is not news to act on
+	default:
 	}
+	t.mu.Lock()
 	type action struct {
-		p       Peer
-		promote bool
-		demote  bool
-		punch   bool
-		quiet   bool
-		once    bool
-		cand    Candidate
-		at      time.Time
-		slot    int64
+		p        Peer
+		d        *directPeer // the entry the decision was made for, re-checked before its write
+		promote  bool
+		foreign  []netip.Prefix // prefixes on a promoted peer that are not its /128, to take off one by one
+		recreate bool           // a tracked peer the device does not have at all
+		demote   bool
+		withdraw bool
+		unproven bool // a demotion by sessionProof rather than by silence
+		punch    bool
+		quiet    bool
+		once     bool
+		cand     Candidate
+		at       time.Time
+		slot     int64
 	}
 	var todo []action
+	var lost []Peer
+	var orphans []string
+	boxRoute := false
+	unrouted := false // a routed peer is losing its /128 on this pass: publish before the write
+	if allowed != nil {
+		for key := range allowed {
+			if key == t.cfg.ServerPublicKeyHex {
+				continue
+			}
+			if _, tracked := t.direct[key]; !tracked {
+				orphans = append(orphans, key)
+			}
+		}
+		if box, ok := allowed[t.cfg.ServerPublicKeyHex]; ok && !holdsPrefix(box, boxDefaultRoute(t.cfg.Address)) {
+			boxRoute = true
+		}
+	}
+	proof := t.sessionProof()
 	for key, d := range t.direct {
-		if hs, ok := seen[key]; ok && hs.After(d.lastHS) {
+		// A handshake is any CHANGE in the device's stamp, not only a later one: the device writes it only
+		// when a handshake completes (and zeroes it when the peer is written back fresh), and the stamp is
+		// wall-clock, so after the clock steps back a new handshake reads as older than the last.
+		if hs, ok := seen[key]; ok && !hs.IsZero() && !hs.Equal(d.lastHS) {
 			d.lastHS = hs
 			d.lastSeen = now
+			d.provenAt = now
 		}
 		if rx, ok := received[key]; ok && rx > d.rx {
 			d.rx = rx
@@ -884,14 +1257,80 @@ func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, 
 			}
 		}
 		fresh := !d.lastSeen.IsZero() && now.Sub(d.lastSeen) < orDur(t.directDead, directDeadAfter)
+		if !d.promoted && !d.provenAt.After(d.demotedAt) {
+			// Only a handshake observed since the last withdrawal promotes. Bytes left over from the period
+			// that ended are not evidence for the next one: a sessionProof withdrawal is made while they are
+			// still arriving, and promoting on them would route the /128 at a peer whose session the quiet
+			// write has just dropped.
+			fresh = false
+		}
+		// The backstop (sessionProof): bytes keep arriving, but no handshake has completed for longer than
+		// any live session goes without one, so the far end is initiating into a direction that never
+		// answers. A promoted peer is always proven (its promotion was a handshake), so a zero provenAt
+		// cannot occur on one; it is read as unproven all the same.
+		unproven := d.promoted && fresh && (d.provenAt.IsZero() || now.Sub(d.provenAt) >= proof)
+		if unproven {
+			fresh = false
+		}
+		if allowed != nil {
+			held, onDevice := allowed[key]
+			has := holdsHost(held, d.peer.Address)
+			var foreign []netip.Prefix
+			for _, p := range held {
+				if !(p.Bits() == d.peer.Address.BitLen() && p.Addr() == d.peer.Address) {
+					foreign = append(foreign, p)
+				}
+			}
+			if d.routed && !has && !d.lostNoted {
+				d.lostNoted = true
+				lost = append(lost, d.peer)
+			}
+			switch {
+			case !onDevice:
+				// The device does not have the peer at all (a write that removed it, and the one that
+				// should have put it back, failed). Every later write is update_only and would do nothing,
+				// so it is armed again from the decision's side: unpromoted, nothing routed to it.
+				if d.routed {
+					unrouted = true
+				}
+				d.promoted, d.routed, d.epoch = false, false, 0
+				// A peer written back fresh has no session and counters from zero: only its own first
+				// handshake may promote it, and its bytes count from nothing.
+				d.lastSeen, d.rx, d.provenAt = time.Time{}, 0, time.Time{}
+				todo = append(todo, action{p: d.peer, d: d, recreate: true})
+				continue
+			case d.promoted && !has:
+				// Nothing in this package takes a promoted peer's /128 away without clearing the
+				// promotion first, so this is a write we did not make. The device is the truth: the
+				// period ends here, and a live path is promoted again below, on this same pass. A dead
+				// one stays promoted in the bookkeeping only so the demotion below runs its course.
+				d.routed, d.epoch = false, 0
+				unrouted = true
+				if fresh {
+					d.promoted = false
+				}
+			case d.promoted && len(foreign) > 0:
+				todo = append(todo, action{p: d.peer, d: d, foreign: foreign})
+			case !d.promoted && len(held) > 0 && !(has && fresh):
+				todo = append(todo, action{p: d.peer, d: d, withdraw: true})
+			}
+			if d.promoted && has && !d.routed {
+				t.confirmRouted(d, now)
+			}
+		}
 		switch {
 		case fresh && !d.promoted:
 			d.promoted = true
 			d.promotedAt = now
-			todo = append(todo, action{p: d.peer, promote: true})
+			// A handshake ends a quiet hold: the far end answered, so nothing is left to wait out.
+			d.punch.holdUntil = time.Time{}
+			t.forgetHold(key)
+			todo = append(todo, action{p: d.peer, d: d, promote: true})
 		case !fresh && d.promoted:
-			d.promoted = false
+			d.promoted, d.routed, d.epoch = false, false, 0
+			unrouted = true
 			d.demotes++
+			d.demotedAt = now
 			d.armedAt = now
 			// Start a fresh punch train at the endpoint that carried the path last time: after a
 			// path has been up and died, that is the likeliest place to find it again. A direct row whose
@@ -903,24 +1342,29 @@ func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, 
 			if freshTrain && d.punch.canFallBack() {
 				t.notePrelude(key, now)
 			}
-			// A timed peer is demoted by the quiet write, which withdraws the /128 and its keepalive
-			// in one: the next packet it sends is at the next window, like the far side's.
-			todo = append(todo, action{p: d.peer, demote: true, quiet: d.punch.timed()})
+			// Every demotion is the quiet write, which withdraws the /128, the session and the keepalive in
+			// one, and the train then sends nothing for quietHold: the far end hears nothing from here, lets
+			// go of its own half, and both ends relay. The next train, or window, follows the hold.
+			until := now.Add(t.holdLength(d.punch.opener, !d.punch.timed(), d.peer.Address))
+			d.punch.holdFor(until)
+			d.punch.withdrawnAt = now
+			t.noteHold(key, until, now, now)
+			todo = append(todo, action{p: d.peer, d: d, demote: true, unproven: unproven})
 		case !fresh && !d.promoted && d.punch.timed():
 			// A relayed pair: punched only inside the plane's windows, silenced between them.
 			switch act, c, at := d.punch.windowStep(now, t.punchEvery, t.healthEvery+t.healthEvery/10, d.rx); act {
 			case punchSend:
 				d.armedAt = now
-				todo = append(todo, action{p: d.peer, punch: true, once: true, cand: c, at: at, slot: d.punch.slot})
+				todo = append(todo, action{p: d.peer, d: d, punch: true, once: true, cand: c, at: at, slot: d.punch.slot})
 			case punchQuiet:
-				todo = append(todo, action{p: d.peer, quiet: true})
+				todo = append(todo, action{p: d.peer, d: d, quiet: true})
 			}
 		case !fresh && !d.promoted && d.punch.spent() && d.punch.canFallBack():
 			// A direct row's first train is spent and the row carries the pair's window: silence the
 			// device and try again only inside the window, like a relayed pair, rather than let the
 			// keepalive send an initiation every five seconds for as long as the peer is armed.
 			d.punch.fallBack()
-			todo = append(todo, action{p: d.peer, quiet: true})
+			todo = append(todo, action{p: d.peer, d: d, quiet: true})
 		case !fresh && !d.promoted:
 			// The traversal. A train of attempts, one candidate endpoint at a time, while every
 			// packet for this /128 keeps going through the box - the peer holds no allowed-ips
@@ -930,64 +1374,232 @@ func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, 
 			}
 			if c, due := d.punch.due(now, t.punchEvery); due {
 				d.armedAt = now
-				todo = append(todo, action{p: d.peer, punch: true, cand: c})
+				todo = append(todo, action{p: d.peer, d: d, punch: true, cand: c, at: now})
 			}
 		}
 	}
 	t.mu.Unlock()
 
+	for _, p := range lost {
+		t.note("whisper: the device stopped routing %s to its direct path although it was promoted; "+
+			"it is reported relayed, and the route is restored at once if the path is still live", peerLabel(p))
+	}
+	if unrouted {
+		t.publishBeforeUnroute()
+	}
+	for _, key := range orphans {
+		t.removeOrphan(key)
+	}
+	if boxRoute {
+		t.restoreBoxRoute()
+	}
 	for _, a := range todo {
 		switch {
+		case a.withdraw:
+			t.withdrawStray(a.p, a.d)
+		case a.recreate:
+			t.recreateMissing(a.p, a.d)
+		case len(a.foreign) > 0:
+			t.removeForeign(a.p, a.d, a.foreign)
 		case a.promote:
-			// Under the peer-write lock, like a timed punch fired from its timer (punchAtInstant), so
-			// that punch's keepalive-off write can never land after this one's keepalive-on.
-			t.peerWrite.Lock()
-			err := t.promoteDirectPeer(a.p)
-			t.peerWrite.Unlock()
-			if err != nil {
-				t.mu.Lock()
-				if d := t.direct[a.p.PublicKeyHex]; d != nil {
-					d.promoted = false
-				}
-				t.mu.Unlock()
+			won, ok := t.promoteChecked(a.p, a.d)
+			if !ok {
 				continue
 			}
-			// Read back where the device says this peer actually is. It is usually the candidate
-			// we aimed at, but NOT always: WireGuard roams a peer to wherever an authenticated
-			// packet arrived from, which is the only way to learn the mapped source of a peer
-			// behind a NAT that rewrites its port per destination. One device read per promotion.
-			won := Candidate{Endpoint: t.peerEndpoint(a.p.PublicKeyHex)}
-			t.mu.Lock()
-			if d := t.direct[a.p.PublicKeyHex]; d != nil && d.punch != nil {
-				if won.Endpoint == "" {
-					won.Endpoint = d.punch.lastEP
-				}
-				won.Source = sourceOf(d.punch.cands, won.Endpoint)
-				d.punch.winner, d.punch.won = won, true
-			}
-			t.mu.Unlock()
 			t.note("whisper: %s is now a direct path (%s via %s); the relay is the fallback",
 				peerLabel(a.p), orText(a.p.Path, "direct"), orText(won.Endpoint, a.p.Endpoint))
 		case a.demote:
-			if a.quiet {
-				t.quietDirectPeer(a.p, true)
+			t.quietDirectPeer(a.p, true)
+			if a.unproven {
+				t.note("whisper: the direct path to %s has completed no handshake in %s although packets still "+
+					"arrive from it, so it is not answering both ways - falling back to the relay",
+					peerLabel(a.p), proof.Round(time.Second))
 			} else {
-				_ = t.demoteDirectPeer(a.p)
+				t.note("whisper: the direct path to %s stopped answering - falling back to the relay",
+					peerLabel(a.p))
 			}
-			t.note("whisper: the direct path to %s stopped answering - falling back to the relay",
-				peerLabel(a.p))
 		case a.quiet:
 			t.quietDirectPeer(a.p, false)
 		case a.punch && a.once:
 			t.punchAtInstant(a.p, a.cand, a.at, a.slot)
 		case a.punch:
-			_ = t.punchAt(a.p, a.cand)
+			t.punchAt(a.p, a.d, a.cand, a.at)
 		}
 	}
 
 	// Publish what the device just told us, so the surfaces in other processes report the path a
 	// packet is actually taking rather than the one the control plane offered (see pathstate.go).
 	t.publishPaths()
+}
+
+// promoteChecked writes a promotion and reads it back, under the peer-write lock and only while the
+// entry the decision was made for is still the tracked one, still promoted and at the same address: a
+// refresh that re-armed the key in between (a new address, say) must not get the old /128 written onto
+// the new entry. Like a timed punch fired from its timer (punchAtInstant), it takes the peer-write lock,
+// so that punch's keepalive-off write can never land after this one's keepalive-on.
+//
+// The read back says where the device now has the peer, which is usually the candidate aimed at but NOT
+// always: WireGuard roams a peer to wherever an authenticated packet arrived from, which is the only way
+// to learn the mapped source of a peer behind a NAT that rewrites its port per destination. It also says
+// whether the device took the /128, which starts the routed period at once rather than a tick later.
+func (t *Tunnel) promoteChecked(p Peer, decided *directPeer) (Candidate, bool) {
+	t.peerWrite.Lock()
+	defer t.peerWrite.Unlock()
+	t.mu.Lock()
+	d := t.direct[p.PublicKeyHex]
+	ok := d != nil && d == decided && d.promoted && d.peer.Address == p.Address
+	t.mu.Unlock()
+	if !ok {
+		return Candidate{}, false
+	}
+	if err := t.promoteDirectPeer(p); err != nil {
+		t.mu.Lock()
+		if d == t.direct[p.PublicKeyHex] {
+			d.promoted, d.routed, d.epoch = false, false, 0
+		}
+		t.mu.Unlock()
+		return Candidate{}, false
+	}
+	ep, held := t.peerReadback(p.PublicKeyHex)
+	won := Candidate{Endpoint: ep}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if d != t.direct[p.PublicKeyHex] || !d.promoted {
+		return won, false
+	}
+	if !d.routed && holdsHost(held, d.peer.Address) {
+		t.confirmRouted(d, time.Now())
+	}
+	if d.punch != nil {
+		if won.Endpoint == "" {
+			won.Endpoint = d.punch.lastEP
+		}
+		won.Source = sourceOf(d.punch.cands, won.Endpoint)
+		d.punch.winner, d.punch.won = won, true
+	}
+	return won, true
+}
+
+// confirmRouted starts a routed period for a peer the device has just been read holding the /128 for.
+// Called with mu held.
+func (t *Tunnel) confirmRouted(d *directPeer, now time.Time) {
+	t.routeEpoch++
+	d.routed, d.epoch, d.routedSince = true, t.routeEpoch, now
+}
+
+// withdrawStray clears the allowed-ips of a peer the device holds them for although this tunnel did not
+// route them there. Under the peer-write lock, and only while the entry the decision was made for is
+// still the tracked one and still unpromoted, so a promotion decided since cannot be undone by it.
+func (t *Tunnel) withdrawStray(p Peer, decided *directPeer) {
+	t.peerWrite.Lock()
+	defer t.peerWrite.Unlock()
+	t.mu.Lock()
+	d := t.direct[p.PublicKeyHex]
+	ok := d != nil && d == decided && !d.promoted
+	t.mu.Unlock()
+	if ok {
+		_ = t.demoteDirectPeer(p)
+	}
+}
+
+// removeForeign takes off a promoted peer the prefixes that are not its own /128, one at a time, so the
+// /128 itself is never off the device: a write that replaced the list would leave the address routed to
+// the box for a moment while the record still claimed the direct period. Under the peer-write lock and
+// only while the entry the decision was made for is still tracked and promoted.
+func (t *Tunnel) removeForeign(p Peer, decided *directPeer, foreign []netip.Prefix) {
+	t.peerWrite.Lock()
+	defer t.peerWrite.Unlock()
+	t.mu.Lock()
+	d := t.direct[p.PublicKeyHex]
+	ok := d != nil && d == decided && d.promoted
+	t.mu.Unlock()
+	if !ok {
+		return
+	}
+	var b strings.Builder
+	b.WriteString("public_key=" + p.PublicKeyHex + "\nupdate_only=true\n")
+	for _, f := range foreign {
+		b.WriteString("allowed_ip=-" + f.String() + "\n")
+	}
+	_ = t.dev.IpcSet(b.String())
+}
+
+// recreateMissing arms again a tracked peer the device does not have, the way SetDirectPeers armed it
+// (silent for a timed train, and for one inside its quiet hold), under the peer-write lock, only while
+// the entry is still the tracked one, and only if the device still lacks it: the tick's read was taken
+// without the lock, and a refresh may have armed the key since, so arming again would wipe a session the
+// far side just completed.
+func (t *Tunnel) recreateMissing(p Peer, decided *directPeer) {
+	t.peerWrite.Lock()
+	defer t.peerWrite.Unlock()
+	t.mu.Lock()
+	d := t.direct[p.PublicKeyHex]
+	ok := d != nil && d == decided && !d.promoted
+	silent := ok && (d.punch.timed() || d.punch.holding(time.Now()))
+	ka := t.directKeepaliveSecs()
+	if ok {
+		ka = d.punch.keepalive(ka)
+	}
+	t.mu.Unlock()
+	if !ok {
+		return
+	}
+	if dump, err := t.dev.IpcGet(); err != nil {
+		return
+	} else if _, present := parseAllowedDump(dump)[p.PublicKeyHex]; present {
+		return
+	}
+	_ = t.armDirectPeer(p, silent, ka)
+}
+
+// removeOrphan takes off the device a peer this tunnel does not track: one whose removal write failed,
+// or that something else installed. It would otherwise keep whatever allowed-ips it holds, and receive
+// the traffic for them, while every surface says relayed. Under the peer-write lock and only while the
+// key is still untracked, because SetDirectPeers holds that lock from a peer's arm until it is tracked.
+func (t *Tunnel) removeOrphan(key string) {
+	t.peerWrite.Lock()
+	defer t.peerWrite.Unlock()
+	t.mu.Lock()
+	_, tracked := t.direct[key]
+	t.mu.Unlock()
+	if tracked || key == t.cfg.ServerPublicKeyHex {
+		return
+	}
+	_ = t.dev.IpcSet("public_key=" + key + "\nremove=true\n")
+}
+
+// restoreBoxRoute puts the box peer's default route back. Nothing in this package removes it; the relay
+// is the fallback for every peer, so it is restored rather than reported.
+func (t *Tunnel) restoreBoxRoute() {
+	_ = t.dev.IpcSet("public_key=" + t.cfg.ServerPublicKeyHex + "\nupdate_only=true\nallowed_ip=" +
+		boxDefaultRoute(t.cfg.Address) + "\n")
+}
+
+// holdsPrefix reports whether a peer's allowed-ips include want exactly.
+func holdsPrefix(allowed []netip.Prefix, want string) bool {
+	w, err := netip.ParsePrefix(want)
+	if err != nil {
+		return false
+	}
+	for _, p := range allowed {
+		if p == w {
+			return true
+		}
+	}
+	return false
+}
+
+// publishBeforeUnroute is the ordering every write that takes a routed /128 away from a peer keeps: the
+// record is published saying so first, and the device is written after. A reader in another process
+// (`whale ping`) that reads the record, measures, and reads it again then knows that an unchanged routed
+// period means the device held the /128 throughout, because any write of this package's that removed it
+// changed the record before it changed the device. A publish that fails removes the record instead, so
+// it cannot go on claiming the path; the device write goes ahead either way. The one removal this cannot
+// cover is one this package did not make, which the monitor finds on its next tick.
+func (t *Tunnel) publishBeforeUnroute() {
+	if !t.publishPaths() {
+		t.dropPaths()
+	}
 }
 
 // quietDirectPeer silences an unpromoted peer until the next window its train attends (quietDoc), and for
@@ -1009,9 +1621,12 @@ func (t *Tunnel) quietDirectPeer(p Peer, demoting bool) {
 	// for a demotion: that write is what withdraws the /128 from a path that stopped answering, and it
 	// must not wait for anything.
 	var rxNow uint64
+	var hsNow time.Time
 	fresh := false
-	if !demoting {
-		if dump, err := t.dev.IpcGet(); err == nil {
+	if dump, err := t.dev.IpcGet(); err == nil {
+		if demoting {
+			hsNow = parseHandshakeDump(dump)[p.PublicKeyHex]
+		} else {
 			rxNow, fresh = parseReceivedDump(dump)[p.PublicKeyHex]
 		}
 	}
@@ -1019,6 +1634,19 @@ func (t *Tunnel) quietDirectPeer(p Peer, demoting bool) {
 	d := t.direct[p.PublicKeyHex]
 	if d == nil || d.promoted {
 		t.mu.Unlock()
+		return
+	}
+	if demoting && !hsNow.IsZero() && !hsNow.Equal(d.lastHS) {
+		// A handshake completed after the tick decided to withdraw: the path answered both ways a moment
+		// ago, so its session is kept and only the /128 goes. The next tick sees the handshake and promotes
+		// again; wiping the session here would leave the far end, which completed the same handshake,
+		// routing this pair at a peer with no keypair. Nor is the end quiet, so it is not held. This narrows
+		// the gap to the moment between the read above and the write below; a handshake landing in that
+		// moment is wiped, and the far end lets go of it within its own dead-path window.
+		d.punch.holdUntil = time.Time{}
+		t.forgetHold(p.PublicKeyHex)
+		t.mu.Unlock()
+		_ = t.demoteDirectPeer(p)
 		return
 	}
 	if fresh && rxNow > d.rx && d.punch.deferQuiet(time.Now(), t.punchEvery) {
@@ -1033,7 +1661,21 @@ func (t *Tunnel) quietDirectPeer(p Peer, demoting bool) {
 		endpoint = cands[0].Endpoint
 	}
 	t.mu.Unlock()
-	_ = t.dev.IpcSet(quietDoc(cur, endpoint))
+	if err := t.dev.IpcSet(quietDoc(cur, endpoint)); err != nil || !demoting {
+		return
+	}
+	// The hold runs from the moment this end actually fell silent, which is this write, not the decision:
+	// the session kept the device sending until here, and a write that waited on the lock would otherwise
+	// eat into the far end's margin. The decision's hold (and the key's, for a re-arm that lands between
+	// the two) is the floor; this only ever lengthens it.
+	t.mu.Lock()
+	if t.direct[p.PublicKeyHex] == d && !d.promoted {
+		now := time.Now()
+		until := now.Add(t.holdLength(d.punch.opener, !d.punch.timed(), d.peer.Address))
+		d.punch.holdFor(until)
+		t.noteHold(p.PublicKeyHex, until, time.Time{}, now)
+	}
+	t.mu.Unlock()
 }
 
 // sourceOf names the evidence class of an endpoint that ended up carrying a path. An endpoint
@@ -1050,7 +1692,8 @@ func sourceOf(cands []Candidate, endpoint string) CandidateSource {
 
 // DirectPeers reports what is true on the device right now, for `whale status` and `whale ping`.
 // A peer that is armed but has never handshaked reports Promoted false and Path "relayed",
-// because that is what its traffic is actually doing.
+// because that is what its traffic is actually doing. So does a promoted peer whose /128 the device
+// has not been read holding: the report follows the device, not the decision.
 func (t *Tunnel) DirectPeers() []PeerState {
 	if t == nil {
 		return nil
@@ -1061,26 +1704,30 @@ func (t *Tunnel) DirectPeers() []PeerState {
 	for _, d := range t.direct {
 		path := "relayed"
 		endpoint := d.peer.Endpoint
-		if d.promoted {
+		if d.routed {
 			path = d.pathClass()
 			if d.punch != nil && d.punch.won {
 				endpoint = d.punch.winner.Endpoint
 			}
 		}
-		out = append(out, PeerState{
+		st := PeerState{
 			Address:  d.peer.Address,
 			Name:     d.peer.Name,
 			Path:     path,
 			Endpoint: endpoint,
-			Promoted: d.promoted,
+			Promoted: d.routed,
 			LastSeen: d.lastSeen,
-			Punch:    d.punch.info(d.promoted),
-		})
+			Punch:    d.punch.info(d.routed),
+		}
+		if d.routed {
+			st.RouteEpoch, st.RoutedSince = d.epoch, d.routedSince
+		}
+		out = append(out, st)
 	}
 	return out
 }
 
-// PathTo reports the path to one overlay address: the peer's class while it is promoted, and
+// PathTo reports the path to one overlay address: the peer's class while the device routes it, and
 // "relayed" for everything else - including an address we hold no peer for at all, which is the
 // honest answer, since the box is what carries it.
 func (t *Tunnel) PathTo(addr netip.Addr) string {
@@ -1090,7 +1737,7 @@ func (t *Tunnel) PathTo(addr netip.Addr) string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, d := range t.direct {
-		if d.peer.Address == addr && d.promoted {
+		if d.peer.Address == addr && d.routed {
 			return d.pathClass()
 		}
 	}

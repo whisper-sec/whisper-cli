@@ -21,7 +21,7 @@ import (
 
 // The box binds one WireGuard peer per /128, so two local commands that both bring up the same
 // agent replace each other's peer there. An enforced run that loses its peer fails closed (its kill
-// switch refuses everything after 180 s), but the better answer is for the second command to refuse
+// switch refuses everything after 210 s), but the better answer is for the second command to refuse
 // up front and say who holds the agent. So:
 //
 //   - `whisper run --enforce` holds an EXCLUSIVE lock on the agent's file for the whole run;

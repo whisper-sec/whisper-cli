@@ -335,19 +335,14 @@ func nsswitch(host string) string {
 }
 
 // sealDescriptors marks every descriptor above stderr close-on-exec, which covers anything
-// the CLI inherited without the flag, and refuses an IP socket on stdio: it would be a
-// connection in the host's namespace handed straight to the agent.
+// the CLI inherited without the flag, and refuses any socket on stdio but a unix one. A socket
+// there is handed to the agent as it is, made in the host's namespace: an IP socket is a
+// connection outside the tunnel, and a vsock, packet or TIPC socket is a way off the host that
+// seccomp, which only stops the agent making one, does not see. A unix socket (socket activation,
+// a supervisor's log stream) reaches only this host; a pipe, a terminal or a file is not a socket.
 func sealDescriptors() error {
-	if err := unix.CloseRange(3, math.MaxUint32, unix.CLOSE_RANGE_CLOEXEC); err != nil {
-		ents, derr := os.ReadDir("/proc/self/fd")
-		if derr != nil {
-			return errors.New("cannot seal inherited descriptors")
-		}
-		for _, e := range ents {
-			if fd, aerr := strconv.Atoi(e.Name()); aerr == nil && fd > 2 {
-				unix.CloseOnExec(fd)
-			}
-		}
+	if err := closeOnExecAboveStderr(); err != nil {
+		return err
 	}
 	for fd := 0; fd <= 2; fd++ {
 		var st unix.Stat_t
@@ -355,8 +350,30 @@ func sealDescriptors() error {
 			continue
 		}
 		dom, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_DOMAIN)
-		if err == nil && (dom == unix.AF_INET || dom == unix.AF_INET6) {
-			return fmt.Errorf("descriptor %d is a network socket in the host's namespace", fd)
+		if err != nil {
+			return fmt.Errorf("descriptor %d is a socket whose family cannot be read", fd)
+		}
+		if dom != unix.AF_UNIX {
+			return fmt.Errorf("descriptor %d is a socket of family %d made in the host's namespace; only a unix socket may be the agent's stdio", fd, dom)
+		}
+	}
+	return nil
+}
+
+// closeOnExecAboveStderr marks every descriptor above stderr close-on-exec. Go opens its own
+// descriptors with the flag but leaves the ones a process inherits alone, and exec passes those
+// on, so this is what keeps a descriptor this process was handed out of the processes it starts.
+func closeOnExecAboveStderr() error {
+	if err := unix.CloseRange(3, math.MaxUint32, unix.CLOSE_RANGE_CLOEXEC); err == nil {
+		return nil
+	}
+	ents, err := os.ReadDir("/proc/self/fd")
+	if err != nil {
+		return errors.New("cannot seal inherited descriptors")
+	}
+	for _, e := range ents {
+		if fd, aerr := strconv.Atoi(e.Name()); aerr == nil && fd > 2 {
+			unix.CloseOnExec(fd)
 		}
 	}
 	return nil

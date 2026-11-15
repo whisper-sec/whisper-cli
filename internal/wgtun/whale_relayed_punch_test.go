@@ -41,12 +41,26 @@ type natBind struct {
 	sentTo  map[string]time.Time
 	sends   map[string][]time.Time
 	dropped map[string]int
+	onClose func()
+	// cut is the sources this NAT drops whatever this node sent to them: a filter on one side that
+	// refuses one direction of a pair mid-session (a firewall rule, a mapping the NAT lost),.
+	cut map[string]bool
+	// kinds is every send per destination with its WireGuard message type (1 initiation, 2 response,
+	// 3 cookie, 4 transport), so a test can say not only when this node sent but what.
+	kinds map[string][]sentKind
+}
+
+// sentKind is one send: when, and the WireGuard message type in its first byte.
+type sentKind struct {
+	at  time.Time
+	typ byte
 }
 
 func newNatBind(life time.Duration) *natBind {
 	return &natBind{
 		Bind: conn.NewDefaultBind(), life: life,
 		sentTo: map[string]time.Time{}, sends: map[string][]time.Time{}, dropped: map[string]int{},
+		cut: map[string]bool{}, kinds: map[string][]sentKind{},
 	}
 }
 
@@ -55,8 +69,13 @@ func (n *natBind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	dst := ep.DstToString()
 	n.mu.Lock()
 	n.sentTo[dst] = now
-	for range bufs {
+	for _, b := range bufs {
 		n.sends[dst] = append(n.sends[dst], now)
+		var typ byte
+		if len(b) > 0 {
+			typ = b[0]
+		}
+		n.kinds[dst] = append(n.kinds[dst], sentKind{at: now, typ: typ})
 	}
 	n.mu.Unlock()
 	return n.Bind.Send(bufs, ep)
@@ -81,7 +100,7 @@ func (n *natBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 			n.mu.Lock()
 			for j := 0; j < cnt; j++ {
 				src := eps[j].DstToString()
-				if last, ok := n.sentTo[src]; !ok || now.Sub(last) > n.life {
+				if last, ok := n.sentTo[src]; !ok || now.Sub(last) > n.life || n.cut[src] {
 					sizes[j] = 0
 					n.dropped[src]++
 				}
@@ -91,6 +110,38 @@ func (n *natBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 		}
 	}
 	return out, actual, nil
+}
+
+// setOnClose installs a function the bind runs when the device closes it, before the sockets go.
+func (n *natBind) setOnClose(f func()) {
+	n.mu.Lock()
+	n.onClose = f
+	n.mu.Unlock()
+}
+
+// Close runs the onClose hook, if any, and then closes the sockets.
+func (n *natBind) Close() error {
+	n.mu.Lock()
+	f := n.onClose
+	n.mu.Unlock()
+	if f != nil {
+		f()
+	}
+	return n.Bind.Close()
+}
+
+// cutFrom drops everything from src from now on, and healFrom lets it through again: one direction of a
+// pair, refused on this side.
+func (n *natBind) cutFrom(src string) {
+	n.mu.Lock()
+	n.cut[src] = true
+	n.mu.Unlock()
+}
+
+func (n *natBind) healFrom(src string) {
+	n.mu.Lock()
+	delete(n.cut, src)
+	n.mu.Unlock()
 }
 
 func (n *natBind) sendsTo(dst string) []time.Time {
@@ -215,8 +266,11 @@ func peerSection(t *testing.T, tun *Tunnel, peerHex string) (present bool, keepa
 // fastOpts are the timings of a test: the production ratios, compressed.
 func fastOpts() Options {
 	return Options{
-		HealthInterval:  50 * time.Millisecond,
-		DeadAfter:       30 * time.Second,
+		HealthInterval: 50 * time.Millisecond,
+		// The box is re-handshaken only on rekey, every two minutes, so a dead-tunnel window shorter than that
+		// reads a live box as dead and re-opens the node's sockets in the middle of a test. Production's three
+		// minutes, then.
+		DeadAfter:       180 * time.Second,
 		DirectDeadAfter: 20 * time.Second,
 		PunchEvery:      200 * time.Millisecond,
 		PathStateDir:    PathStateOff,

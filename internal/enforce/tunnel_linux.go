@@ -31,11 +31,15 @@ const (
 	// handshakeWait bounds the bring-up. A box one RTT away completes a handshake in well
 	// under a second; ten seconds covers a lost initiation and its retransmit (every 5 s).
 	handshakeWait = 10 * time.Second
-	// deadAfter is when a silent tunnel is called dead. WireGuard itself stops sending on a
-	// session older than 180 s (REJECT_AFTER_TIME), and with a 25 s keepalive a live tunnel
-	// re-handshakes every two minutes, so a handshake older than this is a tunnel that is not
+	// deadAfter is when a silent tunnel is called dead: 210 s, WireGuard's REJECT_AFTER_TIME
+	// (180 s) plus one 25 s keepalive plus REKEY_TIMEOUT (5 s). A session this node initiated
+	// re-keys on its first keepalive after 120 s, but one the box initiated re-keys only on a
+	// packet the box receives between 165 s and 180 s, which an idle tunnel's keepalives can step
+	// over; the session expires and this node initiates again on its next keepalive, so a live
+	// tunnel can read a handshake of up to about 190 s. At 180 s the filter refused a live
+	// agent's connections for those seconds. A handshake older than 210 s is a tunnel that is not
 	// carrying, and the filter starts refusing instead of letting dials hang.
-	deadAfter   = 180 * time.Second
+	deadAfter   = 210 * time.Second
 	healthEvery = 2 * time.Second
 	// nudgeEvery is how often a dead tunnel is asked to try a fresh handshake.
 	nudgeEvery = 15 * time.Second
@@ -119,6 +123,7 @@ func startTunnel(cfg wgtun.Config, pol Policy, opts Options, place func(netip.Ad
 	f := NewFilter(pol)
 	dev := device.NewDevice(FilterTUN(ns.Dev, f), conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
 	fail := func(e error) (*Tunnel, error) {
+		ns.seal()   // before the TUN goes: its name is the next containment's once it is gone
 		dev.Close() // closes the TUN, which removes the interface
 		ns.Close()
 		return nil, e
@@ -298,7 +303,8 @@ func (t *Tunnel) nudge() {
 }
 
 // Stop closes the filter, the device and the namespace handle. The interface disappears with
-// the device, so anything still running inside has loopback and nothing else.
+// the device, so anything still running inside has loopback and nothing else. The handle is
+// sealed before the device closes the TUN (see Namespace.seal).
 func (t *Tunnel) Stop() {
 	if t == nil {
 		return
@@ -307,6 +313,7 @@ func (t *Tunnel) Stop() {
 		t.Filter.SetLive(false)
 		close(t.stop)
 		<-t.done
+		t.NS.seal()
 		t.dev.Close()
 		t.NS.Close()
 	})

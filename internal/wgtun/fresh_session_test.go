@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"golang.zx2c4.com/wireguard/device"
 )
 
 // A tunnel whose box no longer holds its peer has to ask for a fresh session.
@@ -20,9 +22,9 @@ import (
 // client), so it raises a flag the session's holder acts on.
 //
 // The flag keys on the box's clock, not on a count of our attempts. The box reaps a peer whose
-// last handshake is 180 s old and sweeps every 60 s, so once our last handshake is older than
-// both together the peer is gone whatever we do locally. A count restarts after a host sleeps;
-// the age of the last handshake does not.
+// last handshake is 210 s old once nothing has arrived from it for a minute, sweeping every
+// 60 s, so once our last handshake is past that window the peer is gone whatever we do locally.
+// A count restarts after a host sleeps; the age of the last handshake does not.
 
 var freshNow = time.Date(2026, 10, 23, 9, 0, 0, 0, time.UTC)
 
@@ -144,10 +146,27 @@ func TestHandshakeAge(t *testing.T) {
 }
 
 func TestTheReapWindowCoversTheBoxsReaper(t *testing.T) {
-	// The box reaps at 180 s of silence and sweeps every 60 s, so a peer can survive until 240 s.
-	// Asking before that would re-run a connect the box did not need.
-	if renewAfterSilence < 240*time.Second {
-		t.Fatalf("renewAfterSilence = %s is inside the box's reap window (180 s + a 60 s sweep)", renewAfterSilence)
+	// The box reaps a peer whose last handshake is 210 s old once a minute has passed with nothing
+	// from it, on a 60 s sweep. The last packet of a live tunnel can reach it about 190 s after the
+	// handshake, so a silent peer can survive until 310 s. Asking before that would re-run a
+	// connect the box did not need.
+	if renewAfterSilence < 310*time.Second {
+		t.Fatalf("renewAfterSilence = %s is inside the box's reap window (310 s)", renewAfterSilence)
+	}
+}
+
+func TestTheDeadlinesCoverAnIdleSessionTheBoxInitiated(t *testing.T) {
+	// The longest a live idle tunnel's handshake reads: the box initiated, its re-key window
+	// [REJECT_AFTER_TIME - KEEPALIVE_TIMEOUT - REKEY_TIMEOUT, REJECT_AFTER_TIME) was stepped over,
+	// and this node re-initiates on its first keepalive past REJECT_AFTER_TIME, one lost
+	// initiation later at worst. Taken from the WireGuard implementation this CLI runs.
+	const keepalive = 25 * time.Second
+	envelope := device.RejectAfterTime + keepalive + device.RekeyTimeout
+	if defaultDeadAfter < envelope {
+		t.Fatalf("defaultDeadAfter = %s calls a live idle tunnel dead (it can read up to %s)", defaultDeadAfter, envelope)
+	}
+	if renewAfterSilence <= defaultDeadAfter {
+		t.Fatalf("renewAfterSilence = %s must come after the tunnel is first called dead (%s)", renewAfterSilence, defaultDeadAfter)
 	}
 }
 

@@ -3,6 +3,8 @@
 
 package whale
 
+import "net/netip"
+
 // path.go is the ONE place that decides what the PATH column may say, for `whale
 // status` and `whale ping` alike. It exists because the tempting cell to print is the
 // one we cannot honour.
@@ -58,6 +60,16 @@ const (
 	// PathNoPath: a probe ran and nothing answered. On Whalenet today the usual cause
 	// is a pair split across two boxes, which has no path at all.
 	PathNoPath = "no path"
+	// PathEdge: a probe that left from this host's own address, outside any tunnel this CLI
+	// holds, was answered at Whisper's edge. The agent block is anycast, so the box
+	// nearest this host took it and answered through the node's tunnel or for the address
+	// itself, and nothing in that says how two nodes reach each other. It is never a claim
+	// about a path between nodes, which is why it is a word of its own and not "relayed".
+	PathEdge = "edge"
+	// PathUnknown: a probe that went through this host's tunnel and was answered, from a tunnel
+	// that publishes no path record this process can read (an installed service keeps its own).
+	// The packets took some path; this host cannot say which, and says so rather than guess.
+	PathUnknown = "unknown"
 	// PathDirectLocal: the two nodes share a private segment, so the packets go straight
 	// across it. No traversal was needed and none was done.
 	PathDirectLocal = "direct-local"
@@ -115,7 +127,25 @@ type Observation struct {
 	// from the record the tunnel publishes. Its zero value means nothing published one,
 	// which is not the same as a failure and is not rendered as one.
 	Punch PunchEvidence
+	// Vantage is where a measurement left from: VantageTunnel through this host's own tunnel,
+	// VantageHost from the host's own address, empty when nothing was measured.
+	Vantage string
+	// HostSource is the address a VantageHost probe left from, as this host's own routing picks
+	// it (invalid when it could not be learned). An agent address here means a tunnel this CLI
+	// does not hold carried the probe, a kernel interface most likely.
+	HostSource netip.Addr
+	// Changed is set when the tunnel's routing to this peer moved while a measurement ran, so its
+	// answers cannot all be placed on the direct path.
+	Changed bool
+	// Via is the /128 of the tunnel a VantageTunnel measurement went through.
+	Via string
 }
+
+// The two places a probe can leave from (Observation.Vantage).
+const (
+	VantageTunnel = "tunnel"
+	VantageHost   = "host"
+)
 
 // PathFor renders the PATH cell for one peer.
 func PathFor(o Observation) string {
@@ -128,6 +158,12 @@ func PathFor(o Observation) string {
 	if o.Measured && !o.Reachable {
 		return PathNoPath
 	}
+	if o.Measured && o.Vantage == VantageHost {
+		return PathEdge
+	}
+	if o.Measured && o.Vantage == VantageTunnel && !o.Punch.Published {
+		return PathUnknown
+	}
 	return PathRelayed
 }
 
@@ -137,7 +173,7 @@ func PathFor(o Observation) string {
 // are in the set because DirectPathAvailable is now true; they leave it again on their own if
 // that constant ever goes back to false, so the vocabulary can never outrun the build.
 func PathVocabulary() []string {
-	v := []string{PathRelayed, PathNoPath}
+	v := []string{PathRelayed, PathNoPath, PathEdge, PathUnknown}
 	if DirectPathAvailable {
 		v = append(v, pathDirect, PathDirectLocal, PathDirectPublic, PathDirectPunched)
 	}
@@ -156,5 +192,7 @@ func PathNote() string {
 		"the peer throughout, and the line under this table says so in those words - and a pair " +
 		"where BOTH ends sit behind a NAT that varies its port per destination still relays. A " +
 		"pair split across two boxes has no path at all. Nothing here is measured until you " +
-		"run `whisper whale ping <peer>`."
+		"run `whisper whale ping <peer>`, which measures through this host's own tunnel; a probe " +
+		"from a host with no tunnel shows `edge`, an answer from Whisper's edge that says nothing " +
+		"about the path between two nodes."
 }

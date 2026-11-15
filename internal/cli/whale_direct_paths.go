@@ -13,7 +13,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/whisper-sec/whisper-cli/internal/client"
 	"github.com/whisper-sec/whisper-cli/internal/wgtun"
 	"github.com/whisper-sec/whisper-cli/internal/whale"
 )
@@ -406,46 +405,6 @@ func int64Field(rec map[string]any, key string) (int64, bool) {
 		return n, err == nil
 	}
 	return 0, false
-}
-
-// whalePeerClass asks the control plane which first-step direct-path class, if any, applies to one
-// peer address. It returns "" for a relayed pair, for a pair the plane will not discuss, and for
-// every failure - no key, no network, a refused read - because a path we could not ask about is
-// not one we may claim. Every caller renders "" as `relayed`, which is the truth: the box is
-// what carries it.
-//
-// It costs one op:list per `whale ping`. That is the right trade for a command a person runs
-// interactively and reads the answer of; nothing on a packet path calls this.
-func whalePeerClass(ctx context.Context, c *client.Client, addr string) string {
-	if c == nil || c.Credential().IsZero() || addr == "" {
-		return ""
-	}
-	target, err := netip.ParseAddr(addr)
-	if err != nil {
-		return ""
-	}
-	env, err := c.Agents(ctx, "list", map[string]any{"kind": "whale", "view": "peers"})
-	if err != nil || env == nil || !env.Ok || env.Result == nil {
-		return ""
-	}
-	for _, rec := range env.Result.Records() {
-		item := rec
-		if m, ok := rec["item"].(map[string]any); ok {
-			item = m
-		}
-		if b, ok := item["self"].(bool); ok && b {
-			continue
-		}
-		got, perr := netip.ParseAddr(field(item, "address", "addr128"))
-		if perr != nil || got != target {
-			continue
-		}
-		if field(item, "endpoint") == "" {
-			return "" // the plane named this peer and said it is relayed
-		}
-		return field(item, "path")
-	}
-	return ""
 }
 
 // candidatesFromRow reads every endpoint a peer row offers, in whatever shape it offers them.

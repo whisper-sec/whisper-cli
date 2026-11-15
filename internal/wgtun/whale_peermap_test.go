@@ -124,8 +124,15 @@ func TestUapiConfig_ArmsDirectPeersWithoutRoutingAnythingToThem(t *testing.T) {
 	if !strings.Contains(doc, "endpoint=192.168.122.31:51820\n") {
 		t.Fatal("the direct peer's endpoint is missing")
 	}
-	if !strings.Contains(doc, fmt.Sprintf("persistent_keepalive_interval=%d\n", directKeepalive)) {
+	// This end is the higher address, the one that does not open the pair, so it punches a second slower and
+	// two trains that cross do not stay in step (untimedKeepalive); the lower address punches at the tunnel's.
+	if !strings.Contains(doc, fmt.Sprintf("persistent_keepalive_interval=%d\n", directKeepalive+1)) {
 		t.Fatal("the direct peer has no keepalive, so nothing would ever trigger its handshake")
+	}
+	lower := cfg
+	lower.Address = netip.MustParseAddr("2a04:2a01:3::1")
+	if !strings.Contains(uapiConfig(lower), fmt.Sprintf("persistent_keepalive_interval=%d\n", directKeepalive)) {
+		t.Fatal("the end that opens the pair does not punch at the tunnel's keepalive")
 	}
 	// ...and NOTHING is routed to it yet. A /128 on an unproven peer is a black hole, because
 	// WireGuard has no failover: a packet routed to a dead peer is dropped, not relayed.
@@ -319,7 +326,9 @@ func TestDirectPeer_PromotesOnARealHandshakeAndFallsBackToTheRelayWhenItDies(t *
 	if !waitFor(6*time.Second, func() bool { return tun.PathTo(peerIP) == "relayed" }) {
 		t.Fatalf("a dead direct path was never withdrawn - that /128 would black-hole (state: %+v)", tun.DirectPeers())
 	}
-	if routedTo(t, tun, other.pubHex, peerIP) {
+	// The report leads the device on a withdrawal by design (unroutePublish: the record says relayed
+	// before the write that takes the /128 away), so the device is given a moment to follow.
+	if !waitFor(time.Second, func() bool { return !routedTo(t, tun, other.pubHex, peerIP) }) {
 		t.Fatal("the /128 is still routed to the dead peer on the device")
 	}
 	if !boxStillHasDefaultRoute(t, tun) {
@@ -519,4 +528,22 @@ func waitFor(within time.Duration, cond func() bool) bool {
 		time.Sleep(50 * time.Millisecond)
 	}
 	return cond()
+}
+
+// TestUapiConfig_BringUpSkipsARowNamingThisNode: a bring-up peer row with this node's own address or own key
+// is never written to the device, the rules SetDirectPeers applies (bringUpPeers filters them first; this is
+// the second line).
+func TestUapiConfig_BringUpSkipsARowNamingThisNode(t *testing.T) {
+	priv := strings.Repeat("11", 32)
+	self := netip.MustParseAddr("2a04:2a01:4::9")
+	ownKey := Peer{Address: netip.MustParseAddr("2a04:2a01:4::7"), PublicKeyHex: publicKeyHexOf(priv), Endpoint: "192.168.122.31:51820"}
+	ownAddr := Peer{Address: self, PublicKeyHex: strings.Repeat("3d", 32), Endpoint: "192.168.122.32:51820"}
+	doc := uapiConfig(Config{PrivateKeyHex: priv, ServerPublicKeyHex: strings.Repeat("22", 32), Endpoint: "[::1]:51826",
+		Address: self, Peers: []Peer{ownKey, ownAddr}})
+	if strings.Contains(doc, "endpoint=192.168.122.31:51820") || strings.Contains(doc, "endpoint=192.168.122.32:51820") {
+		t.Fatalf("a row naming this node's own key or address was written to the device:\n%s", doc)
+	}
+	if !strings.Contains(doc, "public_key="+strings.Repeat("22", 32)+"\n") {
+		t.Fatal("the box peer is missing")
+	}
 }

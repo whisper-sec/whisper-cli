@@ -17,6 +17,12 @@ import (
 // whale_ping.go is `whisper whale ping <peer>`: a real round trip, and a plain statement
 // of what it proves.
 //
+// The round trip is taken THROUGH this host's own tunnel when it has one (whale_probe.go), so
+// it leaves from the node's /128 and takes the path the tunnel's device routes the peer on, and
+// the path it prints is read from that tunnel's record, before the first probe and after every
+// answer. A host with no tunnel probes from its own address and says so: that is an
+// answer from Whisper's edge, never a path between two nodes.
+//
 // The measurement itself lives in internal/whale/ping.go, including why it is a TCP
 // connect and not an ICMP echo, and why a refusal is a useful answer rather than a
 // failure. This file is the surface: Postel at the argument (an agent id, a /128, a
@@ -49,14 +55,20 @@ func newWhalePingCmd() *cobra.Command {
 			"back, which an echo drop cannot distinguish from a black hole. So the outcomes\n" +
 			"are `open`, `refused` (a path exists, nothing is listening), `no reply` (nothing\n" +
 			"came back) and `no route` (this host could not even send).\n\n" +
-			"PATH names what carried the packets. `relayed` is a Whisper box in the middle: tens\n" +
-			"of milliseconds, not tenths. `direct-local` means you and the peer share a segment\n" +
-			"and nothing was in the middle; `direct-public` means the peer was dialable as-is;\n" +
-			"`direct-punch` means a path was opened through a NAT by both ends handshaking at\n" +
-			"the endpoints a box observed them arriving from. A punch that fails costs latency\n" +
-			"and nothing else - the relay carries the peer throughout - and this command says so\n" +
-			"in those words. --until-direct waits only while a traversal is actually in flight,\n" +
-			"and otherwise returns at once and says which of the reasons it was.",
+			"The probe goes through this host's own Whisper tunnel, so it leaves from your node's\n" +
+			"/128 and takes the path your tunnel routes the peer on. PATH names what carried the\n" +
+			"packets, as your tunnel's device reports it before the first probe and after every\n" +
+			"answer. `relayed` is a Whisper box in the middle: tens of milliseconds, not tenths.\n" +
+			"`direct-local` means you and the peer share a segment and nothing was in the middle;\n" +
+			"`direct-public` means the peer was dialable as-is; `direct-punch` means a path was\n" +
+			"opened through a NAT by both ends handshaking at the endpoints a box observed them\n" +
+			"arriving from. A punch that fails costs latency and nothing else - the relay carries\n" +
+			"the peer throughout - and this command says so in those words.\n\n" +
+			"With no tunnel on this host the probe leaves from the host's own address and PATH is\n" +
+			"`edge`: Whisper's edge answered for that address, which says neither that the node is\n" +
+			"up nor how two nodes reach each other. --until-direct waits only while a traversal is\n" +
+			"actually in flight in this host's tunnel, and otherwise returns at once and says which\n" +
+			"of the reasons it was.",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cx, cancel := ctx()
@@ -68,33 +80,21 @@ func newWhalePingCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			probe := whale.NewNetProber(timeout)
 			human := !g.jsonOut && !g.quiet
-			// ask the control plane which first-step class, if any, applies to
-			// this pair. Empty on any failure, and empty renders as `relayed` - a path we
-			// could not ask about is not one we may claim.
-			class := whalePeerClass(cx, c, node.Addr.String())
-			// What THIS host's tunnel published about the path. It outranks the class above:
-			// the control plane offers a candidacy, the device reports an outcome, and only the
-			// second one knows whether the handshake landed.
-			evidence := readPathEvidence("").For(node.Addr.String())
-			liveClass := class
-			if evidence.Found {
-				liveClass = evidence.Class
-				if !evidence.Direct {
-					liveClass = ""
-				}
-			}
+			// Through this host's tunnel when it has one; the path is what that tunnel's device
+			// reports, read around every answer. The control plane's class is never asked: it is a
+			// candidacy, and a path that was offered is not a path the packets took.
+			probe, tunnel, source := whaleProbeVantage(timeout, node.Addr, "")
 			sum := whale.Ping(cx, node.Addr, whale.PingOptions{
-				Target:      firstNonBlank(node.Name, node.Target.Text),
-				Address:     node.Addr.String(),
-				Port:        port,
-				Count:       count,
-				DirectClass: class,
-				Evidence:    evidence,
+				Target:     firstNonBlank(node.Name, node.Target.Text),
+				Address:    node.Addr.String(),
+				Port:       port,
+				Count:      count,
+				Tunnel:     tunnel,
+				HostSource: source,
 			}, probe, func(a whale.Attempt) {
 				if human {
-					fmt.Fprintln(os.Stdout, pingAttemptLine(a, node, port, liveClass))
+					fmt.Fprintln(os.Stdout, pingAttemptLine(a, node, port))
 				}
 			})
 
@@ -112,7 +112,7 @@ func newWhalePingCmd() *cobra.Command {
 				}
 				whaleNote("%s", sum.Note)
 				if untilDirect {
-					renderUntilDirect(node, port, count, probe, sum, evidence)
+					renderUntilDirect(node, port, count, probe, sum, tunnel)
 				}
 			} else if g.quiet && sum.Answered > 0 {
 				fmt.Fprintf(os.Stdout, "%.1f\n", sum.MinMs)
@@ -139,18 +139,23 @@ func newWhalePingCmd() *cobra.Command {
 // pair whose train has been spent, or that was never offered an endpoint, says WHICH of those it
 // was rather than spinning on a path that is not coming. That distinction is the whole point of
 // the flag - a wait that can never end is the cruellest thing a diagnostic can do.
-func renderUntilDirect(node whaleNode, port, count int, probe whale.TCPProbe, sum whale.PingSummary, ev whale.PunchEvidence) {
+func renderUntilDirect(node whaleNode, port, count int, probe whale.TCPProbe, sum whale.PingSummary, tunnel *whale.PingTunnel) {
+	if tunnel == nil {
+		whaleNote("--until-direct: not waiting, because this host has no Whisper tunnel to measure " +
+			"through, and only a tunnel takes a direct path.")
+		return
+	}
 	if sum.Path != whale.PathRelayed && sum.Path != whale.PathNoPath {
 		whaleNote("--until-direct: already direct, so there was nothing to wait for.")
 		return
 	}
-	if !ev.InFlight() {
+	if ev := tunnel.Read(); !ev.InFlight() {
 		whaleNote("--until-direct: not waiting, because nothing is in flight for this peer. %s", sum.Why)
 		return
 	}
 	whaleNote("--until-direct: a direct path is being opened for this peer - waiting up to %s.",
 		whaleUntilDirectWait)
-	settled := waitForDirectPath(node.Addr.String(), whaleUntilDirectWait)
+	settled := waitForDirectPath(tunnel.Read, whaleUntilDirectWait)
 	if !settled.Direct {
 		obs := whale.Observation{Direct: settled.Direct, Class: settled.Class, Punch: settled}
 		whaleNote("--until-direct: %s", whale.ReasonFor(obs))
@@ -161,11 +166,11 @@ func renderUntilDirect(node whaleNode, port, count int, probe whale.TCPProbe, su
 	cx2, cancel2 := ctx()
 	defer cancel2()
 	again := whale.Ping(cx2, node.Addr, whale.PingOptions{
-		Target:   firstNonBlank(node.Name, node.Target.Text),
-		Address:  node.Addr.String(),
-		Port:     port,
-		Count:    count,
-		Evidence: settled,
+		Target:  firstNonBlank(node.Name, node.Target.Text),
+		Address: node.Addr.String(),
+		Port:    port,
+		Count:   count,
+		Tunnel:  tunnel,
 	}, probe, nil)
 	fmt.Fprintf(os.Stdout, "%d sent, %d answered, path %s", again.Sent, again.Answered, again.Path)
 	if again.Answered > 0 {
@@ -175,21 +180,26 @@ func renderUntilDirect(node whaleNode, port, count int, probe whale.TCPProbe, su
 	whaleNote("--until-direct: %s", again.Why)
 }
 
-// pingAttemptLine renders one attempt in ping(8)'s shape, naming the path taken rather
-// than leaving the reader to assume one.
-func pingAttemptLine(a whale.Attempt, node whaleNode, port int, class string) string {
+// pingAttemptLine renders one attempt in ping(8)'s shape, naming the path that attempt took
+// (whale.Ping places each answer on a path from the tunnel's own record) rather than leaving the
+// reader to assume one.
+func pingAttemptLine(a whale.Attempt, node whaleNode, port int) string {
 	who := node.Addr.String()
 	if node.Name != "" {
 		who = fmt.Sprintf("%s (%s)", node.Name, node.Addr)
 	}
-	// an answered probe took whatever path the plane says this pair has. An
-	// unrecognised or empty class is relayed, which is both the default and the truth for
-	// every pair the first step does not cover.
-	path := whale.PathForClass(class)
+	path := a.Path
+	if path == "" {
+		path = whale.PathRelayed
+	}
 	switch a.Outcome {
 	case whale.OutcomeOpen:
 		return fmt.Sprintf("reply from %s tcp/%d in %.1f ms  path=%s", who, port, a.RTTMs, path)
 	case whale.OutcomeRefused:
+		if path == whale.PathEdge {
+			return fmt.Sprintf("reply from %s tcp/%d in %.1f ms  path=%s  (refused: something at Whisper's edge answered for that address on %d)",
+				who, port, a.RTTMs, path, port)
+		}
 		return fmt.Sprintf("reply from %s tcp/%d in %.1f ms  path=%s  (refused: the path exists, nothing is listening on %d)",
 			who, port, a.RTTMs, path, port)
 	case whale.OutcomeNoRoute:

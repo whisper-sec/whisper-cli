@@ -4,6 +4,7 @@
 package wgtun
 
 import (
+	"net/netip"
 	"strings"
 	"testing"
 	"time"
@@ -270,7 +271,7 @@ func TestPunchTrain_EstablishedOnlyEverComesFromTheDevice(t *testing.T) {
 // leaving it on the relay - which is exactly the failure the two-phase install exists to avoid.
 func TestPunchDoc_NeverTouchesCryptokeyRouting(t *testing.T) {
 	p := Peer{PublicKeyHex: strings.Repeat("33", 32)}
-	doc := punchDoc(p, Candidate{Endpoint: "203.0.113.7:41234", Source: SourceObserved})
+	doc := punchDoc(p, Candidate{Endpoint: "203.0.113.7:41234", Source: SourceObserved}, directKeepalive)
 
 	if strings.Contains(doc, "allowed_ip") {
 		t.Fatalf("a punch wrote an allowed-ip:\n%s", doc)
@@ -345,4 +346,135 @@ func itoa(n int) string {
 		n /= 10
 	}
 	return string(b)
+}
+
+// TestPunchTrain_NothingIsSentInsideTheQuietHold is the quiet hold's train half: after a withdrawal
+// neither an untimed train nor a timed one sends before the hold ends, a window inside the hold is neither
+// joined nor counted as missed, and both resume once it is over, the untimed one at once.
+func TestPunchTrain_NothingIsSentInsideTheQuietHold(t *testing.T) {
+	now := time.Now()
+	hold := 40 * time.Second
+
+	untimed := newPunchTrain([]Candidate{{Endpoint: "a:1"}}, now)
+	untimed.holdFor(now.Add(hold))
+	for at := time.Duration(0); at < hold; at += time.Second {
+		if _, due := untimed.due(now.Add(at), time.Second); due {
+			t.Fatalf("an untimed attempt was due %v into a %v hold", at, hold)
+		}
+	}
+	if untimed.attempts != 0 || untimed.info(false).Phase != PunchResting {
+		t.Fatalf("a held train reads %+v, want resting", untimed.info(false))
+	}
+	if _, due := untimed.due(now.Add(hold), time.Second); !due {
+		t.Fatal("the untimed train did not resume the moment its hold ended")
+	}
+
+	// A timed train with windows at base+10s, +50s, +90s (timedTrain): the hold covers the windows at 10 s
+	// and 50 s, and the one at 90 s is the first attended, from the first rung of the backoff.
+	timed := timedTrain(now, true)
+	timed.holdFor(now.Add(55 * time.Second))
+	got := stepUntil(timed, now, 0, 55*time.Second, time.Second, 0)
+	if len(got) != 0 || timed.attended || timed.missed != 0 || timed.trains != 0 {
+		t.Fatalf("a timed train acted inside its hold: %v (attended %v missed %d trains %d)", got, timed.attended, timed.missed, timed.trains)
+	}
+	if act, _, at := timed.windowStep(now.Add(89*time.Second+500*time.Millisecond), time.Second, time.Second, 0); act != punchSend || !at.Equal(now.Add(90*time.Second)) {
+		t.Fatalf("the first window after the hold was not attended: %v at %v", act, at.Sub(now))
+	}
+
+	// A window whose send point falls just after the hold is scheduled at its own point, by the tick before
+	// it, not joined late by the tick after: the opener's half-window lead is what makes the punch land.
+	edge := timedTrain(now, true)
+	edge.holdFor(now.Add(9*time.Second + 800*time.Millisecond))
+	if act, _, at := edge.windowStep(now.Add(9*time.Second+500*time.Millisecond), time.Second, time.Second, 0); act != punchSend || !at.Equal(now.Add(10*time.Second)) {
+		t.Fatalf("a window opening just after the hold was not scheduled at its start: %v at %v", act, at.Sub(now))
+	}
+
+	// A hold is only ever lengthened, and a train started inside one carries it.
+	timed.holdFor(now.Add(time.Second))
+	if !timed.holding(now.Add(50 * time.Second)) {
+		t.Fatal("a shorter hold shortened the one running")
+	}
+	carried := newPunchTrainFor(Peer{Address: netip.MustParseAddr("2a04:2a01:4::b"), Candidates: []Candidate{{Endpoint: "a:1"}}},
+		netip.MustParseAddr("2a04:2a01:4::a"), now, punchCarry{holdUntil: now.Add(hold)}, directRearmAfter)
+	if _, due := carried.due(now.Add(time.Second), time.Second); due || !carried.holding(now.Add(hold-time.Millisecond)) {
+		t.Fatal("a train started inside a hold did not keep it")
+	}
+}
+
+// TestQuietHold_OutlastsTheFarEndsDetection pins the invariant the hold rests on. The far end lets go of
+// its half once nothing has arrived for directDeadAfter, which it notices on a monitor tick, so the hold
+// must outlast the dead-path window and two ticks with room, at the production defaults and with a slow
+// monitor alike.
+func TestQuietHold_OutlastsTheFarEndsDetection(t *testing.T) {
+	for _, tn := range []*Tunnel{
+		{},
+		{directDead: 20 * time.Second, healthEvery: 15 * time.Second},
+		{directDead: 3 * time.Second, healthEvery: 50 * time.Millisecond},
+	} {
+		dead, tick := orDur(tn.directDead, directDeadAfter), orDur(tn.healthEvery, 5*time.Second)
+		if hold := tn.quietHold(); hold < dead+2*tick+tick/2 {
+			t.Fatalf("dead %v, tick %v: a hold of %v does not outlast the far end's detection with room", dead, tick, hold)
+		}
+	}
+	if (&Tunnel{}).quietHold() != 40*time.Second {
+		t.Fatalf("the production hold is %v, want 40s", (&Tunnel{}).quietHold())
+	}
+	// After a path cut both ways, with the two ends withdrawing in one tick, the opener's first untimed
+	// attempt comes first by at least half a punch period: the jitter is the pair's, so it is the same at
+	// both ends, and each end takes its first attempt on the first tick after its hold, up to a tick late.
+	// The two ends of one pair compute the same jitter; a timed train gets no difference (its window orders
+	// the two ends).
+	lo, hi := netip.MustParseAddr("2a04:2a01:4::a"), netip.MustParseAddr("2a04:2a01:4::b")
+	for _, tn := range []*Tunnel{
+		{cfg: Config{Address: lo}},
+		{cfg: Config{Address: lo}, directDead: 4 * time.Second, healthEvery: 50 * time.Millisecond, punchEvery: 200 * time.Millisecond},
+		{cfg: Config{Address: lo}, directDead: 4 * time.Second, healthEvery: time.Second, punchEvery: time.Second},
+	} {
+		far := &Tunnel{cfg: Config{Address: hi}, directDead: tn.directDead, healthEvery: tn.healthEvery, punchEvery: tn.punchEvery}
+		tick, period := orDur(tn.healthEvery, 5*time.Second), orDur(tn.punchEvery, punchPeriod)
+		// The opener withdraws up to a tick after the other end and takes its first attempt up to a tick after
+		// its hold; the other end, at the earliest, a tick before it and on the dot.
+		openerLatest := tn.holdLength(true, true, hi) + tick
+		other := far.holdLength(false, true, lo) - tick
+		if gap := other - openerLatest; gap < period/2 {
+			t.Fatalf("tick %v: the other end's first attempt can come only %v after the opener's, want half a punch period", tick, gap)
+		}
+		// keepHeard keeps every gap between two sends at kickEvery and a tick, which the far end must see well
+		// inside its window, less the tick on which it notices.
+		if dead := orDur(tn.directDead, directDeadAfter); tn.kickEvery()+tick > dead-tick-tick/2 {
+			t.Fatalf("tick %v, window %v: keepHeard's gap of %v and a tick leaves the far end no margin", tick, dead, tn.kickEvery())
+		}
+		if tn.holdLength(true, false, hi) != far.holdLength(false, false, lo) {
+			t.Fatal("the two ends of a timed pair hold differently, which their window does not need")
+		}
+	}
+	for _, rank := range []uint64{0, 1, 1 << 40, ^uint64(0)} {
+		if j := holdJitter(40*time.Second, rank); j < 0 || j >= 5*time.Second {
+			t.Fatalf("a jitter of %v is outside [0, 5s)", j)
+		}
+	}
+}
+
+// TestPunchTrain_TheKeepaliveAnUntimedTrainPunchesWith: one second more at the end that does not open the
+// pair, the tunnel's own everywhere else.
+func TestPunchTrain_TheKeepaliveAnUntimedTrainPunchesWith(t *testing.T) {
+	now := time.Now()
+	lo, hi := netip.MustParseAddr("2a04:2a01:4::a"), netip.MustParseAddr("2a04:2a01:4::b")
+	untimed := func(self, peer netip.Addr) *punchTrain {
+		return newPunchTrainFor(Peer{Address: peer, Candidates: []Candidate{{Endpoint: "a:1"}}}, self, now, punchCarry{}, directRearmAfter)
+	}
+	for _, tc := range []struct {
+		name string
+		tr   *punchTrain
+		want int
+	}{
+		{"no train", nil, 5},
+		{"a timed train", timedTrain(now, false), 5},
+		{"an untimed train at the opener", untimed(lo, hi), 5},
+		{"an untimed train at the other end", untimed(hi, lo), 6},
+	} {
+		if got := tc.tr.keepalive(5); got != tc.want {
+			t.Errorf("%s: keepalive %d, want %d", tc.name, got, tc.want)
+		}
+	}
 }

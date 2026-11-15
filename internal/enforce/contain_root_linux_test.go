@@ -8,6 +8,7 @@ package enforce
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -17,12 +18,14 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"testing"
 	"time"
 
 	"golang.org/x/sys/unix"
+	"golang.zx2c4.com/wireguard/tun"
 )
 
 // contain_root_linux_test.go runs a real containment as root: a real process, running as nobody,
@@ -92,8 +95,18 @@ func containHelper() {
 				unix.Close(fd)
 			}
 			answer(err)
+		case "listenaddr": // the escape tests' listener, read back with the port the kernel gave it
+			addr, err := listenerAddr()
+			if err != nil {
+				answer(err)
+			} else {
+				say("ok " + addr)
+			}
 		case "exit":
 			os.Exit(0)
+		default:
+			// The escape attempts (contain_escape_root_linux_test.go).
+			answer(escapeCommand(f))
 		}
 	}
 	os.Exit(0)
@@ -139,8 +152,34 @@ func (h *helper) async(line string) chan string {
 	return ch
 }
 
+// socketsOf lists the sockets in pid's descriptor table, as "fd -> socket:[inode]".
+func socketsOf(t *testing.T, pid int) []string {
+	t.Helper()
+	dir := fmt.Sprintf("/proc/%d/fd", pid)
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("cannot list pid %d's descriptors: %v", pid, err)
+	}
+	var out []string
+	for _, e := range ents {
+		if target, err := os.Readlink(filepath.Join(dir, e.Name())); err == nil && strings.HasPrefix(target, "socket:[") {
+			out = append(out, e.Name()+" -> "+target)
+		}
+	}
+	return out
+}
+
+// startHelper starts the process the containment tests contain, holding exactly the sockets the
+// test gives it. The test process's descriptors are made close-on-exec first, as init makes its
+// own before the agent starts: a runner that hands the test binary a socket without the flag (a
+// VM runner's vsock to its host, for one) would hand it to the helper too, and Contain would
+// then rightly refuse the helper over a family no route reaches, or cut an IP socket that is the
+// runner's and not the helper's.
 func startHelper(t *testing.T, peer string) *helper {
 	t.Helper()
+	if err := closeOnExecAboveStderr(); err != nil {
+		t.Fatalf("cannot keep the test's descriptors out of the helper: %v", err)
+	}
 	cmd := exec.Command("/proc/self/exe", containHelperArg)
 	cmd.Env = []string{"CONTAIN_PEER=" + peer}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 65534, Gid: 65534}}
@@ -160,10 +199,12 @@ func startHelper(t *testing.T, peer string) *helper {
 
 // peerNS is the outside world: a namespace on a veth pair with a listener that counts what it gets.
 type peerNS struct {
-	addr     string
-	hostIf   string
-	accepted atomic.Int32
-	bytes    atomic.Int32
+	ns        string // the namespace's name under /run/netns
+	addr      string
+	hostIf    string
+	accepted  atomic.Int32
+	bytes     atomic.Int32
+	datagrams atomic.Int32 // what reached the UDP socket on the same address and port
 }
 
 func startPeer(t *testing.T) *peerNS {
@@ -172,7 +213,7 @@ func startPeer(t *testing.T) *peerNS {
 		t.Skip("needs iproute2 (ip) to build the peer namespace")
 	}
 	name := fmt.Sprintf("wct%d", os.Getpid())
-	p := &peerNS{hostIf: "wctA" + fmt.Sprint(os.Getpid()%1000)}
+	p := &peerNS{ns: name, hostIf: "wctA" + fmt.Sprint(os.Getpid()%1000)}
 	peerIf := "wctB" + fmt.Sprint(os.Getpid()%1000)
 	run := func(args ...string) {
 		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
@@ -191,33 +232,76 @@ func startPeer(t *testing.T) *peerNS {
 	run("-n", name, "link", "set", "lo", "up")
 
 	lnCh := make(chan net.Listener, 1)
+	pcCh := make(chan net.PacketConn, 1)
 	go func() {
 		runtime.LockOSThread() // never unlocked: the thread dies inside the peer namespace
 		fd, err := unix.Open("/run/netns/"+name, unix.O_RDONLY|unix.O_CLOEXEC, 0)
-		if err != nil || unix.Setns(fd, unix.CLONE_NEWNET) != nil {
+		if err != nil {
+			lnCh <- nil
+			return
+		}
+		// Closed once entered, so `ip netns del` in the cleanup really ends the namespace.
+		err = unix.Setns(fd, unix.CLONE_NEWNET)
+		unix.Close(fd)
+		if err != nil {
 			lnCh <- nil
 			return
 		}
 		ln, err := net.Listen("tcp4", "10.203.77.2:0")
 		if err != nil {
-			ln = nil
+			lnCh <- nil
+			pcCh <- nil
+			return
+		}
+		pc, err := net.ListenPacket("udp4", ln.Addr().String())
+		if err != nil {
+			pc = nil
 		}
 		lnCh <- ln
+		pcCh <- pc
 	}()
-	ln := <-lnCh
-	if ln == nil {
+	ln, pc := <-lnCh, <-pcCh
+	if ln == nil || pc == nil {
+		if ln != nil {
+			ln.Close()
+		}
 		t.Fatal("could not listen in the peer namespace")
 	}
-	t.Cleanup(func() { ln.Close() })
 	p.addr = ln.Addr().String()
+	var mu sync.Mutex
+	var conns []net.Conn
+	ended := false
+	var readers sync.WaitGroup
+	readers.Add(2)
 	go func() {
+		defer readers.Done()
+		b := make([]byte, 64)
+		for {
+			if _, _, err := pc.ReadFrom(b); err != nil {
+				return
+			}
+			p.datagrams.Add(1)
+		}
+	}()
+	go func() {
+		defer readers.Done()
 		for {
 			c, err := ln.Accept()
 			if err != nil {
 				return
 			}
 			p.accepted.Add(1)
+			mu.Lock()
+			if ended { // accepted as the test ended: nobody would close it
+				mu.Unlock()
+				c.Close()
+				return
+			}
+			conns = append(conns, c)
+			mu.Unlock()
+			readers.Add(1)
 			go func() {
+				defer readers.Done()
 				b := make([]byte, 64)
 				for {
 					n, err := c.Read(b)
@@ -229,6 +313,19 @@ func startPeer(t *testing.T) *peerNS {
 			}()
 		}
 	}()
+	// The listener and every accepted connection are closed, and their goroutines waited for,
+	// when the test ends: nothing of the peer outlives it.
+	t.Cleanup(func() {
+		ln.Close()
+		pc.Close()
+		mu.Lock()
+		ended = true
+		for _, c := range conns {
+			c.Close()
+		}
+		mu.Unlock()
+		readers.Wait()
+	})
 	return p
 }
 
@@ -253,14 +350,51 @@ func needCgroup2(t *testing.T) string {
 // hostTUN brings up the containment's device and reads what passes its filter.
 func hostTUN(t *testing.T) (*Namespace, chan []byte) {
 	t.Helper()
-	ns, err := CreateHostDevice(tSelf)
+	return hostTUNAs(t, tSelf)
+}
+
+// hostTUNAs is hostTUN for the agent self: what it reads is what would be encrypted to Whisper as
+// that agent's traffic.
+func hostTUNAs(t *testing.T, self netip.Addr) (*Namespace, chan []byte) {
+	t.Helper()
+	ns, sent, _ := hostTUNRaw(t, self)
+	return ns, sent
+}
+
+// tapTUN hands a copy of every packet the device delivers to raw, before any filter sees it.
+type tapTUN struct {
+	tun.Device
+	raw chan []byte
+}
+
+func (d *tapTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
+	n, err := d.Device.Read(bufs, sizes, offset)
+	for i := 0; i < n; i++ {
+		if sizes[i] > 0 {
+			select {
+			case d.raw <- append([]byte(nil), bufs[i][offset:offset+sizes[i]]...):
+			default:
+			}
+		}
+	}
+	return n, err
+}
+
+// hostTUNRaw is hostTUNAs that also returns everything that entered the device at all (raw), which
+// is what the kernel let in, before the tunnel's own filter.
+func hostTUNRaw(t *testing.T, self netip.Addr) (*Namespace, chan []byte, chan []byte) {
+	t.Helper()
+	ns, err := CreateHostDevice(self)
 	if err != nil {
 		t.Fatalf("CreateHostDevice: %v", err)
 	}
 	t.Cleanup(ns.Close)
-	f := NewFilter(Policy{Self: tSelf, Resolvers: []netip.Addr{tResolver}, NAT64: tPrefix})
+	t.Logf("tunnel device %s for %s: slot %d, generation %d, mark %#x, IPv4 carried %v %s", ns.host.Name, self,
+		ns.host.Slot, ns.host.Gen, ns.host.Mark, ns.host.CarryV4, ns.host.V4Note)
+	f := NewFilter(Policy{Self: self, Resolvers: []netip.Addr{tResolver}, NAT64: tPrefix})
 	f.SetLive(true)
-	ft := FilterTUN(ns.Dev, f).(*filteredTUN)
+	raw := make(chan []byte, 64)
+	ft := FilterTUN(&tapTUN{Device: ns.Dev, raw: raw}, f).(*filteredTUN)
 	sent := make(chan []byte, 64)
 	go func() {
 		bufs := [][]byte{make([]byte, 4096)}
@@ -276,7 +410,7 @@ func hostTUN(t *testing.T) (*Namespace, chan []byte) {
 			}
 		}
 	}()
-	return ns, sent
+	return ns, sent, raw
 }
 
 func waitTCP6(t *testing.T, sent chan []byte, dst netip.Addr) []byte {
@@ -323,8 +457,19 @@ func TestContainARunningProcess(t *testing.T) {
 		}
 	}()
 
+	// A descriptor of the runner's, as the test binary may inherit one: a socket of a family no
+	// route reaches, open without close-on-exec. The helper must not get it.
+	stray, err := unix.Socket(unix.AF_PACKET, unix.SOCK_RAW, 0)
+	if err != nil {
+		t.Fatalf("cannot open the stray packet socket: %v", err)
+	}
+	defer unix.Close(stray)
+
 	h := startHelper(t, peer.addr)
 	pid := h.cmd.Process.Pid
+	if socks := socketsOf(t, pid); len(socks) != 1 {
+		t.Fatalf("the helper must hold only its connection to the peer, it holds %v", socks)
+	}
 	before := cgroupOf(t, pid)
 	if got := h.do(t, "write"); got != "ok" {
 		t.Fatalf("before containment the existing connection must work: %s", got)
@@ -342,8 +487,8 @@ func TestContainARunningProcess(t *testing.T) {
 		}
 	}()
 	t.Logf("contained %v: %s", c.Members, c.Sockets)
-	if c.Sockets.Cut < 1 {
-		t.Fatalf("the existing connection to the peer must be cut, report %s", c.Sockets)
+	if c.Sockets != (SocketReport{Cut: 1}) {
+		t.Fatalf("the helper's one connection, to the peer, must be cut and nothing else touched, report %s", c.Sockets)
 	}
 	if cg := cgroupOf(t, pid); !strings.HasPrefix(cg, "/"+ContainParent+"/") {
 		t.Fatalf("the process is in %s, not in the containment", cg)
@@ -441,16 +586,70 @@ func TestHostDeviceDialUsesTheContainedRoute(t *testing.T) {
 	needRoot(t)
 	ns, sent := hostTUN(t)
 	far := netip.MustParseAddr("2606:4700:4700::1001")
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	done := make(chan struct{})
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
+		defer close(done)
 		if c, err := ns.DialContext(ctx, "tcp", "["+far.String()+"]:443"); err == nil {
 			c.Close()
 		}
 	}()
+	t.Cleanup(func() { cancel(); <-done })
 	syn := waitTCP6(t, sent, far)
 	if src := addr16(syn[8:24]); src != tSelf {
 		t.Fatalf("the marked dial left from %s, not %s", src, tSelf)
+	}
+	// Closed, the device's way out is refused at once, with the dial above still in flight.
+	ns.Close()
+	if _, err := ns.DialContext(context.Background(), "tcp", "["+far.String()+"]:443"); !errors.Is(err, errNamespaceClosed) {
+		t.Fatalf("a dial through a closed host device must be refused, got %v", err)
+	}
+}
+
+// The host dial binds the device's index, not its name: with the name of a device that exists and
+// an index nothing holds, the dial reaches nothing, and with that device's own index the same
+// dial connects (the control, so the failure is the index and nothing else).
+func TestHostDialBindsTheIndexNotTheName(t *testing.T) {
+	needRoot(t)
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			c.Close()
+		}
+	}()
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skip("no loopback interface here")
+	}
+	open := func(fn func() error) error { return fn() }
+	gate, err := attachRootGate(markFor(1), lo.Index, 1)
+	if err != nil {
+		t.Skipf("no gate on the root cgroup here: %v", err)
+	}
+	defer gate.detach()
+	dial := func(index int) error {
+		hr := HostRoute{Name: "lo", Index: index, Gen: 1, Mark: markFor(1), CarryV4: true, gate: gate}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		c, err := hr.dial(ctx, "tcp", ln.Addr().String(), "127.0.0.1", open)
+		if c != nil {
+			c.Close()
+		}
+		return err
+	}
+	if err := dial(lo.Index); err != nil {
+		t.Fatalf("control: bound to lo's own index the dial must connect, got %v", err)
+	}
+	if err := dial(1 << 30); err == nil {
+		t.Fatal("bound to an index nothing holds, the dial connected: it was bound by name")
 	}
 }
 

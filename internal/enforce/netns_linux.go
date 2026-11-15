@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"sync"
 
 	"golang.org/x/sys/unix"
 	"golang.zx2c4.com/wireguard/tun"
@@ -38,7 +39,6 @@ const v4MTU = minMTU - 20
 
 // Namespace is an agent's network namespace and the TUN device inside it.
 type Namespace struct {
-	fd        int    // the namespace, held open by this handle
 	Inode     uint64 // the namespace's inode, which init checks itself against
 	HostInode uint64 // the host namespace's, which init checks it is NOT in
 	Dev       tun.Device
@@ -46,7 +46,24 @@ type Namespace struct {
 	// is no namespace to enter, fd is -1, and a socket reaches the device only by carrying the
 	// route's mark.
 	host *HostRoute
+
+	// mu orders every way in against Close. A thread entering the namespace takes a descriptor of
+	// its own under it, and Close marks the handle closed and releases fd under it, so nothing ever
+	// enters through a number Close has already freed, which the next open in this process could
+	// have been handed for some other file. A host device's dial pins its socket under it too.
+	mu       sync.Mutex
+	fd       int  // the namespace, held open by this handle; -1 for a host device and after Close
+	closed   bool // set by seal (and so by Close); from then on every way in is refused
+	released bool // set by Close once the device and fd are let go
+
+	// beforeEnter, when set, runs on the entering thread between taking its descriptor and setns.
+	// Tests set it on a handle of their own to land a Close at exactly that moment; it is a field
+	// and not a package variable so that no other handle's threads ever read it.
+	beforeEnter func()
 }
+
+// errNamespaceClosed is the answer to any way into a namespace after Close.
+var errNamespaceClosed = errors.New("enforce: the agent's namespace is already closed")
 
 // HostRoute returns the routing of a host-namespace device, or nil for an agent namespace.
 func (n *Namespace) HostRoute() *HostRoute { return n.host }
@@ -101,7 +118,7 @@ func buildNamespace(self netip.Addr) (*Namespace, error) {
 		unix.Close(fd)
 		return nil, errors.New("enforce: the new network namespace could not be confirmed")
 	}
-	dev, err := openTUN(IfName)
+	dev, err := openTUN(IfName, 0)
 	if err != nil {
 		unix.Close(fd)
 		return nil, err
@@ -120,8 +137,10 @@ func buildNamespace(self netip.Addr) (*Namespace, error) {
 // openTUN creates the TUN device in the calling thread's namespace. It is opened without
 // IFF_VNET_HDR, so every read is one whole packet with its checksums computed: the filter in
 // front of it sees exactly what will be encrypted, never a segmentation offload it would
-// have to reason about.
-func openTUN(name string) (tun.Device, error) {
+// have to reason about. A non-zero admit attaches the admission program for that mark before the
+// device has an address or a route, so not one packet reaches it unfiltered (hostroute_linux.go).
+// The namespace's own device needs none: nothing but the agent lives in its namespace.
+func openTUN(name string, admit uint32) (tun.Device, error) {
 	nfd, err := unix.Open("/dev/net/tun", unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("enforce: cannot open /dev/net/tun (is the tun module loaded?): %w", err)
@@ -135,6 +154,12 @@ func openTUN(name string) (tun.Device, error) {
 	if err := unix.IoctlIfreq(nfd, unix.TUNSETIFF, ifr); err != nil {
 		unix.Close(nfd)
 		return nil, fmt.Errorf("enforce: cannot create the tunnel interface: %w", err)
+	}
+	if admit != 0 {
+		if err := attachAdmission(nfd, admit); err != nil {
+			unix.Close(nfd)
+			return nil, err
+		}
 	}
 	if err := unix.SetNonblock(nfd, true); err != nil {
 		unix.Close(nfd)
@@ -181,22 +206,76 @@ func configure(self netip.Addr) error {
 	return nil
 }
 
+// whileOpen runs fn under the lock Close takes, or refuses once Close has run. Whatever fn does
+// therefore happens wholly before Close or not at all.
+func (n *Namespace) whileOpen(fn func() error) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
+		return errNamespaceClosed
+	}
+	return fn()
+}
+
+// enterHandle returns a duplicate of the namespace descriptor that belongs to the caller alone.
+// It refers to the namespace itself, not to a number in this process's table, so Close can
+// release its own at any moment and the caller still enters exactly this namespace.
+func (n *Namespace) enterHandle() (int, error) {
+	fd := -1
+	err := n.whileOpen(func() error {
+		if n.fd < 0 {
+			return errors.New("enforce: this tunnel's device is in the host namespace; there is no agent namespace to enter")
+		}
+		var derr error
+		if fd, derr = unix.FcntlInt(uintptr(n.fd), unix.F_DUPFD_CLOEXEC, 0); derr != nil {
+			return fmt.Errorf("enforce: cannot hold the agent's namespace: %w", derr)
+		}
+		return nil
+	})
+	return fd, err
+}
+
 // run executes fn on a fresh thread inside the namespace. The thread is discarded afterwards.
+// The thread enters through a descriptor of its own (enterHandle) and closes it once it is in;
+// the inode check stays as the last word on where it landed.
 func (n *Namespace) run(fn func() error) error {
+	fd, err := n.enterHandle()
+	if err != nil {
+		return err
+	}
+	hook := n.beforeEnter
 	ch := make(chan error, 1)
 	go func() {
 		runtime.LockOSThread() // never unlocked: this thread ends with this goroutine
-		if err := unix.Setns(n.fd, unix.CLONE_NEWNET); err != nil {
-			ch <- fmt.Errorf("enforce: cannot enter the agent's namespace: %w", err)
+		answered := false
+		answer := func(err error) { answered = true; ch <- err }
+		// A goroutine that ends without answering (runtime.Goexit) must not leave run waiting.
+		defer func() {
+			if !answered {
+				ch <- errors.New("enforce: the thread inside the agent's namespace ended without an answer")
+			}
+		}()
+		if err := enterThrough(fd, hook); err != nil {
+			answer(fmt.Errorf("enforce: cannot enter the agent's namespace: %w", err))
 			return
 		}
 		if ino, err := nsInode(); err != nil || ino != n.Inode {
-			ch <- errors.New("enforce: entered the wrong network namespace")
+			answer(errors.New("enforce: entered the wrong network namespace"))
 			return
 		}
-		ch <- fn()
+		answer(fn())
 	}()
 	return <-ch
+}
+
+// enterThrough moves the calling thread into the namespace fd names and closes fd, whatever
+// happens on the way.
+func enterThrough(fd int, hook func()) error {
+	defer unix.Close(fd)
+	if hook != nil {
+		hook()
+	}
+	return unix.Setns(fd, unix.CLONE_NEWNET)
 }
 
 // DialContext opens a connection from inside the namespace, so it leaves exactly as the
@@ -211,7 +290,7 @@ func (n *Namespace) DialContext(ctx context.Context, network, addr string) (net.
 		return nil, errors.New("enforce: dial inside the namespace needs an IP literal")
 	}
 	if n.host != nil {
-		return n.host.dial(ctx, network, addr, host)
+		return n.host.dial(ctx, network, addr, host, n.whileOpen)
 	}
 	var c net.Conn
 	err = n.run(func() error {
@@ -239,20 +318,53 @@ func (n *Namespace) Interfaces() ([]string, error) {
 	return names, err
 }
 
-// Close releases the device and the handle. With both gone the kernel removes the namespace
-// once the last process inside it has exited.
+// seal refuses every way in from now on and, for a host device, removes the rules that route its
+// mark, while the device still holds its name. Whoever closes the TUN first must seal first: a
+// closed TUN frees its name, and with it the slot, mark and table, for the next containment on
+// the host, and neither a late dial of this one nor this one's rule removal may land on that.
+// It is safe to call more than once and from any goroutine.
+func (n *Namespace) seal() {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.sealLocked()
+}
+
+func (n *Namespace) sealLocked() {
+	if n.closed {
+		return
+	}
+	n.closed = true
+	if n.host != nil {
+		n.host.removeRules()
+	}
+}
+
+// Close seals the handle, then releases the device and the namespace descriptor. With both gone
+// the kernel removes the namespace once the last process inside it has exited. It is safe to call
+// more than once and from any goroutine, also while another is entering the namespace: a thread
+// already on its way in holds its own descriptor, and every way in that starts after Close (or
+// seal) is refused.
 func (n *Namespace) Close() {
 	if n == nil {
 		return
 	}
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.sealLocked()
+	if n.released {
+		return
+	}
+	n.released = true
 	if n.Dev != nil {
 		n.Dev.Close()
-	}
-	if n.host != nil {
-		n.host.removeRules()
 	}
 	if n.fd >= 0 {
 		unix.Close(n.fd)
 		n.fd = -1
+	}
+	// A host device's gate on the root cgroup goes last, once nothing can enter the device: until
+	// then it is what keeps a socket that carries the mark, and is not the containment's, out.
+	if n.host != nil {
+		n.host.gate.detach()
 	}
 }

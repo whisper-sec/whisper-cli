@@ -6,8 +6,10 @@
 package enforce
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,12 +27,9 @@ func TestSlotNamesEverythingTheContainmentOwns(t *testing.T) {
 	if err != nil || n != 7 {
 		t.Fatalf("slot %d %v", n, err)
 	}
-	hr := routeForSlot("wsc7", 31, 7)
-	if hr.Mark != hostMarkBase|7 || hr.Table != hostTableBase+7 || hr.Prio != hostRulePrio+7 {
+	hr := routeFor("wsc7", 31, 7, 42)
+	if hr.Mark != markFor(42) || hr.Gen != 42 || hr.Table != hostTableBase+7 || hr.Prio != hostRulePrio+7 {
 		t.Fatalf("route %+v", hr)
-	}
-	if hr.Mark&0xff0000 == 0x080000 {
-		t.Fatal("the mark must not carry the byte Tailscale's rules match")
 	}
 	for _, bad := range []string{"wsp0", "wsc", "wsc-1", "wsc256", "eth0"} {
 		if _, err := slotOf(bad); err == nil {
@@ -52,7 +51,7 @@ func TestV4ReasonRefusesWhatWouldDropOrCollide(t *testing.T) {
 }
 
 func TestRuleBodyIsAFwmarkLookup(t *testing.T) {
-	b := ruleBody(unix.AF_INET6, 4303, 0x77630003, 4303)
+	b := ruleBody(unix.AF_INET6, 4303, 0x77630003, 0xffffffff, 4303)
 	if b[0] != unix.AF_INET6 || b[7] != frActToTbl {
 		t.Fatalf("header % x", b[:12])
 	}
@@ -86,7 +85,34 @@ func withFakeHost(t *testing.T, euid int, mountinfo string) string {
 	oldProc, oldMI, oldEuid := procRoot, mountinfoPath, geteuid
 	procRoot, mountinfoPath, geteuid = proc, mi, func() int { return euid }
 	t.Cleanup(func() { procRoot, mountinfoPath, geteuid = oldProc, oldMI, oldEuid })
+	// This process, and init, in this process's own namespaces, which stand in for the host's.
+	fakeNamespaces(t, proc, "thread-self")
+	fakeNamespaces(t, proc, "1")
+	oldPid, oldCg := initPidNsIno, initCgroupNsIno
+	initPidNsIno, initCgroupNsIno = nsIno(t, "pid"), nsIno(t, "cgroup")
+	t.Cleanup(func() { initPidNsIno, initCgroupNsIno = oldPid, oldCg })
 	return proc
+}
+
+func nsIno(t *testing.T, kind string) uint64 {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Stat("/proc/thread-self/ns/"+kind, &st); err != nil {
+		t.Skipf("cannot read this thread's %s namespace: %v", kind, err)
+	}
+	return st.Ino
+}
+
+// fakeNamespaces gives a fake process this test's own network and cgroup namespaces.
+func fakeNamespaces(t *testing.T, proc, pid string) {
+	t.Helper()
+	d := filepath.Join(proc, pid, "ns")
+	if err := os.MkdirAll(d, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, kind := range []string{"net", "cgroup", "pid"} {
+		_ = os.Symlink("/proc/self/ns/"+kind, filepath.Join(d, kind))
+	}
 }
 
 func fakeProc(t *testing.T, proc string, pid, ppid int, status string, flags uint64) {
@@ -98,6 +124,7 @@ func fakeProc(t *testing.T, proc string, pid, ppid int, status string, flags uin
 	stat := strconv.Itoa(pid) + " (p) S " + strconv.Itoa(ppid) + " 1 1 0 -1 " + strconv.FormatUint(flags, 10) + " 0 0"
 	_ = os.WriteFile(filepath.Join(d, "stat"), []byte(stat), 0o600)
 	_ = os.WriteFile(filepath.Join(d, "status"), []byte(status), 0o600)
+	fakeNamespaces(t, proc, strconv.Itoa(pid))
 }
 
 const v2mount = "25 30 0:22 / /sys/fs/cgroup rw - cgroup2 cgroup2 rw\n"
@@ -153,10 +180,136 @@ func TestPreflightRefusesItselfAndItsParents(t *testing.T) {
 	refusal(t, Preflight(777), "cannot contain itself")
 }
 
+// A process in another network namespace (a container's) never meets this host's routes, and a
+// command in a cgroup namespace of its own does not see the host's root: both refuse.
+func TestPreflightRefusesAnotherNetworkNamespaceAndACgroupNamespace(t *testing.T) {
+	proc := withFakeHost(t, 0, v2mount)
+	fakeProc(t, proc, 4242, 1, plain, 0)
+	other := filepath.Join(t.TempDir(), "netns")
+	if err := os.WriteFile(other, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(proc, "4242", "ns", "net")
+	_ = os.Remove(link)
+	if err := os.Symlink(other, link); err != nil {
+		t.Fatal(err)
+	}
+	refusal(t, Preflight(4242), "another network namespace")
+	fakeProc(t, proc, 4243, 1, plain, 0)
+	cg := filepath.Join(proc, "thread-self", "ns", "cgroup")
+	_ = os.Remove(cg)
+	if err := os.Symlink(other, cg); err != nil {
+		t.Fatal(err)
+	}
+	refusal(t, Preflight(4243), "cgroup namespace")
+}
+
+// A process whose main thread has exited while its other threads run cannot be moved whole, and is
+// refused plainly, never as "another network namespace".
+func TestPreflightRefusesAProcessWhoseMainThreadExited(t *testing.T) {
+	proc := withFakeHost(t, 0, v2mount)
+	fakeProc(t, proc, 4242, 1, plain, 0)
+	d := filepath.Join(proc, "4242")
+	_ = os.WriteFile(filepath.Join(d, "stat"), []byte("4242 (agent) Z 1 1 1 0 -1 0 0 0"), 0o600)
+	for _, tid := range []string{"4242", "4250"} {
+		if err := os.MkdirAll(filepath.Join(d, "task", tid), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	refusal(t, Preflight(4242), "main thread has exited")
+}
+
+// A namespace holding only loopback (a browser's sandboxed child) has no way off the host.
+func TestLoopbackOnlyNamespacesAreToldApart(t *testing.T) {
+	proc := withFakeHost(t, 0, v2mount)
+	head := "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n"
+	write := func(pid, body string) {
+		d := filepath.Join(proc, pid, "net")
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(d, "dev"), []byte(head+body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("10", "    lo:       0       0    0    0    0     0          0         0        0       0    0    0    0     0       0          0\n")
+	write("11", "    lo: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n  eth0: 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0\n")
+	if !loopbackOnly(10) {
+		t.Fatal("a namespace with only lo must count as loopback-only")
+	}
+	if loopbackOnly(11) || loopbackOnly(12) {
+		t.Fatal("a namespace with another interface, or one that cannot be read, is not loopback-only")
+	}
+}
+
 func TestPreflightPassesAnUnprivilegedProcess(t *testing.T) {
 	proc := withFakeHost(t, 0, v2mount)
 	fakeProc(t, proc, 4242, 1, plain, 0)
 	if err := Preflight(4242); err != nil {
 		t.Fatalf("refused: %v", err)
+	}
+}
+
+// A host device's dial marks and binds its socket inside the namespace's guard against Close, so
+// a dial that reaches the socket options after Close is refused there, before it is bound to
+// whatever device holds the name by then, and before connect.
+func TestHostDialPinsItsSocketOnlyWhileTheDeviceIsOpen(t *testing.T) {
+	hr := routeFor("wsc255", 0, 255, 1)
+	hr.CarryV4 = true
+	calls := 0
+	closed := func(func() error) error { calls++; return errNamespaceClosed }
+	if _, err := hr.dial(context.Background(), "tcp", "127.0.0.1:9", "127.0.0.1", closed); !errors.Is(err, errNamespaceClosed) || calls != 1 {
+		t.Fatalf("a dial after Close: err=%v, guard consulted %d times; want %v from one consultation", err, calls, errNamespaceClosed)
+	}
+}
+
+// The host dial binds to the device's index: the binding reads back as exactly that index, a
+// socket bound to an index no device holds (as one is once its device is gone) reaches nothing,
+// not even loopback, and index 0, which would unbind, is refused before it is sent.
+func TestBindToDeviceBindsTheIndexAndNothingElse(t *testing.T) {
+	lo, err := net.InterfaceByName("lo")
+	if err != nil {
+		t.Skip("no loopback interface here")
+	}
+	sock := func() int {
+		fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { unix.Close(fd) })
+		return fd
+	}
+	fd := sock()
+	if err := bindToDevice(fd, lo.Index, "lo"); err != nil {
+		if errors.Is(err, unix.EPERM) {
+			t.Skip("this kernel lets only CAP_NET_RAW bind a socket to a device")
+		}
+		t.Fatalf("binding to lo (index %d): %v", lo.Index, err)
+	}
+	if got, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_BINDTOIFINDEX); err != nil || got != lo.Index {
+		t.Fatalf("bound to index %d (%v), want lo's %d", got, err, lo.Index)
+	}
+	gone := sock()
+	if err := bindToDevice(gone, 1<<30, "wsc-gone"); err != nil {
+		t.Fatalf("binding to an index no device holds: %v", err)
+	}
+	if err := unix.Sendto(gone, []byte("x"), 0, &unix.SockaddrInet4{Port: 9, Addr: [4]byte{127, 0, 0, 1}}); err == nil {
+		t.Fatal("a socket bound to an index no device holds must reach nothing, but a datagram to loopback was sent")
+	}
+	// The same over IPv6, the family the containment's own egress check dials (unless this host
+	// has IPv6 turned off, where there is nothing to send it over).
+	if gone6, err := unix.Socket(unix.AF_INET6, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0); err != nil {
+		t.Logf("no IPv6 socket on this host (%v), so the IPv6 case is not run", err)
+	} else {
+		t.Cleanup(func() { unix.Close(gone6) })
+		if err := bindToDevice(gone6, 1<<30, "wsc-gone"); err != nil {
+			t.Fatalf("binding an IPv6 socket to an index no device holds: %v", err)
+		}
+		if err := unix.Sendto(gone6, []byte("x"), 0, &unix.SockaddrInet6{Port: 9, Addr: [16]byte{15: 1}}); err == nil {
+			t.Fatal("an IPv6 socket bound to an index no device holds must reach nothing, but a datagram to ::1 was sent")
+		}
+	}
+	if err := bindToDevice(sock(), 0, "wsc0"); err == nil || !strings.Contains(err.Error(), "no interface index") {
+		t.Fatalf("index 0 must be refused before it is sent, got %v", err)
 	}
 }

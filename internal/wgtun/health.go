@@ -5,6 +5,7 @@ package wgtun
 
 import (
 	"context"
+	"net/netip"
 	"strconv"
 	"strings"
 	"time"
@@ -12,19 +13,24 @@ import (
 
 // monitor is the tunnel health loop (robustness - a stale WG is frustrating, the
 // same philosophy as the server-side reaper). Every healthEvery it reads the device's
-// last-handshake; if the tunnel has had NO successful handshake for deadAfter (default 180s,
-// ~7× the 25s keepalive - the same black-hole threshold the box reaper uses), it forces a
-// reconnect: re-assert the peer endpoint via the UAPI, which nudges wireguard-go to send a
-// fresh handshake initiation. Backoff is capped exponential so a box that is genuinely down
-// is retried calmly, not hammered. The local SOCKS5 endpoint NEVER changes - the tunnel heals
-// underneath live tools. The loop exits on Stop() (t.stop closed).
+// last-handshake; if the tunnel has had NO successful handshake for deadAfter (default
+// defaultDeadAfter, 210 s), it forces a reconnect: re-assert the peer endpoint via the UAPI,
+// which nudges wireguard-go to send a fresh handshake initiation. Backoff is capped exponential
+// so a box that is genuinely down is retried calmly, not hammered. The local SOCKS5 endpoint
+// NEVER changes - the tunnel heals underneath live tools. The loop exits on Stop() (t.stop
+// closed).
 func (t *Tunnel) monitor() {
 	tick := time.NewTicker(t.healthEvery)
 	defer tick.Stop()
 	// The monitor owns the published path record (pathstate.go): it is the only place that has
 	// just read the device, so it is the only place entitled to write down what the paths ARE.
 	// It is also therefore the right place to remove the record when the tunnel goes away.
-	defer t.clearPaths()
+	defer func() {
+		if t.monitorExit != nil {
+			t.monitorExit()
+		}
+		t.clearPaths()
+	}()
 
 	// Backoff between forced reconnects when the tunnel stays dead. Reset to base on recovery.
 	const baseBackoff = 2 * time.Second
@@ -48,16 +54,16 @@ func (t *Tunnel) monitor() {
 		case <-t.stop:
 			return
 		case <-tick.C:
-			handshakes, received, ok := t.readPeers()
+			read, ok := t.readPeers()
 			now := time.Now()
-			last := handshakes[t.cfg.ServerPublicKeyHex]
+			last := read.handshakes[t.cfg.ServerPublicKeyHex]
 			if ok {
 				t.mu.Lock()
 				t.lastH = last
 				t.mu.Unlock()
 				// the same device read decides the direct-peer promote/demote. One
 				// loop, one observation - two loops could disagree about what the device said.
-				t.reconcileDirectPeers(now, handshakes, received)
+				t.directPass(now, read)
 			}
 			// Healthy: a handshake within deadAfter. Reset the backoff and move on.
 			if ok && !last.IsZero() && now.Sub(last) < t.deadAfter {
@@ -127,21 +133,90 @@ func (t *Tunnel) readHandshakes() (map[string]time.Time, bool) {
 	return parseHandshakeDump(dump), true
 }
 
-// readPeers is readHandshakes plus each peer's rx_bytes, from the SAME dump, for the monitor:
-// the direct-path decision needs both and must not read the device twice.
-func (t *Tunnel) readPeers() (map[string]time.Time, map[string]uint64, bool) {
+// deviceRead is one read of the device for the monitor: each peer's last handshake, its rx_bytes,
+// and the allowed-ips the device actually holds for it, all from the SAME dump.
+type deviceRead struct {
+	handshakes map[string]time.Time
+	received   map[string]uint64
+	sent       map[string]uint64
+	allowed    map[string][]netip.Prefix
+}
+
+// directPass is the direct-path half of one monitor pass, from one read of the device: the promote and
+// demote decision, then keeping this end heard on every routed path. A test that drives passes itself calls
+// this, so its passes are the monitor's.
+func (t *Tunnel) directPass(now time.Time, read deviceRead) {
+	t.reconcileDirectPeers(now, read.handshakes, read.received, read.allowed)
+	t.keepHeard(now, read.sent)
+}
+
+// readPeers is readHandshakes plus each peer's rx_bytes and allowed-ips, from the SAME dump, for the
+// monitor: the direct-path decision needs all three and must not read the device twice. The
+// published path rests on the allowed-ips. wireguard-go picks a peer for every packet by longest-prefix
+// match over them, so they, not our bookkeeping, are where a packet goes.
+func (t *Tunnel) readPeers() (deviceRead, bool) {
 	dump, err := t.dev.IpcGet()
 	if err != nil {
-		return nil, nil, false
+		return deviceRead{}, false
 	}
-	return parseHandshakeDump(dump), parseReceivedDump(dump), true
+	return deviceRead{
+		handshakes: parseHandshakeDump(dump),
+		received:   parseReceivedDump(dump),
+		sent:       parseCounterDump(dump, "tx_bytes"),
+		allowed:    parseAllowedDump(dump),
+	}, true
+}
+
+// parseAllowedDump reads each peer's allowed_ip lines, keyed by its hex public key. A peer with none
+// is present with an empty list, so "holds nothing" and "not on the device" stay different answers.
+// Like the other parses it keys on public_key= boundaries and reads one field, so nothing secret is
+// retained; a line that is not a prefix is skipped rather than guessed at.
+func parseAllowedDump(dump string) map[string][]netip.Prefix {
+	out := map[string][]netip.Prefix{}
+	var cur string
+	for _, line := range strings.Split(dump, "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "public_key":
+			cur = strings.TrimSpace(v)
+			if _, seen := out[cur]; !seen {
+				out[cur] = nil
+			}
+		case "allowed_ip":
+			if cur == "" {
+				continue
+			}
+			if p, err := netip.ParsePrefix(strings.TrimSpace(v)); err == nil {
+				out[cur] = append(out[cur], p)
+			}
+		}
+	}
+	return out
+}
+
+// holdsHost reports whether a peer's allowed-ips include addr as a host route, which is the one
+// entry a direct peer is ever given (promoteDirectPeer).
+func holdsHost(allowed []netip.Prefix, addr netip.Addr) bool {
+	for _, p := range allowed {
+		if p.Bits() == addr.BitLen() && p.Addr() == addr {
+			return true
+		}
+	}
+	return false
 }
 
 // parseReceivedDump reads each peer's rx_bytes, keyed by its hex public key: the bytes of every
 // AUTHENTICATED packet the device has taken from that peer (handshake messages and transport
 // packets, keepalives included). Like parseHandshakeDump it keys on public_key= boundaries and
 // reads one numeric field, so nothing secret is retained.
-func parseReceivedDump(dump string) map[string]uint64 {
+func parseReceivedDump(dump string) map[string]uint64 { return parseCounterDump(dump, "rx_bytes") }
+
+// parseCounterDump reads one per-peer byte counter (rx_bytes or tx_bytes), keyed by the peer's hex public
+// key, on the same public_key= boundaries as the other parses.
+func parseCounterDump(dump, field string) map[string]uint64 {
 	out := map[string]uint64{}
 	var cur string
 	for _, line := range strings.Split(dump, "\n") {
@@ -153,7 +228,7 @@ func parseReceivedDump(dump string) map[string]uint64 {
 		case "public_key":
 			cur = strings.TrimSpace(v)
 			out[cur] = 0
-		case "rx_bytes":
+		case field:
 			if cur != "" {
 				n, _ := strconv.ParseUint(strings.TrimSpace(v), 10, 64)
 				out[cur] = n
@@ -336,23 +411,40 @@ func (t *Tunnel) escalateIfStuck(sinceRebind, threshold int) int {
 	return 0
 }
 
+// defaultDeadAfter is how long the box peer may go without a handshake before the monitor calls
+// the tunnel dead: 210 s, WireGuard's REJECT_AFTER_TIME (180 s) plus one 25 s keepalive plus
+// REKEY_TIMEOUT (5 s). The handshake time moves on a re-key, never on a keepalive, and only the
+// initiator of a session re-keys it on time. A session this node initiated re-keys on its first
+// keepalive after 120 s. One the box initiated (it had a packet for this node, or its own retry
+// timer fired) re-keys only on a packet the box receives between 165 s and 180 s, and with no
+// traffic the 25 s keepalives can step over that window: the session then expires, and this node
+// initiates again on its next keepalive. So a live, idle tunnel can read a handshake of up to
+// about 190 s here. 180 s used to call that dead, nudge it and say so. The box judges its side of
+// the tunnel against the same 210 s.
+const defaultDeadAfter = 210 * time.Second
+
 // rebindAfterAttempts is how many fruitless forced re-handshakes go by before the monitor
 // re-opens the device's UDP sockets.
 const rebindAfterAttempts = 3
 
 // renewAfterSilence is how long the tunnel has to have gone without a handshake before it asks
-// its holder for a fresh session. The box reaps a peer whose last handshake is 180 s old and
-// sweeps every 60 s, so by 240 s the peer is gone whatever this side does; 270 s leaves a margin
-// for the two clocks. Keying on the age of the last handshake rather than on a count of our own
-// attempts is what makes a host that wakes from a long sleep ask at once: its count restarts at
-// one, but its last handshake is as old as the sleep.
+// its holder for a fresh session. The box reaps a peer once its last handshake is 210 s old and
+// nothing has arrived from it for a minute, sweeping every 60 s. Packets from a live tunnel stop
+// reaching the box at most about 190 s after its last handshake (a session the box initiated, see
+// defaultDeadAfter), so the box has dropped a silent peer by 310 s; 330 s leaves a margin for the
+// two clocks. A tunnel whose initiations still reach the box while its answers are lost is held
+// until no handshake has completed for 300 s, plus a sweep; asking a little before that re-binds
+// the same key, which the box treats as the peer it already holds, and the next ask, after the
+// holder's backoff, lands once it has gone. Keying on the age of the last handshake rather than
+// on a count of our own attempts is what makes a host that wakes from a long sleep ask at once:
+// its count restarts at one, but its last handshake is as old as the sleep.
 //
 // Why a holder has to act at all: when the box has dropped this tunnel's peer (a re-key, a
 // restart, a reaper), every handshake initiation reaches a box that does not know the key and
 // answers nothing. Re-pointing and re-opening are the right answers to a broken path and no
 // answer to a missing peer, so they were repeated for hours while the session still looked up.
 // Only a fresh connect puts the peer back, and the tunnel holds no client to run one.
-const renewAfterSilence = 270 * time.Second
+const renewAfterSilence = 330 * time.Second
 
 // renewMinAttempts is the floor on fruitless re-handshakes in a stall before the request, so one
 // unlucky observation never costs a control-plane call.

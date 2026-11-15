@@ -184,7 +184,7 @@ func wgPeerExclusiveRefusal(err error) bool {
 }
 
 // enforcedReaperNote is said when the reaper, not this run, will retire the peer.
-const enforcedReaperNote = "the box retires an exclusive peer nobody renews within about 3 minutes"
+const enforcedReaperNote = "the box retires an exclusive peer nobody renews within about 5 minutes"
 
 // enforcedDisconnectTimeout bounds the disconnect at exit. The reaper is the backstop, so a slow
 // control plane must not hold the user's terminal for a full call timeout.

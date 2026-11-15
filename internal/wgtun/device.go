@@ -56,6 +56,7 @@ func Start(cfg Config, opts Options) (_ *Tunnel, err error) {
 		return nil, fmt.Errorf("could not resolve the WireGuard endpoint - please try again")
 	}
 	cfg.Endpoint = resolved
+	cfg.Peers = bringUpPeers(cfg)
 	mtu := cfg.MTU
 	if mtu <= 0 {
 		mtu = defaultMTU
@@ -86,7 +87,8 @@ func Start(cfg Config, opts Options) (_ *Tunnel, err error) {
 		bind = opts.Listen
 	}
 	dev := device.NewDevice(tunDev, bind, device.NewLogger(device.LogLevelSilent, ""))
-	if err := dev.IpcSet(uapiConfig(cfg)); err != nil {
+	directKA := keepaliveSeconds(opts.DirectKeepalive)
+	if err := dev.IpcSet(uapiConfigWith(cfg, directKA)); err != nil {
 		dev.Close() // closes the netstack TUN too
 		return nil, errors.New("could not configure the WireGuard tunnel - please try again")
 	}
@@ -103,15 +105,18 @@ func Start(cfg Config, opts Options) (_ *Tunnel, err error) {
 		cfg:         cfg,
 		dialTO:      orDur(opts.DialTimeout, 30*time.Second),
 		healthEvery: orDur(opts.HealthInterval, 5*time.Second),
-		deadAfter:   orDur(opts.DeadAfter, 180*time.Second),
+		deadAfter:   orDur(opts.DeadAfter, defaultDeadAfter),
 		directDead:  orDur(opts.DirectDeadAfter, directDeadAfter),
 		directRearm: orDur(opts.DirectRearmAfter, directRearmAfter),
 		punchEvery:  orDur(opts.PunchEvery, punchPeriod),
+		directKA:    directKA,
 		pathDir:     opts.PathStateDir,
 		logf:        opts.Logf,
 		stop:        make(chan struct{}),
 		started:     time.Now(),
 		selfPubHex:  publicKeyHexOf(cfg.PrivateKeyHex),
+		instance:    newInstanceID(),
+		routeEpoch:  newRouteEpochBase(),
 	}
 	t.rebindUDP = dev.BindUpdate
 
@@ -247,7 +252,20 @@ func (c Config) validate() error {
 // All keys are HEX here (the UAPI form); FromWgQuick converts the base64 the server returns.
 // The endpoint is a literal ip:port (Start resolves the hostname first - IpcSet does not do DNS).
 // This string holds the private key - it is handed ONLY to dev.IpcSet and never logged.
-func uapiConfig(cfg Config) string {
+func uapiConfig(cfg Config) string { return uapiConfigWith(cfg, directKeepalive) }
+
+// keepaliveSeconds is a direct peer's keepalive in the UAPI's whole seconds: zero is the default, and
+// anything positive under a second is one.
+func keepaliveSeconds(d time.Duration) int {
+	if d <= 0 {
+		return directKeepalive
+	}
+	return max(1, int(d/time.Second))
+}
+
+// uapiConfigWith is uapiConfig with the direct peers' keepalive given (Options.DirectKeepalive).
+func uapiConfigWith(cfg Config, directKA int) string {
+	self := publicKeyHexOf(cfg.PrivateKeyHex)
 	keepalive := cfg.Keepalive
 	if keepalive <= 0 {
 		keepalive = 25 // the server default; keeps the NAT/UDP path warm
@@ -262,19 +280,42 @@ func uapiConfig(cfg Config) string {
 	b.WriteString("allowed_ip=" + boxDefaultRoute(cfg.Address) + "\n")
 	fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", keepalive)
 	for _, p := range cfg.Peers {
-		if p.Listed || p.PublicKeyHex == "" || p.PublicKeyHex == cfg.ServerPublicKeyHex {
-			continue // never let a peer row rewrite the box peer and take ::/0 with it
+		if p.Listed || p.PublicKeyHex == "" || p.PublicKeyHex == cfg.ServerPublicKeyHex ||
+			p.PublicKeyHex == self || p.Address == cfg.Address {
+			// Never let a peer row rewrite the box peer and take ::/0 with it, nor name this node's own key or
+			// address (the rules SetDirectPeers applies, and bringUpPeers before this).
+			continue
 		}
 		fmt.Fprintf(&b, "public_key=%s\n", p.PublicKeyHex)
 		fmt.Fprintf(&b, "endpoint=%s\n", p.Endpoint)
-		// A peer with a window waits for it silent (armDirectPeer); every other one is kicked now.
-		ka := directKeepalive
+		// A peer with a window waits for it silent (armDirectPeer); every other one is kicked now, a second
+		// slower at the end that does not open the pair (punchTrain.keepalive).
+		ka := untimedKeepalive(cfg.Address.Less(p.Address), directKA)
 		if !p.Rendezvous.IsZero() {
 			ka = 0
 		}
 		fmt.Fprintf(&b, "persistent_keepalive_interval=%d\n", ka)
 	}
 	return b.String()
+}
+
+// bringUpPeers is the direct peers a tunnel may arm at bring-up, by the rules SetDirectPeers applies to
+// every later read: no listed row, no row without a key, none naming the box's key, this tunnel's own key
+// or its own address, and one peer per address (the earlier row), so the first read cannot install what a
+// refresh would refuse.
+func bringUpPeers(cfg Config) []Peer {
+	self := publicKeyHexOf(cfg.PrivateKeyHex)
+	seen := map[netip.Addr]bool{}
+	var out []Peer
+	for _, p := range cfg.Peers {
+		if p.Listed || p.PublicKeyHex == "" || p.PublicKeyHex == cfg.ServerPublicKeyHex || p.PublicKeyHex == self ||
+			p.Address == cfg.Address || seen[p.Address] {
+			continue
+		}
+		seen[p.Address] = true
+		out = append(out, p)
+	}
+	return out
 }
 
 // boxDefaultRoute is the one AllowedIPs entry the box peer gets: the default route of the
@@ -423,7 +464,7 @@ func (d *netDialer) Dial(ctx context.Context, target string) (net.Conn, error) {
 	if translated, ok, terr := TranslateTarget(d.nat64(), target); terr != nil {
 		// An address on THIS side of the tunnel (a LAN, loopback, link-local). Say which,
 		// because a hang here has cost people hours; the sentence is already user-facing.
-		return nil, errors.New("could not reach the target over the Whisper tunnel: " + terr.Error())
+		return nil, &dialFailure{msg: "could not reach the target over the Whisper tunnel: " + terr.Error(), rep: socksNotAllowed}
 	} else if ok {
 		dialTarget = translated
 	}
@@ -465,8 +506,54 @@ func (d *netDialer) Dial(ctx context.Context, target string) (net.Conn, error) {
 	// Non-leaky: never echo the target (it can name a sensitive host) or the netstack error.
 	// The diagnosis says which of the three layers failed, which is the whole difference
 	// between a user who can act and one who reverts a toggle and files "it killed my
-	// network".
-	return nil, errors.New("could not reach the target over the Whisper tunnel" + d.diagnosis())
+	// network". The reply code says which kind of failure the netstack saw, as RFC 1928 has it.
+	return nil, &dialFailure{msg: "could not reach the target over the Whisper tunnel" + d.diagnosis(), rep: stackReply(err)}
+}
+
+// The RFC 1928 replies a failed dial maps to (egress.ReplyCoder).
+const (
+	socksGeneralFailure     byte = 0x01
+	socksNotAllowed         byte = 0x02
+	socksNetworkUnreachable byte = 0x03
+	socksHostUnreachable    byte = 0x04
+	socksRefused            byte = 0x05
+	socksTimedOut           byte = 0x06 // "TTL expired", the code SOCKS servers send for a dial that timed out
+)
+
+// dialFailure is a failed dial's sentence with the reply code that describes it, so the SOCKS5 front
+// end says "connection refused" only when the far end refused. The sentence is unchanged.
+type dialFailure struct {
+	msg string
+	rep byte
+}
+
+func (e *dialFailure) Error() string    { return e.msg }
+func (e *dialFailure) SOCKSReply() byte { return e.rep }
+
+// stackReply classifies the netstack's own dial error. gVisor reports a refusal, from an RST or from an
+// ICMPv6 port unreachable, as "connection was refused", and an unreachable destination and a timeout
+// in the words below; its context ends the dial with the context's own error. Text, because the
+// netstack hands its error back as a string (gonet), and anything not recognised is a general failure,
+// never a refusal: a refusal is the one code a reader may take as an answer from the far end.
+func stackReply(err error) byte {
+	switch {
+	case err == nil:
+		return socksGeneralFailure
+	case errors.Is(err, context.DeadlineExceeded):
+		return socksTimedOut
+	}
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "connection was refused"), strings.Contains(msg, "connection refused"):
+		return socksRefused
+	case strings.Contains(msg, "network is unreachable"):
+		return socksNetworkUnreachable
+	case strings.Contains(msg, "no route to host"), strings.Contains(msg, "host is unreachable"):
+		return socksHostUnreachable
+	case strings.Contains(msg, "timed out"), strings.Contains(msg, "i/o timeout"):
+		return socksTimedOut
+	}
+	return socksGeneralFailure
 }
 
 // nat64 is the prefix this dialer wraps IPv4 destinations into. It reads through the settled

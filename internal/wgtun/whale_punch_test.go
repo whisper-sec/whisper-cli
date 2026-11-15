@@ -36,6 +36,7 @@ import (
 // that traffic for a peer's /128 is being carried by the relay rather than by a direct peer.
 type relayBox struct {
 	dev      *device.Device
+	tnet     *netstack.Net
 	pubB64   string
 	udpPort  int
 	serverIP netip.Addr
@@ -80,7 +81,7 @@ func startRelayBox(t *testing.T, clientPubHex string, clientTunnelIP netip.Addr,
 			}
 		}()
 	}
-	return &relayBox{dev: dev, pubB64: kp.PublicKeyBase64, udpPort: udpPort, serverIP: serve[0]}
+	return &relayBox{dev: dev, tnet: tnet, pubB64: kp.PublicKeyBase64, udpPort: udpPort, serverIP: serve[0]}
 }
 
 // deadUDPPort returns a loopback port nothing will answer on, on 127.0.0.1 and ::1: an endpoint
@@ -310,7 +311,8 @@ func TestPunch_RotatesToAWorkingCandidateAndPromotesOnTheHandshake(t *testing.T)
 		t.Fatal("a freshly armed peer already holds the /128")
 	}
 
-	if !waitFor(15*time.Second, func() bool { return tun.PathTo(peerIP) == "direct-punch" }) {
+	// About seven seconds alone, and nine under the race detector; twenty leaves room for a loaded box.
+	if !waitFor(20*time.Second, func() bool { return tun.PathTo(peerIP) == "direct-punch" }) {
 		t.Fatalf("the punch never reached the working candidate: %+v", tun.DirectPeers())
 	}
 	if !routedTo(t, tun, other.pubHex, peerIP) {

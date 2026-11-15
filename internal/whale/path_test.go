@@ -81,11 +81,13 @@ func TestUniversalDirectPathIsStillFalse(t *testing.T) {
 }
 
 // TestPathVocabularyIsClosed: the exported set is what renderers may print, and it stays
-// closed. The punch added exactly one member; adding a word to what a surface
-// may claim about somebody's network is a decision, and it belongs in this list first.
+// closed. The punch added exactly one member, and the device-read path added `edge` for a probe
+// that left from the host's own address, and `unknown` for one through a tunnel whose record this
+// process cannot read; adding a word to what a surface may claim about somebody's network is a
+// decision, and it belongs in this list first.
 func TestPathVocabularyIsClosed(t *testing.T) {
 	v := PathVocabulary()
-	want := map[string]bool{PathRelayed: true, PathNoPath: true, "direct": true,
+	want := map[string]bool{PathRelayed: true, PathNoPath: true, PathEdge: true, PathUnknown: true, "direct": true,
 		PathDirectLocal: true, PathDirectPublic: true, PathDirectPunched: true}
 	if len(v) != len(want) {
 		t.Fatalf("PathVocabulary() = %v, want exactly %d values", v, len(want))

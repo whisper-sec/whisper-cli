@@ -5,6 +5,8 @@ package whale
 
 import (
 	"fmt"
+	"net/netip"
+	"strings"
 	"time"
 
 	"github.com/whisper-sec/whisper-cli/internal/wgtun"
@@ -29,8 +31,8 @@ import (
 // value means nothing published anything, which is honestly reported as "not known here" rather
 // than as a failure.
 type PunchEvidence struct {
-	// Phase is wgtun's punch phase: "idle", "punching", "established", "gave-up", or "" when
-	// no record was found.
+	// Phase is wgtun's punch phase: "idle", "punching", "resting", "established", "gave-up", or ""
+	// when no record was found.
 	Phase string
 	// Attempts is how many punch attempts the current or last train made.
 	Attempts int
@@ -38,6 +40,10 @@ type PunchEvidence struct {
 	Candidates int
 	// Endpoint is the endpoint carrying the path, or the last one tried.
 	Endpoint string
+	// Since is when the current punch phase began: for a resting peer, when its path was withdrawn.
+	Since time.Time
+	// Timed is set for a pair punched inside the plane's windows: its next attempt waits for a window.
+	Timed bool
 	// Source is the evidence class of that endpoint (local, public, observed, roamed).
 	Source string
 	// Age is how old the published record is, and Stale says it is too old to trust.
@@ -46,11 +52,25 @@ type PunchEvidence struct {
 	// Found is true when a record for this peer was read at all. It is what separates "this
 	// host has nothing to say about that peer" from "this host says the path failed".
 	Found bool
-	// Direct is the device's own truth: this peer's address is routed to it right now, which
-	// only happens after a handshake landed. It is NOT the control plane's candidacy.
+	// Direct is the device's own truth: this peer's address is routed to it right now, read back
+	// from the device, which only happens after a handshake landed. It is NOT the control plane's
+	// candidacy, and NOT the tunnel's own decision either.
 	Direct bool
 	// Class is the path class that record carried (direct-local / direct-public / direct-punch).
 	Class string
+	// Epoch names the routed period Direct belongs to (wgtun.PeerState.RouteEpoch); zero when the
+	// peer is not routed.
+	Epoch uint64
+	// Unverified is set on a record that says promoted but carries no epoch: it was written by a
+	// holder that does not read its routing back from the device, so its claim is not evidence.
+	Unverified bool
+	// Instance is the tunnel that wrote the record (wgtun.PathStateRecord.Instance). Two reads name
+	// one routed period only when both the epoch and the instance agree.
+	Instance string
+	// Published is set when the tunnel a probe went through had a record to read at all, whether or
+	// not it named this peer. A tunnel with none (an installed service publishes under its own home)
+	// cannot say which path carried the probe, and that is said rather than guessed.
+	Published bool
 }
 
 // InFlight reports whether a traversal is running for this peer right now, which is the ONLY
@@ -67,14 +87,20 @@ func EvidenceFor(rec wgtun.PathPeerRecord, age time.Duration, stale bool) PunchE
 		Attempts:   rec.Punch.Attempts,
 		Candidates: rec.Punch.Candidates,
 		Endpoint:   firstNonEmpty(rec.Punch.Winner, rec.Punch.Trying, rec.Endpoint),
+		Since:      rec.Punch.Since,
+		Timed:      rec.Punch.Timed,
 		Source:     rec.Punch.WinnerSource,
 		Age:        age,
 		Stale:      stale,
 		Found:      true,
 		// A stale record is not evidence of a live path. It is evidence that something stopped
-		// updating, which ReasonFor says out loud - but it may not carry a direct claim.
-		Direct: rec.Promoted && !stale,
-		Class:  rec.Path,
+		// updating, which ReasonFor says out loud - but it may not carry a direct claim. Nor may a
+		// record without an epoch: its promoted is a decision nothing read back from the device.
+		Direct:     rec.Promoted && !stale && rec.RouteEpoch != 0,
+		Class:      rec.Path,
+		Epoch:      rec.RouteEpoch,
+		Unverified: rec.Promoted && rec.RouteEpoch == 0,
+		Published:  true,
 	}
 }
 
@@ -126,9 +152,39 @@ func ReasonFor(o Observation) string {
 		}
 		return stale + "direct" + via + how + after + "; the relay stays installed as the fallback"
 	}
+	if o.Measured && o.Vantage == VantageHost {
+		return hostVantageReason(o)
+	}
+	if o.Measured && !o.Reachable && o.Vantage == VantageTunnel && e.Direct {
+		return stale + "nothing answered over the direct path. Either the far node does not route this " +
+			"node directly yet (a pair routed on one side only is cut until both are), or the path has " +
+			"just died, in one direction or both, and both ends fall back to the relay within a minute (a " +
+			"few minutes when the far node runs an older whisper)"
+	}
+	if o.Measured && !o.Reachable && e.Phase == string(wgtun.PunchResting) {
+		why := restingReason(e)
+		return stale + "nothing answered. " + strings.ToUpper(why[:1]) + why[1:]
+	}
 	if o.Measured && !o.Reachable {
 		return stale + "nothing answered. On this network the usual cause is a pair split across " +
 			"two boxes, which has no path between them at all"
+	}
+	if o.Measured && o.Vantage == VantageTunnel && !e.Published {
+		via := "this host's tunnel"
+		if o.Via != "" {
+			via = "the tunnel of " + o.Via
+		}
+		return "the probe went through " + via + ", which publishes no path record this user can read " +
+			"(an installed service keeps its own), so which path carried it is not known here"
+	}
+	if o.Changed {
+		return "relayed: the tunnel's route to this peer changed while the probe ran, so these answers " +
+			"cannot be placed on the direct path. Run it again"
+	}
+	if e.Found && e.Unverified {
+		return stale + "relayed as far as this host can tell: the tunnel holding this node is an older " +
+			"whisper that does not read its routing back from the device, so its direct claim is not " +
+			"evidence. Restart the connection to measure the path"
 	}
 	switch e.Phase {
 	case string(wgtun.PunchTrying):
@@ -140,6 +196,8 @@ func ReasonFor(o Observation) string {
 			"relayed while a direct path is being opened: %s so far across %s%s. "+
 				"Traffic is unaffected meanwhile - it keeps going through the box",
 			plural(e.Attempts, "attempt"), plural(e.Candidates, "endpoint"), at)
+	case string(wgtun.PunchResting):
+		return stale + "relayed: " + restingReason(e)
 	case string(wgtun.PunchGaveUp):
 		return stale + fmt.Sprintf(
 			"relayed because the punch failed: %s across %s, and nothing came back. "+
@@ -161,6 +219,56 @@ func ReasonFor(o Observation) string {
 	}
 	return stale + "relayed: the box both peers terminate on is carrying this traffic"
 }
+
+// restingReason is what a resting peer means: this node withdrew a direct path that stopped
+// answering, and is quiet towards the peer so the far end lets go of it too. Until it does, the far end
+// may still send this node's traffic over the dead path and drop what the box brings it from this node, so
+// nothing is promised for that half minute. The numbers are the production timers: the far end notices
+// within its twenty-second window and two of its five-second ticks, and the hold is forty seconds and more.
+func restingReason(e PunchEvidence) string {
+	when := ""
+	if !e.Since.IsZero() {
+		when = " " + roundAge(time.Since(e.Since)) + " ago"
+	}
+	retry := "a direct path is tried again about a minute after the withdrawal"
+	if e.Timed {
+		retry = "a direct path is tried again in the pair's first window after that, a minute or more after the withdrawal"
+	}
+	return "the direct path to this peer stopped answering" + when + ", so this node withdrew it and is staying " +
+		"quiet towards the peer until the far end lets go of it too. Until then, about half a minute after the " +
+		"withdrawal, traffic between the two may not get through in either direction; after that the box carries " +
+		"it, and " + retry
+}
+
+// hostVantageReason is the sentence for a probe that did not go through a tunnel this CLI holds. It
+// says where the probe left from, as this host's routing picked it, and claims nothing it did not see.
+func hostVantageReason(o Observation) string {
+	src := o.HostSource
+	from := "this host's own address"
+	if src.IsValid() {
+		from += " " + src.String()
+	}
+	if src.IsValid() && agentBlock.Contains(src.Unmap()) {
+		return fmt.Sprintf("the probe left from %s, an agent address on a tunnel this CLI does not hold "+
+			"(a kernel WireGuard interface, most likely), so this host cannot say what carried it", src)
+	}
+	if !src.IsValid() && !o.Reachable {
+		return "this host has no IPv6 route to the agent addresses, so the probe could not leave from it " +
+			"and nothing was measured. A tunnel on this host (`whisper connect`) carries it from the node's /128"
+	}
+	if !o.Reachable {
+		return "nothing answered the probe from " + from + ", which left outside any Whisper tunnel. No " +
+			"tunnel on this host offers a local proxy to measure through: run this where the node's " +
+			"tunnel runs (`whisper connect` holds it)"
+	}
+	return "the probe left from " + from + ", outside any Whisper tunnel, because no tunnel on this host " +
+		"offers a local proxy to measure through. It entered Whisper at the box nearest this host, which " +
+		"answered through the node's tunnel or for the address itself, so the answer is not the path " +
+		"between two nodes. Measure that where the node's tunnel runs (`whisper connect` holds it)"
+}
+
+// agentBlock is 2a04:2a01::/32, where every agent /128 sits.
+var agentBlock = netip.MustParsePrefix("2a04:2a01::/32")
 
 // roundAge renders a duration the way a person would say it: seconds under a minute, then
 // minutes, then hours, then days. Never more precision than the thing being timed has, and

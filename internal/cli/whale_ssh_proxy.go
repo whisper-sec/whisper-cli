@@ -73,6 +73,16 @@ var whaleSSHVia = func() (port int, from string) { return pickSSHVia(readSession
 // nothing (an older holder) comes next, and one that says it is down, handshaking or refused
 // is passed over rather than handed a connection it will drop.
 func pickSSHVia(recs []sessionRecord, alive func(int) bool) (int, string) {
+	rec, ok := pickRoutedSession(recs, alive)
+	if !ok {
+		return 0, ""
+	}
+	return rec.Port, rec.Addr
+}
+
+// pickRoutedSession is pickSSHVia's choice, as the whole record: the holder's pid is what ties the
+// session to the path record its tunnel publishes (whale_probe.go).
+func pickRoutedSession(recs []sessionRecord, alive func(int) bool) (sessionRecord, bool) {
 	best, bestRank := -1, 0
 	for i, rec := range recs {
 		if rec.NoProxy || !isWireGuardTier(rec.Tier) {
@@ -93,9 +103,9 @@ func pickSSHVia(recs []sessionRecord, alive func(int) bool) (int, string) {
 		}
 	}
 	if best < 0 {
-		return 0, ""
+		return sessionRecord{}, false
 	}
-	return recs[best].Port, recs[best].Addr
+	return recs[best], true
 }
 
 // whaleSSHDirectDial is the host's own connect, as a seam.
@@ -208,9 +218,27 @@ func socks5Connect(ctx context.Context, proxyPort int, target string) (net.Conn,
 	if err := socksGreet(conn, proxyPort); err != nil {
 		return fail(err)
 	}
+	if err := socks5Request(conn, host, addr, aerr == nil, port); err != nil {
+		return fail(err)
+	}
+	_ = conn.SetDeadline(time.Time{})
+	return conn, nil
+}
+
+// socksReplyError is a failure reply from the local proxy, with its RFC 1928 code. To a caller that
+// only needs to know the proxy said no it is errProxyRefused; `whale ping` reads the code, because the
+// tunnel's proxy says "refused" only when the far end did.
+type socksReplyError struct{ code byte }
+
+func (e *socksReplyError) Error() string        { return errProxyRefused.Error() }
+func (e *socksReplyError) Is(target error) bool { return target == errProxyRefused }
+
+// socks5Request sends one CONNECT on a greeted connection and reads the reply to its end. host is
+// sent as a name when isAddr is false, else addr as a literal. Any failure reply is errProxyRefused.
+func socks5Request(conn net.Conn, host string, addr netip.Addr, isAddr bool, port int) error {
 	req := []byte{0x05, 0x01, 0x00}
 	switch {
-	case aerr != nil:
+	case !isAddr:
 		// A name (RFC 1928 DOMAINNAME): the proxy resolves it inside the tunnel, from the /128.
 		req = append(append(req, 0x03, byte(len(host))), host...)
 	case addr.Is4():
@@ -222,17 +250,17 @@ func socks5Connect(ctx context.Context, proxyPort int, target string) (net.Conn,
 	}
 	req = append(req, byte(port>>8), byte(port))
 	if _, err := conn.Write(req); err != nil {
-		return fail(err)
+		return err
 	}
 	head := make([]byte, 4)
 	if _, err := readFull(conn, head); err != nil {
-		return fail(err)
+		return err
 	}
 	if head[0] != 0x05 {
-		return fail(errors.New("the reply was not SOCKS5"))
+		return errors.New("the reply was not SOCKS5")
 	}
 	if head[1] != 0x00 {
-		return fail(errProxyRefused)
+		return &socksReplyError{code: head[1]}
 	}
 	// The bound address the reply carries: the Whisper proxy always sends IPv4 0.0.0.0:0, but
 	// read whatever type it says so a different SOCKS5 server is not desynchronised.
@@ -245,17 +273,14 @@ func socks5Connect(ctx context.Context, proxyPort int, target string) (net.Conn,
 	case 0x03:
 		l := make([]byte, 1)
 		if _, err := readFull(conn, l); err != nil {
-			return fail(err)
+			return err
 		}
 		rest = int(l[0]) + 2
 	default:
-		return fail(errors.New("the reply named an unknown address type"))
+		return errors.New("the reply named an unknown address type")
 	}
-	if _, err := readFull(conn, make([]byte, rest)); err != nil {
-		return fail(err)
-	}
-	_ = conn.SetDeadline(time.Time{})
-	return conn, nil
+	_, err := readFull(conn, make([]byte, rest))
+	return err
 }
 
 // whaleSSHProxySplice carries ssh's stdio over the connection, passing stdin's end on as a

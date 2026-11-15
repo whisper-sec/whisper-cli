@@ -36,11 +36,14 @@ func (s *scriptedProbe) TCP(_ context.Context, _ netip.Addr, _ int) (time.Durati
 
 var pingAddr = netip.MustParseAddr("2a04:2a01:1:4::b")
 
+// run probes through a tunnel whose record holds nothing about the peer: the relayed case, which is what
+// every pair is until a direct path is proved.
 func run(t *testing.T, steps []error, count int) PingSummary {
 	t.Helper()
 	p := &scriptedProbe{steps: steps, rtt: 24 * time.Millisecond}
 	return Ping(context.Background(), pingAddr, PingOptions{
 		Address: pingAddr.String(), Count: count, Interval: time.Microsecond,
+		Tunnel: &PingTunnel{From: "2a04:2a01:1:4::a", Read: func() PunchEvidence { return PunchEvidence{Published: true} }},
 	}, p, nil)
 }
 

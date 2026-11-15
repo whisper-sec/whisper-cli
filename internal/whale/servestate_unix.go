@@ -21,6 +21,7 @@ func processAlive(pid int) bool {
 	if err != nil {
 		return false
 	}
+	defer p.Release() // on Linux FindProcess holds a pidfd until Release
 	err = p.Signal(syscall.Signal(0))
 	if err == nil {
 		return true
@@ -38,6 +39,7 @@ func stopProcess(pid int) error {
 	if err != nil {
 		return err
 	}
+	defer p.Release() // on Linux FindProcess holds a pidfd until Release
 	if err := p.Signal(syscall.SIGTERM); err != nil {
 		if err == os.ErrProcessDone {
 			return nil

@@ -527,7 +527,7 @@ func (p *Proxy) handleSocks5(ctx context.Context, conn net.Conn, br *bufio.Reade
 		// The REP byte below cannot carry WHY, so keep the reason where a caller can read it.
 		p.noteDialFailure(err)
 		p.notifyDial(conn.RemoteAddr(), nil, target, true)
-		socks5Reply(conn, 0x05) // connection refused (a generic, non-leaky failure)
+		socks5Reply(conn, ReplyFor(err))
 		return
 	}
 	p.notifyDial(conn.RemoteAddr(), up.LocalAddr(), target, false)
@@ -600,6 +600,29 @@ func readSocks5Target(br *bufio.Reader, atyp byte) (string, bool) {
 	}
 	port := int(pb[0])<<8 | int(pb[1])
 	return net.JoinHostPort(host, strconv.Itoa(port)), true
+}
+
+// ReplyCoder is a dial error that knows which RFC 1928 reply describes it. The tunnel's dialer marks
+// its errors this way: "connection refused" (0x05) is then a refusal from the far end and
+// nothing else, which is what lets a client such as `whale ping` count it as an answer, while an
+// unreachable destination (0x03, 0x04), a dial that timed out (0x06), a target the tunnel will not
+// dial (0x02) and anything else (0x01) are not. The code is a reply class from the RFC, never the
+// dialer's sentence and never the netstack's own error, so it carries nothing the timing of the reply
+// did not already show.
+type ReplyCoder interface {
+	SOCKSReply() byte
+}
+
+// ReplyFor is the REP code for a failed dial: the dialer's own when its error carries one, else 0x05,
+// the generic failure this front end always sent, so a dialer that says nothing keeps its behaviour.
+func ReplyFor(err error) byte {
+	var rc ReplyCoder
+	if errors.As(err, &rc) {
+		if code := rc.SOCKSReply(); code > 0x00 && code <= 0x08 {
+			return code
+		}
+	}
+	return 0x05
 }
 
 // socks5Reply writes a failure reply with the given REP code + a 0.0.0.0:0 bind addr.

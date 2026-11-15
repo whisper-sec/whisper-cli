@@ -47,7 +47,7 @@ func TestContainUnsupportedSaysNothingChanged(t *testing.T) {
 
 func TestContainHelpIsHonestAboutWhatItDoesNotCover(t *testing.T) {
 	long := newContainCmd().Long
-	for _, must := range []string{"run --enforce", "--release", "stays cut", "sudo or a setuid program", "unix socket", "root"} {
+	for _, must := range []string{"run --enforce", "--release", "stays cut", "a setuid program or one with file capabilities", "unix socket", "root"} {
 		if !strings.Contains(long, must) {
 			t.Errorf("the help does not say %q", must)
 		}

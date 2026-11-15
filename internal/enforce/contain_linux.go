@@ -6,6 +6,8 @@
 package enforce
 
 import (
+	"bufio"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -26,10 +28,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// contain_linux.go is the mechanism behind contain.go: the cgroup, its two BPF programs, the
-// move, and the sockets made before it. Everything here needs root (CAP_SYS_ADMIN for the cgroup
-// and the BPF attachment, CAP_NET_ADMIN for SO_BINDTODEVICE, CAP_SYS_PTRACE for pidfd_getfd);
-// Contain checks for root first and says so.
+// contain_linux.go is the mechanism behind contain.go: the cgroup, its two BPF programs, the gate
+// on the root cgroup, the move, and the sockets made before it. Everything here needs root
+// (CAP_SYS_ADMIN for the cgroups and the BPF attachments, CAP_NET_ADMIN for SO_MARK and
+// SO_BINDTOIFINDEX, CAP_SYS_PTRACE for pidfd_getfd and kcmp); Contain checks for root first and
+// says so.
 
 // procRoot and the cgroup mount are variables so the refusals can be tested without root.
 var (
@@ -50,38 +53,56 @@ const (
 	bpfSockMarkOff = 16
 )
 
+// kcmpFiles is KCMP_FILES from linux/kcmp.h: whether two tasks share one descriptor table.
+const kcmpFiles = 2
+
 // Containment is a running containment.
 type Containment struct {
 	Pid     int
 	Members []int
 	Sockets SocketReport
 
-	dir       string // the cgroup's directory
-	root      string // the v2 hierarchy's mount point
+	self      netip.Addr // the agent's /128
+	dir       string     // the cgroup's directory
+	root      string     // the v2 hierarchy's mount point
 	origin    map[int]string
 	gate      *ebpf.Program
 	mark      *ebpf.Program
-	pinned    []pinnedSock
+	adopted   []uint32     // generations of killed containments of this agent whose gates it took over
+	isolated  map[int]bool // members in a loopback-only network namespace: nothing of theirs leaves the host
+	touched   []touchedSock
 	route     HostRoute
 	statePath string
+	notes     []string // what detach could not undo
 }
 
-// pinnedSock is a socket the containment pinned and left working: on release its device binding
-// is put back as it was. It is found again by pid, descriptor and inode, never kept open, so the
-// program closing it really closes it.
-type pinnedSock struct {
-	Pid, Fd int
-	Ino     uint64
-	Was     string
+// touchedSock is a socket the containment marked (and pinned, when Bound says so) and left
+// working: on release its mark and its binding are put back as they were. It is found again by
+// pid, thread, descriptor and inode, never kept open, so the program closing it really closes it.
+// Was is how a release before marks recorded a pin (the device's name); a record of that age is
+// still given back.
+type touchedSock struct {
+	Pid, Tid, Fd int
+	Ino          uint64
+	Was          string `json:",omitempty"`
+	WasIndex     int
+	WasMark      uint32
+	Bound        bool
+	Marked       bool
 }
 
 // containRecord is what a containment leaves under /run/whisper/contain, so that one which was
-// killed can still be released by `whisper contain --release`.
+// killed can still be released by `whisper contain --release`. Gen, Mark and Index are absent in a
+// record from before marks were a containment's own.
 type containRecord struct {
 	Pid    int            `json:"pid"`
 	Slot   int            `json:"slot"`
+	Gen    uint32         `json:"gen,omitempty"`
+	Mark   uint32         `json:"mark,omitempty"`
+	Index  int            `json:"index,omitempty"`
+	Adopt  []uint32       `json:"adopted,omitempty"`
 	Origin map[int]string `json:"origin"`
-	Pinned []pinnedSock   `json:"pinned"`
+	Pinned []touchedSock  `json:"pinned"`
 }
 
 // Preflight refuses, before anything is touched, every reason a containment of pid cannot be
@@ -103,6 +124,13 @@ func Preflight(pid int) error {
 	if err != nil {
 		return err
 	}
+	if exited(pid) {
+		return containErr("pid %d has exited and is only waiting for its parent to reap it; there is nothing to contain", pid)
+	}
+	if leaderExited(pid) {
+		return containErr("pid %d's main thread has exited while its other threads run on; such a process cannot be moved "+
+			"into a cgroup whole, so it was not contained", pid)
+	}
 	if isAncestor(parent, pid, os.Getpid()) {
 		return containErr("pid %d is this command or one of its parents (your shell, sudo); it cannot contain itself", pid)
 	}
@@ -120,7 +148,99 @@ func Preflight(pid int) error {
 			"process into a cgroup of its own). Mount one (mount -t cgroup2 none /sys/fs/cgroup) or boot with " +
 			"systemd.unified_cgroup_hierarchy=1")
 	}
+	if !inInitialNamespace("pid", initPidNsIno) {
+		return containErr("this command runs in a pid namespace of its own, so it cannot see every process that could " +
+			"share the target's descriptors or follow its tree. Run `sudo whisper contain` from the host")
+	}
+	if !inInitialNamespace("cgroup", initCgroupNsIno) {
+		return containErr("this command runs in a cgroup namespace of its own, so the root it sees is not the host's and " +
+			"its gate there would not see every socket. Run `sudo whisper contain` from the host")
+	}
+	if !sameNamespace(strconv.Itoa(pid), "thread-self", "net") {
+		return containErr("pid %d is in another network namespace (a container's, most likely): its sockets never meet "+
+			"this host's routes or its tunnel. Run `sudo whisper run --enforce` inside that namespace instead", pid)
+	}
+	var u unix.Utsname
+	if unix.Uname(&u) == nil {
+		cg, _ := os.ReadFile(filepath.Join(procRoot, "cgroups"))
+		if c := v1SocketClassifier(unix.ByteSliceToString(u.Release[:]), string(cg)); c != "" {
+			return containErr("this kernel (before 5.15) has the cgroup v1 %s controller mounted, and once anything uses it "+
+				"the kernel stops telling cgroup v2 programs which cgroup a socket belongs to, so the containment would "+
+				"see none of the process's sockets; it was not contained", c)
+		}
+	}
 	return nil
+}
+
+// The initial pid and cgroup namespaces' inodes are fixed by the kernel (PROC_PID_INIT_INO and
+// PROC_CGROUP_INIT_INO in include/linux/proc_ns.h), so a command in a container that has its own
+// procfs, where /proc/1 is the container's init, is still told apart. Variables only for tests.
+var (
+	initPidNsIno    uint64 = 0xEFFFFFFC
+	initCgroupNsIno uint64 = 0xEFFFFFFB
+)
+
+// inInitialNamespace reports whether the calling thread is in the host's own namespace of kind.
+func inInitialNamespace(kind string, ino uint64) bool {
+	var st unix.Stat_t
+	return unix.Stat(filepath.Join(procRoot, "thread-self", "ns", kind), &st) == nil && st.Ino == ino
+}
+
+// exited reports whether pid has exited entirely (a zombie, or dead) and is only waiting to be reaped.
+func exited(pid int) bool {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 || i+2 >= len(b) || (b[i+2] != 'Z' && b[i+2] != 'X') {
+		return false
+	}
+	return len(threadsOf(pid)) <= 1
+}
+
+// leaderExited reports whether pid's main thread has exited while other threads of it still run.
+func leaderExited(pid int) bool {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "stat"))
+	if err != nil {
+		return false
+	}
+	i := strings.LastIndexByte(string(b), ')')
+	if i < 0 || i+2 >= len(b) || b[i+2] != 'Z' {
+		return false
+	}
+	return len(threadsOf(pid)) > 1
+}
+
+// v1SocketClassifier names a cgroup v1 controller that, on a kernel before 5.15, turns off the
+// cgroup v2 attribution of sockets the containment's programs rely on, for every socket on the host,
+// once anything uses it (Mullvad's split tunnelling does). It returns "" when there is none, or when
+// the kernel keeps both (5.15+).
+func v1SocketClassifier(release, cgroups string) string {
+	var major, minor int
+	if _, err := fmt.Sscanf(release, "%d.%d", &major, &minor); err != nil || major > 5 || (major == 5 && minor >= 15) {
+		return ""
+	}
+	for _, line := range strings.Split(cgroups, "\n") {
+		f := strings.Fields(line)
+		// subsys_name hierarchy num_cgroups enabled: a hierarchy other than 0 is a mounted v1 one.
+		if len(f) >= 4 && (f[0] == "net_cls" || f[0] == "net_prio") && f[1] != "0" && f[3] == "1" {
+			return f[0]
+		}
+	}
+	return ""
+}
+
+// sameNamespace reports whether two tasks (pids, or "thread-self") are in the same namespace of kind.
+// This command's side is the calling thread's, which is where its sockets are made: a namespace
+// belongs to a thread, and a thread of this process may have entered another one. A namespace that
+// cannot be read is not the same.
+func sameNamespace(a, b, kind string) bool {
+	var sa, sb unix.Stat_t
+	if unix.Stat(filepath.Join(procRoot, a, "ns", kind), &sa) != nil || unix.Stat(filepath.Join(procRoot, b, "ns", kind), &sb) != nil {
+		return false
+	}
+	return sa.Dev == sb.Dev && sa.Ino == sb.Ino
 }
 
 // readTask reads one process's status, and the parent map of every process on the host.
@@ -179,9 +299,13 @@ func Contain(pid int, self netip.Addr, route HostRoute, logf func(string, ...any
 	if err := Preflight(pid); err != nil {
 		return nil, err
 	}
+	if route.Gen == 0 || route.Mark != markFor(route.Gen) || route.Index <= 0 || route.gate == nil {
+		return nil, containErr("the containment's tunnel carries no mark of its own (generation %d, mark %#x), so pid %d "+
+			"was not contained", route.Gen, route.Mark, pid)
+	}
 	mi, _ := os.ReadFile(mountinfoPath)
 	root, _ := cgroup2Mount(string(mi))
-	c := &Containment{Pid: pid, root: root, route: route, origin: map[int]string{},
+	c := &Containment{Pid: pid, self: self, root: root, route: route, origin: map[int]string{}, isolated: map[int]bool{},
 		dir: filepath.Join(root, ContainParent, containCgroupName(self))}
 	c.statePath = filepath.Join(containState, containCgroupName(self)+".json")
 	if err := c.makeCgroup(); err != nil {
@@ -193,6 +317,11 @@ func Contain(pid int, self netip.Addr, route HostRoute, logf func(string, ...any
 			c.undo()
 		}
 	}()
+	// The record goes down before anything is attached, so a killed command never leaves a program
+	// that `whisper contain --release` cannot find again.
+	if err := c.writeRecord(); err != nil {
+		return nil, err
+	}
 	if err := c.attach(); err != nil {
 		return nil, err
 	}
@@ -210,14 +339,22 @@ func Contain(pid int, self netip.Addr, route HostRoute, logf func(string, ...any
 	if err := c.checkMembers(); err != nil {
 		return nil, err
 	}
+	if err := c.writeRecord(); err != nil { // the origins, before anything of theirs is touched
+		return nil, err
+	}
 	if err := c.sockets(); err != nil {
 		return nil, err
 	}
-	c.writeRecord()
+	if err := c.writeRecord(); err != nil {
+		return nil, err
+	}
 	if err := writeFile(filepath.Join(c.dir, "cgroup.freeze"), "0"); err != nil {
 		return nil, containErr("could not thaw the contained process: %v", err)
 	}
 	ok = true
+	if note := ptraceNote(); note != "" {
+		logf("whisper: %s", note)
+	}
 	return c, nil
 }
 
@@ -235,12 +372,25 @@ func (c *Containment) makeCgroup() error {
 	}
 	// A killed containment of this agent left this cgroup, with whoever was in it still cut off.
 	// Its record says where they came from; they are taken over and released with this one.
-	if rec, err := readRecord(c.statePath); err == nil {
+	// Its gate on the root cgroup stays, adopted: it holds sockets of that containment this one may
+	// never see, and it goes when this one is released.
+	rec, err := readRecord(c.statePath)
+	switch {
+	case err == nil:
 		for p, o := range rec.Origin {
 			c.origin[p] = o
 		}
-		c.pinned = append(c.pinned, rec.Pinned...)
-		RemoveStaleRules(rec.Slot)
+		c.touched = append(c.touched, rec.Pinned...)
+		c.adopted = append(c.adopted, rec.Adopt...)
+		if rec.Gen != 0 {
+			c.adopted = append(c.adopted, rec.Gen)
+		}
+		// Its address rules are already gone (CreateHostDevice cleared the agent's on every slot), and
+		// the slot is usually this containment's own now, whose address rules must stay.
+		RemoveStaleRules(rec.Slot, rec.Mark, netip.Addr{})
+	case !errors.Is(err, os.ErrNotExist):
+		return containErr("a killed containment of this agent left a record that cannot be read (%v), so what it changed "+
+			"cannot be given back; nothing was changed. Remove %s once you have released what it held", err, c.statePath)
 	}
 	if err := writeFile(filepath.Join(c.dir, "cgroup.freeze"), "1"); err != nil {
 		return containErr("could not freeze the containment's cgroup: %v", err)
@@ -248,28 +398,38 @@ func (c *Containment) makeCgroup() error {
 	return nil
 }
 
-// attach loads and attaches the two programs. They are attached with the classic
-// BPF_PROG_ATTACH, not a link, so they stay attached to the cgroup if this process dies: a killed
-// containment fails closed (the device and its route are gone, the gate still refuses).
-// Attaching without BPF_F_ALLOW_MULTI replaces whatever a killed containment left, in one step.
+// attach loads and attaches the cgroup's programs, and names the cgroup to the tunnel's gate on
+// the root cgroup (hostroute_linux.go). They are attached with the classic BPF_PROG_ATTACH, not a
+// link, so they stay attached if this process dies: a killed containment fails closed (the device
+// and its route are gone, the gates still refuse). Attaching without BPF_F_ALLOW_MULTI replaces
+// whatever a killed containment left on the cgroup, in one step.
+//
+// The root gate is what holds a socket made before the move: it sits in its old cgroup, where this
+// cgroup's gate never sees it, and pinning it is not enough (a datagram socket's
+// connect(AF_UNSPEC) drops its device binding without privilege, and IP_PKTINFO overrides one for
+// IPv4). Marked and adopted by the sweep, it is held wherever it is and whatever is done to it.
 func (c *Containment) attach() error {
 	if err := rlimit.RemoveMemlock(); err != nil {
 		return containErr("could not lift the locked-memory limit for BPF: %v", err)
 	}
-	lo := 1
-	if ifc, err := net.InterfaceByName("lo"); err == nil {
-		lo = ifc.Index
+	id, err := cgroupID(c.dir)
+	if err != nil {
+		return containErr("could not read the containment cgroup's id: %v", err)
 	}
+	if err := c.route.gate.setCgroup(id); err != nil {
+		return containErr("could not name the containment's cgroup to its gate: %v", err)
+	}
+	lo := loIndex()
 	gate, err := ebpf.NewProgram(gateSpec(c.route.Index, lo))
 	if err != nil {
 		return containErr("this kernel refused the containment's egress program (cgroup_skb): %v", err)
 	}
+	c.gate = gate
 	mark, err := ebpf.NewProgram(markSpec(c.route.Mark))
 	if err != nil {
-		gate.Close()
 		return containErr("this kernel refused the containment's socket program (cgroup/sock_create): %v", err)
 	}
-	c.gate, c.mark = gate, mark
+	c.mark = mark
 	fd, err := unix.Open(c.dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return containErr("could not open the cgroup: %v", err)
@@ -284,6 +444,27 @@ func (c *Containment) attach() error {
 		}
 	}
 	return nil
+}
+
+func loIndex() int {
+	if ifc, err := net.InterfaceByName("lo"); err == nil {
+		return ifc.Index
+	}
+	return 1
+}
+
+// cgroupID is a cgroup's id, the one a BPF program sees: the 8-byte handle cgroupfs gives its
+// directory.
+func cgroupID(dir string) (uint64, error) {
+	h, _, err := unix.NameToHandleAt(unix.AT_FDCWD, dir, 0)
+	if err != nil {
+		return 0, err
+	}
+	b := h.Bytes()
+	if len(b) != 8 {
+		return 0, fmt.Errorf("a cgroup handle of %d bytes", len(b))
+	}
+	return binary.NativeEndian.Uint64(b), nil
 }
 
 // gateSpec passes a packet only when it leaves through the tunnel device or loopback.
@@ -326,7 +507,9 @@ func (c *Containment) moveTree() error {
 		want := append([]int{c.Pid}, descendants(parent, c.Pid)...)
 		moved := 0
 		for _, p := range want {
-			if c.inside(p) {
+			// An exited child its parent has not reaped yet cannot be moved (the kernel skips it) and has
+			// nothing left to contain.
+			if c.inside(p) || exited(p) {
 				continue
 			}
 			if _, seen := c.origin[p]; !seen {
@@ -410,47 +593,334 @@ func (c *Containment) checkMembers() error {
 		if why := st.privileged(); why != "" {
 			return containErr("pid %d (%s), in pid %d's tree, cannot be contained because %s; nothing was changed", p, st.Name, c.Pid, why)
 		}
+		if leaderExited(p) {
+			return containErr("pid %d (%s), in pid %d's tree, has a main thread that exited while its other threads run "+
+				"on, which cannot be moved whole; nothing was changed", p, st.Name, c.Pid)
+		}
+		if !sameNamespace(strconv.Itoa(p), "thread-self", "net") {
+			// A sandboxed child (a browser's renderer) in a namespace that holds only loopback has no
+			// way off the host at all, and nothing of it needs containing.
+			if loopbackOnly(p) {
+				c.isolated[p] = true
+				continue
+			}
+			return containErr("pid %d (%s), in pid %d's tree, is in another network namespace that reaches past loopback, "+
+				"where this host's routes and tunnel do not reach; nothing was changed", p, st.Name, c.Pid)
+		}
 	}
 	return nil
 }
 
-// sockets deals with every socket the members made before they were moved. Each is reached
-// through pidfd_getfd, a duplicate of the member's own descriptor, and the duplicate is closed at
-// once. A socket shared by several members is handled once.
-func (c *Containment) sockets() error {
-	seen := map[uint64]bool{}
-	var rep SocketReport
-	type todo struct {
-		pid, fd int
-		ino     uint64
+// loopbackOnly reports whether pid's network namespace has no interface but loopback.
+func loopbackOnly(pid int) bool {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "net", "dev"))
+	if err != nil {
+		return false
 	}
-	var refuse []string
-	var work []todo
-	for _, p := range c.Members {
-		dir := filepath.Join(procRoot, strconv.Itoa(p), "fd")
-		ents, err := os.ReadDir(dir)
-		if err != nil {
+	ifs := 0
+	for _, line := range strings.Split(string(b), "\n") {
+		name, _, ok := strings.Cut(line, ":")
+		if !ok {
 			continue
 		}
-		for _, e := range ents {
-			target, err := os.Readlink(filepath.Join(dir, e.Name()))
-			if err != nil || !strings.HasPrefix(target, "socket:[") {
-				continue
+		name = strings.TrimSpace(name)
+		if strings.Contains(name, "|") || name == "" {
+			continue // the two header lines
+		}
+		if name != "lo" {
+			return false
+		}
+		ifs++
+	}
+	return ifs > 0
+}
+
+// sockRef is one descriptor in a member's descriptor table: tid names the table (the process's
+// own when tid == pid).
+type sockRef struct {
+	pid, tid, fd int
+	ino          uint64
+}
+
+// tableSockets lists the sockets and io_uring instances in every descriptor table the processes
+// hold: the process's own, and any a thread keeps for itself (unshare(CLONE_FILES), or the threads
+// of a leader that has exited, whose own /proc/<pid>/fd shows nothing). A socket in several tables
+// is listed once, where it is first found, the process's own table first. It also names each
+// process that has an io_uring instance mapped without a descriptor for it in any of its tables.
+func tableSockets(pids []int) (socks, rings []sockRef, ringless []int) {
+	seen := map[uint64]bool{}
+	for _, p := range pids {
+		hasRing := false
+		for _, tid := range tablesOf(p) {
+			dir := filepath.Join(procRoot, strconv.Itoa(p), "task", strconv.Itoa(tid), "fd")
+			ents, err := os.ReadDir(dir)
+			if err != nil {
+				continue // the thread is gone, or a leader that has exited holds no table
 			}
-			ino, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]"), 10, 64)
-			fd, ferr := strconv.Atoi(e.Name())
-			if err != nil || ferr != nil || seen[ino] {
-				continue
+			for _, e := range ents {
+				fd, ferr := strconv.Atoi(e.Name())
+				target, err := os.Readlink(filepath.Join(dir, e.Name()))
+				if err != nil || ferr != nil {
+					continue
+				}
+				if target == "anon_inode:[io_uring]" {
+					rings = append(rings, sockRef{pid: p, tid: tid, fd: fd})
+					hasRing = true
+					continue
+				}
+				if !strings.HasPrefix(target, "socket:[") {
+					continue
+				}
+				ino, err := strconv.ParseUint(strings.TrimSuffix(strings.TrimPrefix(target, "socket:["), "]"), 10, 64)
+				if err != nil || seen[ino] {
+					continue
+				}
+				seen[ino] = true
+				socks = append(socks, sockRef{p, tid, fd, ino})
 			}
-			seen[ino] = true
-			work = append(work, todo{p, fd, ino})
+		}
+		if !hasRing && mapsIoUring(p) {
+			ringless = append(ringless, p)
+		}
+	}
+	return socks, rings, ringless
+}
+
+// threadGone reports whether thread tid of pid has gone (a fatal signal reaches a frozen thread).
+func threadGone(pid, tid int) bool {
+	_, err := os.Stat(filepath.Join(procRoot, strconv.Itoa(pid), "task", strconv.Itoa(tid)))
+	return err != nil
+}
+
+// processGone reports whether pid has no thread left.
+func processGone(pid int) bool {
+	ents, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "task"))
+	return err != nil || len(ents) == 0
+}
+
+// outsideSharers names every process outside the tree that uses a descriptor table of one of the
+// members (one made with CLONE_FILES and left outside, a child reparented away). It is not frozen,
+// so after the thaw it could put a socket of its own, made in its own cgroup and so unmarked and
+// ungated, into the table the member uses. A kernel without kcmp answers nothing here.
+func outsideSharers(members []int) []string {
+	in := map[int]bool{}
+	var tables [][2]int // pid, tid of a thread in each member table
+	for _, p := range members {
+		in[p] = true
+		for _, tid := range tablesOf(p) {
+			tables = append(tables, [2]int{p, tid})
+		}
+	}
+	var out []string
+	ents, err := os.ReadDir(procRoot)
+	if err != nil {
+		return nil
+	}
+	self := os.Getpid()
+	for _, e := range ents {
+		p, err := strconv.Atoi(e.Name())
+		if err != nil || in[p] || p == self {
+			continue
+		}
+	threads:
+		for _, tid := range threadsOf(p) {
+			for _, mt := range tables {
+				r, _, e := unix.Syscall6(unix.SYS_KCMP, uintptr(mt[1]), uintptr(tid), kcmpFiles, 0, 0, 0)
+				switch {
+				case e == 0 && r == 0:
+					out = append(out, fmt.Sprintf("pid %d, outside the containment, shares pid %d's descriptor table", p, mt[0]))
+					break threads
+				case e != 0 && e != unix.ESRCH:
+					out = append(out, fmt.Sprintf("whether pid %d, outside the containment, shares pid %d's descriptor table "+
+						"cannot be checked (%v)", p, mt[0], e))
+					break threads
+				}
+			}
+		}
+	}
+	return out
+}
+
+// tablesOf names one thread in each descriptor table pid's threads use, the process's own first.
+// A thread whose table cannot be listed (a leader that has exited holds none) names nothing.
+func tablesOf(p int) []int {
+	var tables []int
+	for _, tid := range threadsOf(p) {
+		if _, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(p), "task", strconv.Itoa(tid), "fd")); err != nil {
+			continue
+		}
+		if !sharesATable(tid, tables) {
+			tables = append(tables, tid)
+		}
+	}
+	return tables
+}
+
+// threadsOf lists pid's threads, the leader first.
+func threadsOf(pid int) []int {
+	ents, err := os.ReadDir(filepath.Join(procRoot, strconv.Itoa(pid), "task"))
+	if err != nil {
+		return nil
+	}
+	out := []int{}
+	for _, e := range ents {
+		if t, err := strconv.Atoi(e.Name()); err == nil && t != pid {
+			out = append(out, t)
+		}
+	}
+	sort.Ints(out)
+	return append([]int{pid}, out...)
+}
+
+// sharesATable reports whether tid uses the same descriptor table as one of tables. A kernel
+// without kcmp, or a thread that is gone, answers no, and the table is then simply listed: a
+// shared table read twice only finds sockets already seen.
+func sharesATable(tid int, tables []int) bool {
+	for _, t := range tables {
+		if r, _, e := unix.Syscall6(unix.SYS_KCMP, uintptr(t), uintptr(tid), kcmpFiles, 0, 0, 0); e == 0 && r == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// mapsIoUring reports whether pid has an io_uring instance mapped.
+func mapsIoUring(pid int) bool {
+	f, err := os.Open(filepath.Join(procRoot, strconv.Itoa(pid), "maps"))
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		if strings.HasSuffix(sc.Text(), "[io_uring]") {
+			return true
+		}
+	}
+	return false
+}
+
+// fdinfo reads /proc/<pid>/task/<tid>/fdinfo/<fd>.
+func fdinfo(r sockRef) (string, error) {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(r.pid), "task", strconv.Itoa(r.tid), "fdinfo", strconv.Itoa(r.fd)))
+	return string(b), err
+}
+
+// scmInFlight reads how many descriptors are in flight in a unix socket's receive queue, from its
+// fdinfo's "scm_fds:" line (Linux 5.8+). ok is false when the line is not there.
+func scmInFlight(info string) (n int, ok bool) {
+	for _, line := range strings.Split(info, "\n") {
+		if v, found := strings.CutPrefix(line, "scm_fds:"); found {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			return n, err == nil
+		}
+	}
+	return 0, false
+}
+
+// ringHeldFiles counts the files an io_uring instance holds as fixed files or direct descriptors,
+// from its fdinfo: "UserFiles:\tN", then one line per slot, "%5u: <name>" or "%5u: <none>". The name
+// is the file's bare dentry name ("UDPv6" for a socket, "hostname" for a file), so a socket cannot
+// be told from a file by it. ok is false when the slots are not all listed: the kernel lists them
+// only when it gets the ring's lock at once, and a count it did not show is not a count of none.
+func ringHeldFiles(info string) (held int, ok bool) {
+	want, listed, in := -1, 0, false
+	for _, line := range strings.Split(info, "\n") {
+		if v, found := strings.CutPrefix(line, "UserFiles:"); found {
+			n, err := strconv.Atoi(strings.TrimSpace(v))
+			if err != nil {
+				return 0, false
+			}
+			want, in = n, true
+			continue
+		}
+		if !in {
+			continue
+		}
+		idx, name, found := strings.Cut(strings.TrimSpace(line), ": ")
+		if _, err := strconv.Atoi(idx); !found || err != nil {
+			break
+		}
+		listed++
+		if name != "<none>" {
+			held++
+		}
+	}
+	if want < 0 {
+		return 0, true // no registered-file table at all
+	}
+	return held, listed >= want
+}
+
+// sockets deals with every socket the members made before they were moved. Each is reached
+// through pidfd_getfd, a duplicate of the member's own descriptor, which is checked to be the very
+// socket the table showed, and the duplicate is closed at once. A socket shared by several
+// members, or several tables, is handled once.
+//
+// Every IP socket is given the containment's mark, so the gate on the root cgroup holds it from
+// then on wherever it is: its packets leave through the tunnel or loopback, or not at all.
+// Loopback sockets keep working (kept); listeners and unconnected sockets are also pinned to the
+// tunnel by index, and go on working through it (pinned); connections to anywhere else are pinned
+// and shut down (cut). Anything the containment cannot reach or cannot judge refuses it, and is
+// decided for all before anything is changed: a family no route reaches, descriptors in flight
+// on a unix socket, a socket held by an io_uring instance, or by a thread's own table this kernel
+// gives no way into.
+func (c *Containment) sockets() error {
+	var rep SocketReport
+	swept := c.Members
+	hostNet, err := nsInode()
+	if err != nil {
+		return containErr("cannot read this host's network namespace (%v), so the sockets of pid %d cannot be told "+
+			"apart from a sandbox's; it was not contained", err, c.Pid)
+	}
+	// The namespaces of members that hold nothing but loopback: a socket made in one of them has no
+	// way off the host. A socket made in any other namespace (a container's, with its own route out)
+	// is refused.
+	sealedNets := map[uint64]bool{}
+	for p := range c.isolated {
+		var st unix.Stat_t
+		if unix.Stat(filepath.Join(procRoot, strconv.Itoa(p), "ns", "net"), &st) == nil {
+			sealedNets[st.Ino] = true
+		}
+	}
+	socks, rings, ringless := tableSockets(swept)
+	hostOwn := map[netip.Addr]bool{}
+	if as, err := hostAddrs(); err == nil {
+		for _, a := range as {
+			if !a.IsLoopback() && a != c.self && a != CLATv4 {
+				hostOwn[a] = true
+			}
+		}
+	}
+	var refuse []string
+	if _, _, e := unix.Syscall6(unix.SYS_KCMP, uintptr(c.Pid), uintptr(c.Pid), kcmpFiles, 0, 0, 0); e != 0 {
+		return containErr("kcmp is not available here (%v: CONFIG_KCMP off, or a security module denies it), so whether a "+
+			"process outside pid %d's tree shares its descriptor table cannot be checked; it was not contained", e, c.Pid)
+	}
+	refuse = append(refuse, outsideSharers(swept)...)
+	for _, p := range ringless {
+		refuse = append(refuse, fmt.Sprintf("pid %d has an io_uring instance mapped that it holds no descriptor for, so what "+
+			"it holds cannot be read", p))
+	}
+	for _, r := range rings {
+		info, err := fdinfo(r)
+		if err != nil {
+			continue // closed, or the process exited
+		}
+		if n, ok := ringHeldFiles(info); !ok {
+			refuse = append(refuse, fmt.Sprintf("pid %d fd %d: an io_uring instance whose registered files could not be "+
+				"read", r.pid, r.fd))
+		} else if n > 0 {
+			refuse = append(refuse, fmt.Sprintf("pid %d fd %d: an io_uring instance with %d registered file%s, outside every "+
+				"descriptor table, and io_uring does not say which are sockets", r.pid, r.fd, n, plural(n)))
 		}
 	}
 	type decided struct {
-		todo
-		dup    int
-		action sockAction
-		was    string
+		sockRef
+		dup       int
+		ip        bool
+		listening bool
+		action    sockAction
 	}
 	var plan []decided
 	defer func() {
@@ -458,66 +928,253 @@ func (c *Containment) sockets() error {
 			unix.Close(d.dup)
 		}
 	}()
-	for _, w := range work {
-		dup, err := getfd(w.pid, w.fd)
+	for _, w := range socks {
+		dup, err := getfdAt(w.pid, w.tid, w.fd)
 		if err != nil {
 			if errors.Is(err, unix.ESRCH) || errors.Is(err, unix.EBADF) {
-				continue // the member exited, or closed it: nothing left to contain
+				// The tree is frozen, so a descriptor it listed cannot go away by its own doing: only
+				// a process that has gone entirely may answer so.
+				if processGone(w.pid) || (w.tid != w.pid && threadGone(w.pid, w.tid)) {
+					continue
+				}
+				refuse = append(refuse, fmt.Sprintf("pid %d fd %d: listed while frozen, then not there (%v), so something "+
+					"outside the containment changes its descriptor table", w.pid, w.fd, err))
+				continue
 			}
 			if errors.Is(err, unix.ENOSYS) {
 				return containErr("this kernel has no pidfd_getfd (Linux 5.6+), so the sockets pid %d opened before "+
 					"containment could not be reached; it was not contained", c.Pid)
 			}
+			if w.tid != w.pid && errors.Is(err, unix.EINVAL) {
+				refuse = append(refuse, fmt.Sprintf("pid %d thread %d keeps a descriptor table of its own holding a socket "+
+					"(fd %d), which this kernel gives no way into (that needs Linux 6.9)", w.pid, w.tid, w.fd))
+				continue
+			}
+			if errors.Is(err, unix.EPERM) && readTrim(yamaScopePath) == "3" {
+				return containErr("kernel.yama.ptrace_scope is 3 here, which refuses pidfd_getfd even to root, so the "+
+					"sockets pid %d opened before containment cannot be reached; it was not contained", c.Pid)
+			}
 			return containErr("could not reach pid %d's socket (fd %d): %v; it was not contained", w.pid, w.fd, err)
+		}
+		var st unix.Stat_t
+		if err := unix.Fstat(dup, &st); err != nil || st.Ino != w.ino || st.Mode&unix.S_IFMT != unix.S_IFSOCK {
+			unix.Close(dup)
+			return containErr("pid %d's descriptor %d changed while the process was frozen, so something outside the "+
+				"containment shares its descriptor table; it was not contained", w.pid, w.fd)
 		}
 		fam, _ := unix.GetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_DOMAIN)
 		listening, _ := unix.GetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_ACCEPTCONN)
 		local, peer, connected := sockAddrs(dup)
 		a := classifySocket(fam, local, peer, connected, listening == 1)
-		if a == sockRefuse {
-			refuse = append(refuse, fmt.Sprintf("pid %d fd %d: %s", w.pid, w.fd, familyName(fam)))
+		ip := fam == afInet || fam == afInet6
+		netns, known := socketNetns(dup)
+		switch {
+		case ip && known && netns != hostNet && sealedNets[netns]:
+			a = sockKeep // made in a loopback-only namespace (a sandboxed child's): it never leaves the host
+			ip = false
+		case ip && known && netns != hostNet:
+			refuse = append(refuse, fmt.Sprintf("pid %d fd %d: a socket made in another network namespace that reaches "+
+				"past loopback (a container's), where this host's routes and tunnel do not reach", w.pid, w.fd))
+		case a == sockCut && hostOwn[peer]:
+			a = sockKeep // a connection to this host's own address never leaves it; marked, it stays local
+		case a == sockPin && fam != afUnix && synSent(dup):
+			a = sockCut // still connecting from the host's address: it can never complete through the tunnel
 		}
-		was, _ := unix.GetsockoptString(dup, unix.SOL_SOCKET, unix.SO_BINDTODEVICE)
-		plan = append(plan, decided{w, dup, a, was})
+		switch {
+		case a == sockRefuse:
+			refuse = append(refuse, fmt.Sprintf("pid %d fd %d: %s", w.pid, w.fd, familyName(fam)))
+		case fam == afUnix:
+			info, err := fdinfo(w)
+			n, ok := scmInFlight(info)
+			switch {
+			case err != nil:
+			case !ok:
+				refuse = append(refuse, fmt.Sprintf("pid %d fd %d: a unix socket whose descriptors in flight this kernel "+
+					"does not show (that needs Linux 5.8)", w.pid, w.fd))
+			case n > 0:
+				refuse = append(refuse, fmt.Sprintf("pid %d fd %d: %d descriptor%s in flight on a unix socket, sent and not "+
+					"yet received, which nothing can reach until they are (often a passing moment: try again)", w.pid, w.fd, n, plural(n)))
+			}
+		}
+		plan = append(plan, decided{w, dup, ip, listening == 1, a})
 	}
 	if len(refuse) > 0 {
-		return containErr("pid %d holds socket%s no route reaches (%s), which a containment cannot close off; "+
-			"nothing was changed. `sudo whisper run --enforce` is the form that covers every socket family",
-			c.Pid, plural(len(refuse)), strings.Join(refuse, "; "))
+		return containErr("pid %d holds socket%s a containment cannot reach or close off (%s); nothing was changed. "+
+			"`sudo whisper run --enforce` is the form that covers every socket", c.Pid, plural(len(refuse)), strings.Join(refuse, "; "))
 	}
-	// Decided for all before acting on any, so a refusal above changed nothing.
+	// Decided for all before acting on any, so a refusal above changed nothing. What it is about to
+	// change is in the record first, so a command killed halfway leaves a record that gives back all
+	// of it (giving back a socket it never reached changes nothing).
+	base := len(c.touched)
 	for _, d := range plan {
-		switch d.action {
-		case sockKeep:
+		if !d.ip {
+			continue
+		}
+		t := touchedSock{Pid: d.pid, Tid: d.tid, Fd: d.fd, Ino: d.ino, Marked: true, Bound: d.action != sockKeep}
+		wasMark, _ := unix.GetsockoptInt(d.dup, unix.SOL_SOCKET, unix.SO_MARK)
+		t.WasMark = uint32(wasMark)
+		t.WasIndex, _ = unix.GetsockoptInt(d.dup, unix.SOL_SOCKET, unix.SO_BINDTOIFINDEX)
+		c.touched = append(c.touched, t)
+	}
+	if err := c.writeRecord(); err != nil {
+		return err
+	}
+	var ended []uint64
+	for _, d := range plan {
+		if !d.ip {
+			rep.Kept++ // unix, netlink, crypto: no way off the host
+			continue
+		}
+		if err := c.route.gate.adopt(d.dup); err != nil {
+			return containErr("could not adopt pid %d's socket (fd %d) into the containment: %v; it was not contained", d.pid, d.fd, err)
+		}
+		if err := unix.SetsockoptInt(d.dup, unix.SOL_SOCKET, unix.SO_MARK, int(c.route.Mark)); err != nil {
+			return containErr("could not mark pid %d's socket (fd %d): %v; it was not contained", d.pid, d.fd, err)
+		}
+		if got, err := unix.GetsockoptInt(d.dup, unix.SOL_SOCKET, unix.SO_MARK); err != nil || uint32(got) != c.route.Mark {
+			return containErr("pid %d's socket (fd %d) did not keep the containment's mark; it was not contained", d.pid, d.fd)
+		}
+		if d.action == sockKeep {
 			rep.Kept++
 			continue
 		}
-		if err := unix.SetsockoptString(d.dup, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, c.route.Name); err != nil {
+		if err := bindToDevice(d.dup, c.route.Index, c.route.Name); err != nil {
 			return containErr("could not pin pid %d's socket (fd %d) to the tunnel: %v; it was not contained", d.pid, d.fd, err)
 		}
-		if got, err := unix.GetsockoptString(d.dup, unix.SOL_SOCKET, unix.SO_BINDTODEVICE); err != nil || got != c.route.Name {
+		if got, err := unix.GetsockoptInt(d.dup, unix.SOL_SOCKET, unix.SO_BINDTOIFINDEX); err != nil || got != c.route.Index {
 			return containErr("pid %d's socket (fd %d) did not stay pinned to the tunnel; it was not contained", d.pid, d.fd)
+		}
+		if d.listening {
+			rep.Cut += c.drainAcceptQueue(d.dup)
 		}
 		if d.action == sockCut {
 			_ = unix.Shutdown(d.dup, unix.SHUT_RDWR)
+			ended = append(ended, d.ino) // ended: nothing to give back
 			rep.Cut++
 			continue
 		}
 		rep.Pinned++
-		c.pinned = append(c.pinned, pinnedSock{Pid: d.pid, Fd: d.fd, Ino: d.ino, Was: d.was})
+	}
+	if len(ended) > 0 {
+		gone := map[uint64]bool{}
+		for _, ino := range ended {
+			gone[ino] = true
+		}
+		kept := c.touched[:base]
+		for _, t := range c.touched[base:] {
+			if !gone[t.Ino] {
+				kept = append(kept, t)
+			}
+		}
+		c.touched = kept
 	}
 	c.Sockets = rep
 	return nil
 }
 
-// getfd duplicates pid's descriptor fd into this process.
-func getfd(pid, fd int) (int, error) {
-	pfd, err := unix.PidfdOpen(pid, 0)
+// drainAcceptQueue ends every connection waiting in a listener's accept queue. Each finished its
+// handshake before the listener was marked and pinned, so it was made from the host's own address,
+// carries neither, and is in no descriptor table: accepted after the thaw, it would talk outside the
+// tunnel. Each is taken here, pinned so not even its FIN leaves another way, and shut down. The
+// listener's open file is the program's own, so it is never made non-blocking: poll says whether a
+// connection waits before each accept. It returns how many it ended.
+func (c *Containment) drainAcceptQueue(listener int) int {
+	// A process outside the tree holding the same open file could take the connection between the
+	// poll and the accept; a short receive timeout keeps the accept from waiting on it. The program is
+	// frozen, so it never sees the timeout, and the old one is put back.
+	if old, err := unix.GetsockoptTimeval(listener, unix.SOL_SOCKET, unix.SO_RCVTIMEO); err == nil {
+		_ = unix.SetsockoptTimeval(listener, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &unix.Timeval{Usec: 50000})
+		defer unix.SetsockoptTimeval(listener, unix.SOL_SOCKET, unix.SO_RCVTIMEO, old)
+	}
+	n := 0
+	for i := 0; i < 1<<16; i++ {
+		pfd := []unix.PollFd{{Fd: int32(listener), Events: unix.POLLIN}}
+		if k, err := unix.Poll(pfd, 0); err != nil || k == 0 || pfd[0].Revents&unix.POLLIN == 0 {
+			return n
+		}
+		child, _, err := unix.Accept4(listener, unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK)
+		if err != nil {
+			return n
+		}
+		_ = unix.SetsockoptInt(child, unix.SOL_SOCKET, unix.SO_MARK, int(c.route.Mark))
+		_ = bindToDevice(child, c.route.Index, c.route.Name)
+		_ = unix.Shutdown(child, unix.SHUT_RDWR)
+		unix.Close(child)
+		n++
+	}
+	return n
+}
+
+// socketNetns returns the inode of the network namespace a socket was made in. known is false on a
+// kernel that cannot say (no SIOCGSKNS), and the socket is then judged as one of the host's.
+func socketNetns(fd int) (ino uint64, known bool) {
+	nfd, err := unix.IoctlRetInt(fd, unix.SIOCGSKNS)
+	if err != nil {
+		return 0, false
+	}
+	defer unix.Close(nfd)
+	var st unix.Stat_t
+	if unix.Fstat(nfd, &st) != nil {
+		return 0, false
+	}
+	return st.Ino, true
+}
+
+// synSent reports whether a TCP socket is still connecting.
+func synSent(fd int) bool {
+	if typ, err := unix.GetsockoptInt(fd, unix.SOL_SOCKET, unix.SO_TYPE); err != nil || typ != unix.SOCK_STREAM {
+		return false
+	}
+	info, err := unix.GetsockoptTCPInfo(fd, unix.IPPROTO_TCP, unix.TCP_INFO)
+	return err == nil && info.State == 2 // TCP_SYN_SENT
+}
+
+// getfdAt duplicates descriptor fd of the table tid uses, in process pid, into this process. The
+// process's own table is reached through its pidfd; a thread's own needs a pidfd for the thread
+// (PIDFD_THREAD, Linux 6.9), and an older kernel answers EINVAL.
+func getfdAt(pid, tid, fd int) (int, error) {
+	flags := 0
+	target := pid
+	if tid > 0 && tid != pid {
+		target, flags = tid, unix.PIDFD_THREAD
+	}
+	pfd, err := unix.PidfdOpen(target, flags)
 	if err != nil {
 		return -1, err
 	}
 	defer unix.Close(pfd)
 	return unix.PidfdGetfd(pfd, fd, 0)
+}
+
+// getfd duplicates pid's descriptor fd into this process.
+func getfd(pid, fd int) (int, error) { return getfdAt(pid, pid, fd) }
+
+// ptraceNote says what the host's ptrace policy leaves open, or "" when it leaves nothing.
+func ptraceNote() string {
+	b, err := os.ReadFile(yamaScopePath)
+	return ptraceNoteFor(strings.TrimSpace(string(b)), err)
+}
+
+var yamaScopePath = "/proc/sys/kernel/yama/ptrace_scope"
+
+// ptraceNoteFor is ptraceNote for the contents of kernel.yama.ptrace_scope, or the error reading it.
+// Scope 0, like no Yama at all, lets any process attach to every other process of its user. The
+// contained process could then make one outside the containment send for it (ptrace), or take its
+// sockets (pidfd_getfd), with no help from it. That is said, not refused: the same user's service
+// manager or session bus starts a process outside the cgroup on request at any scope, and the
+// boundary that holds against a process working to get out is `whisper run --enforce`.
+func ptraceNoteFor(scope string, err error) string {
+	const tail = " kernel.yama.ptrace_scope=1 closes ptrace and pidfd_getfd; the boundary that holds against a process working " +
+		"to get out is `sudo whisper run --enforce`."
+	switch {
+	case err != nil && errors.Is(err, os.ErrNotExist):
+		return "this kernel has no Yama, so the contained process may attach to any process of its own user outside the " +
+			"containment (ptrace, pidfd_getfd) and send through it." + " Starting it under `sudo whisper run --enforce` closes that."
+	case err == nil && scope == "0":
+		return "kernel.yama.ptrace_scope is 0 here, so the contained process may attach to any process of its own user " +
+			"outside the containment (ptrace, pidfd_getfd) and send through it." + tail
+	}
+	return ""
 }
 
 // sockAddrs returns a socket's local and peer addresses, unmapped, and whether it has a peer.
@@ -563,11 +1220,46 @@ func (c *Containment) Release() []string {
 func (c *Containment) undo() []string {
 	var notes []string
 	_ = writeFile(filepath.Join(c.dir, "cgroup.freeze"), "1") // nobody forks while they are moved back
-	for _, s := range c.pinned {
-		if err := restorePin(s); err != nil {
-			notes = append(notes, err.Error())
+	_ = c.waitFrozen()                                        // best effort: what follows reads their tables
+	cut := c.cutAgentSockets()
+	// The gates a takeover adopted come off first: they would hold every socket they tagged, given
+	// back below, to the tunnel that is gone.
+	var left []uint32 // still named by the record if it is kept, so nothing is left unnamed
+	for _, g := range c.adopted {
+		if !detachRootGatesOf(c.root, g) {
+			left = append(left, g)
+			c.notes = append(c.notes, fmt.Sprintf("the gate %s stays on the root cgroup %s; `bpftool cgroup show %s` names it", rootGateName(g), c.root, c.root))
 		}
 	}
+	c.adopted = left
+	// Last touched first: a socket a killed containment of this agent touched and this one touched
+	// again gets back what it had before either. One just ended because it speaks from the agent's
+	// address keeps its pin: given back its old binding, its last packets would leave by the host.
+	// A socket is found again wherever it is now (the member that held it when it was touched may
+	// be gone while another still holds it, or the descriptor may have moved), and only then by the
+	// place it was recorded at.
+	where := map[uint64]sockRef{}
+	if socks, _, _ := tableSockets(c.members()); len(socks) > 0 {
+		for _, r := range socks {
+			where[r.ino] = r
+		}
+	}
+	var owed []touchedSock // what could not be given back, for a later release
+	for i := len(c.touched) - 1; i >= 0; i-- {
+		t := c.touched[i]
+		if cut[t.Ino] {
+			continue
+		}
+		at := t
+		if r, ok := where[t.Ino]; ok {
+			at.Pid, at.Tid, at.Fd = r.pid, r.tid, r.fd
+		}
+		if err := restoreSock(at, c.route.gate); err != nil {
+			notes = append(notes, err.Error())
+			owed = append([]touchedSock{t}, owed...)
+		}
+	}
+	c.touched = owed
 	fallback := c.origin[c.Pid]
 	for round := 0; round < settleRounds; round++ {
 		ms := c.members()
@@ -586,11 +1278,26 @@ func (c *Containment) undo() []string {
 	}
 	_ = writeFile(filepath.Join(c.dir, "cgroup.freeze"), "0")
 	c.detach()
+	notes = append(notes, c.notes...)
+	c.notes = nil
 	if err := os.Remove(c.dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		notes = append(notes, fmt.Sprintf("the cgroup %s could not be removed: %v", c.dir, err))
 	}
 	_ = os.Remove(filepath.Dir(c.dir)) // only succeeds when no other containment lives there
-	_ = os.Remove(c.statePath)
+	if len(notes) == 0 {
+		_ = os.Remove(c.statePath)
+	} else if _, err := os.Stat(c.statePath); err == nil {
+		// Kept while something could not be given back, for another --release, and naming only that:
+		// a socket ended because it speaks from the agent's address must never get its binding back.
+		// The tunnel's own gate is not named: it belongs to the device, whose own record finds it if
+		// this command dies before the device closes.
+		gen := c.route.Gen
+		c.route.Gen = 0
+		if err := c.writeRecord(); err != nil {
+			notes = append(notes, "the containment's record could not be rewritten: "+err.Error())
+		}
+		c.route.Gen = gen
+	}
 	return notes
 }
 
@@ -610,7 +1317,8 @@ func (c *Containment) moveOut(p int, origin string) error {
 }
 
 // detach removes the programs from the cgroup, the ones this process loaded or, for a killed
-// containment's, whatever is attached.
+// containment's, whatever is attached. The gates on the root cgroup are not its: the device's goes
+// when the device closes, and the ones a takeover adopted came off earlier in undo.
 func (c *Containment) detach() {
 	fd, err := unix.Open(c.dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
 	if err != nil {
@@ -639,38 +1347,121 @@ func (c *Containment) detach() {
 	}
 }
 
-// restorePin gives a pinned socket its device binding back, if the descriptor still names it.
-func restorePin(s pinnedSock) error {
-	dup, err := getfd(s.Pid, s.Fd)
+// restoreSock gives a socket the containment touched its mark and binding back, if the descriptor
+// still names it.
+func restoreSock(s touchedSock, gate *rootGate) error {
+	dup, err := getfdAt(s.Pid, s.Tid, s.Fd)
 	if err != nil {
 		return nil // the process or the socket is gone
 	}
 	defer unix.Close(dup)
 	var st unix.Stat_t
 	if unix.Fstat(dup, &st) != nil || st.Ino != s.Ino {
-		return nil // the descriptor now names another socket, which was never pinned
+		return nil // the descriptor now names another socket, which was never touched
 	}
-	if err := unix.SetsockoptString(dup, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, s.Was); err != nil {
-		return fmt.Errorf("pid %d's socket (fd %d) stays pinned to the removed tunnel: %v", s.Pid, s.Fd, err)
+	if !s.Bound && !s.Marked {
+		if err := unix.SetsockoptString(dup, unix.SOL_SOCKET, unix.SO_BINDTODEVICE, s.Was); err != nil {
+			return fmt.Errorf("pid %d's socket (fd %d) stays pinned to the removed tunnel: %v", s.Pid, s.Fd, err)
+		}
+		return nil
+	}
+	gate.forget(dup)
+	if s.Bound {
+		if err := unix.SetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_BINDTOIFINDEX, s.WasIndex); err != nil {
+			return fmt.Errorf("pid %d's socket (fd %d) stays pinned to the removed tunnel: %v", s.Pid, s.Fd, err)
+		}
+	}
+	if s.Marked {
+		was := s.WasMark
+		if _, ours := genOf(was); ours {
+			was = 0 // a killed containment's mark, on a socket it made: nothing to give back
+		}
+		if err := unix.SetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_MARK, int(was)); err != nil {
+			return fmt.Errorf("pid %d's socket (fd %d) keeps the containment's mark: %v", s.Pid, s.Fd, err)
+		}
 	}
 	return nil
 }
 
-func (c *Containment) writeRecord() {
-	rec := containRecord{Pid: c.Pid, Slot: c.route.Slot, Origin: c.origin, Pinned: c.pinned}
+// cutAgentSockets ends the members' sockets whose local address is the agent's (the /128, or
+// 192.0.0.2 for a translated one). They were made inside the containment and leave from an
+// address this host holds only while the tunnel does: once it is gone their next packet would take
+// the host's own uplink with the agent's address as source. Each is pinned to the tunnel by index,
+// so it never leaves another way, and shut down while the tunnel still carries the goodbye.
+func (c *Containment) cutAgentSockets() map[uint64]bool {
+	cut := map[uint64]bool{}
+	if !c.self.IsValid() {
+		return cut
+	}
+	socks, _, _ := tableSockets(c.members())
+	for _, r := range socks {
+		dup, err := getfdAt(r.pid, r.tid, r.fd)
+		if err != nil {
+			continue
+		}
+		var st unix.Stat_t
+		fam, _ := unix.GetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_DOMAIN)
+		if unix.Fstat(dup, &st) == nil && st.Ino == r.ino && (fam == unix.AF_INET || fam == unix.AF_INET6) {
+			if local, _, _ := sockAddrs(dup); local == c.self || local == CLATv4 {
+				if c.route.Index > 0 {
+					_ = bindToDevice(dup, c.route.Index, c.route.Name)
+				}
+				_ = unix.Shutdown(dup, unix.SHUT_RDWR)
+				cut[r.ino] = true
+			}
+		}
+		unix.Close(dup)
+	}
+	return cut
+}
+
+// addrOfCgroupName reads the agent's /128 back from a containment's cgroup name (containCgroupName).
+func addrOfCgroupName(name string) netip.Addr {
+	if len(name) != 32 {
+		return netip.Addr{}
+	}
+	var b [16]byte
+	for i := range b {
+		v, err := strconv.ParseUint(name[2*i:2*i+2], 16, 8)
+		if err != nil {
+			return netip.Addr{}
+		}
+		b[i] = byte(v)
+	}
+	return netip.AddrFrom16(b)
+}
+
+// writeRecord replaces the record whole (a new file renamed over the old one), so a command killed
+// while it writes leaves the old record or the new one, never an empty one. A record that cannot be
+// written refuses the containment: without it a killed command would leave what nobody can undo.
+func (c *Containment) writeRecord() error {
+	rec := containRecord{Pid: c.Pid, Slot: c.route.Slot, Gen: c.route.Gen, Mark: c.route.Mark, Index: c.route.Index,
+		Adopt: c.adopted, Origin: c.origin, Pinned: c.touched}
 	b, err := json.Marshal(rec)
+	if err == nil {
+		err = secureDir(containState)
+	}
+	var f *os.File
+	if err == nil {
+		f, err = os.CreateTemp(containState, ".record-*")
+	}
+	if err == nil {
+		_, err = f.Write(b)
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+		if err == nil {
+			err = os.Rename(f.Name(), c.statePath)
+		}
+		if err != nil {
+			_ = os.Remove(f.Name())
+		}
+	}
 	if err != nil {
-		return
+		return containErr("could not write the containment's record under %s (%v), without which a killed command "+
+			"would leave what nobody can undo; it was not contained", containState, err)
 	}
-	if err := secureDir(containState); err != nil {
-		return
-	}
-	f, err := os.OpenFile(c.statePath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return
-	}
-	_, _ = f.Write(b)
-	_ = f.Close()
+	return nil
 }
 
 func readRecord(path string) (containRecord, error) {
@@ -736,16 +1527,46 @@ func ReleaseStale(pid int, self netip.Addr) ([]int, []string, error) {
 		name = containCgroupName(self)
 	}
 	c := &Containment{Pid: pid, root: root, origin: map[int]string{}, dir: filepath.Join(root, ContainParent, name),
-		statePath: filepath.Join(containState, name+".json")}
+		statePath: filepath.Join(containState, name+".json"), self: addrOfCgroupName(name)}
 	if _, err := os.Stat(c.dir); err != nil {
 		return nil, nil, containErr("there is no containment %s on this host", name)
 	}
-	if rec, err := readRecord(c.statePath); err == nil {
-		c.origin, c.pinned = rec.Origin, rec.Pinned
+	// A live `whisper contain` holds the agent's lock for as long as it holds the process, and the
+	// kernel drops the lock of one that was killed. So a lock that cannot be taken is a containment
+	// that is not stale: tearing it down would leave it running with nothing behind it.
+	if !c.self.IsValid() {
+		return nil, nil, containErr("the containment %s is not named for an agent's address, so whether it is still held "+
+			"cannot be checked; nothing was changed", name)
+	}
+	{
+		l, err := LockExclusive(c.self)
+		if err != nil {
+			var held *HeldError
+			if errors.As(err, &held) {
+				return nil, nil, containErr("the containment of %s is live, not left behind (%v); stop that `whisper contain` "+
+					"(Ctrl-C) and it releases the process itself", c.self, err)
+			}
+			return nil, nil, containErr("cannot take the agent lock of %s: %v", c.self, err)
+		}
+		defer l.Release()
+	}
+	rec, rerr := readRecord(c.statePath)
+	switch {
+	case rerr == nil:
+		c.origin, c.touched = rec.Origin, rec.Pinned
+		c.route = HostRoute{Slot: rec.Slot, Gen: rec.Gen, Mark: rec.Mark, Index: rec.Index}
+		c.adopted = append(c.adopted, rec.Adopt...)
+		if rec.Gen != 0 {
+			c.adopted = append(c.adopted, rec.Gen) // its own gate, left by the killed command
+		}
 		if c.Pid == 0 {
 			c.Pid = rec.Pid
 		}
-		defer RemoveStaleRules(rec.Slot)
+		defer RemoveStaleRules(rec.Slot, rec.Mark, c.self)
+		defer reapDeadDevices() // last: the killed command's device record, once the gate is off
+	case !errors.Is(rerr, os.ErrNotExist):
+		return nil, nil, containErr("the containment's record %s cannot be read (%v), so what it changed cannot be given "+
+			"back; nothing was changed", c.statePath, rerr)
 	}
 	moved := c.members()
 	notes := c.undo()

@@ -85,7 +85,7 @@ type Options struct {
 	// HealthInterval is how often the monitor polls the device's handshake. 0 ⇒ 5s.
 	HealthInterval time.Duration
 	// DeadAfter is how long with NO fresh handshake before the monitor forces a reconnect.
-	// 0 ⇒ 180s (~7× the 25s keepalive - the server reaper's own black-hole threshold).
+	// 0 ⇒ defaultDeadAfter (210 s), past the longest a live idle tunnel's handshake can read.
 	DeadAfter time.Duration
 	// Logf, if set, receives one-line operational notes (reconnects). nil ⇒ silent. It must
 	// NEVER be handed a secret - callers pass a plain stderr writer; we only emit safe text.
@@ -109,6 +109,11 @@ type Options struct {
 	// DefaultPathStateDir (~/.config/whisper/paths), which is what production wants and needs no
 	// configuration. PathStateOff publishes nothing. Tests point it at a temp directory.
 	PathStateDir string
+	// DirectKeepalive is the persistent keepalive of a direct peer. 0 ⇒ directKeepalive (5 s). The UAPI
+	// counts it in whole seconds, so anything shorter is one second. It is what the dead-path window rides
+	// on (DirectDeadAfter is four of it in production), so a test that shortens one shortens the other with
+	// it; production should not set it.
+	DirectKeepalive time.Duration
 	// PunchEvery is how long one NAT-traversal punch attempt is given before the next candidate
 	// endpoint is tried. 0 ⇒ punchPeriod (5s, WireGuard's own handshake retry interval - see
 	// punch.go for why that is the right number and not a tunable anybody should reach for).
@@ -181,15 +186,39 @@ type Tunnel struct {
 	directDead  time.Duration
 	directRearm time.Duration
 	punchEvery  time.Duration
+	// directKA is the direct peers' persistent keepalive in seconds (Options.DirectKeepalive); zero reads as
+	// directKeepalive (directKeepaliveSecs).
+	directKA int
 	// preludes is when a first (untimed) punch train last started per peer key, guarded by mu and pruned to
 	// the last directRearmAfter (peers.go, lastPrelude).
 	preludes map[string]time.Time
+	// holds is when each key's quiet hold after a demotion ends, and withdrawals when that demotion was,
+	// guarded by mu and pruned as the holds end (peers.go, lastHold).
+	holds       map[string]time.Time
+	withdrawals map[string]time.Time
+	// directProof overrides sessionProof when non-zero. Guarded by mu. A test seam: the real bound is
+	// three minutes and more, which no test should wait for.
+	directProof time.Duration
 
 	// pathDir / pathFP / pathAt are the published path record (see pathstate.go): where it goes,
 	// a fingerprint of what was last written, and when. pathFP and pathAt are guarded by mu.
 	pathDir string
 	pathFP  string
 	pathAt  time.Time
+	// pubMu serialises publishPaths from end to end, snapshot and write: the monitor and the refresh
+	// loop both publish, and two writes renamed into place out of order would leave the older state
+	// on disk, which a reader comparing two reads (unroutePublish) must never see.
+	pubMu sync.Mutex
+	// routeEpoch is the last routed period handed out (confirmRouted). Guarded by mu; it only grows,
+	// from a random start, so two tunnels never hand out the same one (newRouteEpochBase).
+	routeEpoch uint64
+	// instance is this tunnel's random name in the record it publishes (PathStateRecord.Instance).
+	instance string
+	// pathsRetired is set, under pubMu, once the tunnel has begun to stop: nothing is published after.
+	pathsRetired bool
+	// monitorExit, when set, runs as the monitor exits and before its own record cleanup. A test seam:
+	// it lets a test hold the monitor's cleanup back and see that Stop itself removed the record first.
+	monitorExit func()
 
 	// peerWrite serialises SetDirectPeers with itself. The map above is guarded by mu, but the
 	// device writes that follow a reconcile happen OUTSIDE it (an IpcSet must not be made under a
@@ -255,6 +284,9 @@ func (t *Tunnel) Stop() {
 		return
 	}
 	t.closed.Do(func() { close(t.stop) })
+	// The record goes before the device does (retirePaths), so nothing can read a route through a
+	// tunnel that has closed.
+	t.retirePaths()
 	t.mu.Lock()
 	ln := t.identityLn
 	t.mu.Unlock()

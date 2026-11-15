@@ -164,7 +164,7 @@ func TestAFailedDisconnectSaysTheMarkOutlivesTheRun(t *testing.T) {
 	var log lineLog
 	h := grantedHold(t, srv.URL, log.logf)
 	h.release(nil)
-	if got := log.all(); !strings.Contains(got, "could not disconnect") || !strings.Contains(got, "3 minutes") {
+	if got := log.all(); !strings.Contains(got, "could not disconnect") || !strings.Contains(got, "5 minutes") {
 		t.Fatalf("a failed disconnect is not reported with its consequence: %q", got)
 	}
 }

@@ -62,6 +62,8 @@ type Attempt struct {
 	Outcome Outcome `json:"outcome"`
 	RTTMs   float64 `json:"rtt_ms,omitempty"`
 	Detail  string  `json:"detail,omitempty"`
+	// Path is what carried this answered attempt (the PATH vocabulary). Empty when nothing came back.
+	Path string `json:"path,omitempty"`
 }
 
 // PingSummary is the whole run.
@@ -76,6 +78,9 @@ type PingSummary struct {
 	MaxMs    float64   `json:"max_ms,omitempty"`
 	Path     string    `json:"path"`
 	Attempts []Attempt `json:"attempts"`
+	// From is the /128 the probes left from: the node whose tunnel on this host carried them. Empty
+	// when they left from the host's own address, which no tunnel carries.
+	From string `json:"from,omitempty"`
 	// Why is the sentence beside the path: what is carrying this peer and why that rather
 	// than something else, including "relayed because the punch failed" as a finding in its
 	// own right rather than as the absence of a direct path.
@@ -93,17 +98,48 @@ type PingOptions struct {
 	Port     int
 	Count    int
 	Interval time.Duration
-	// DirectClass is the class the control plane assigned to this pair (PathDirectLocal /
-	// PathDirectPublic / PathDirectPunched), or empty when it says the path is relayed.
-	// It is a CANDIDACY, not an outcome: the control plane cannot know whether the
-	// handshake landed, because a direct handshake never touches a box. It is used only
-	// when this host published no record of its own.
-	DirectClass string
-	// Evidence is what the local tunnel published about this peer (wgtun's path record),
-	// and it OUTRANKS DirectClass wherever it exists, because it is the device's own truth
-	// rather than an offer. Its zero value means nothing published anything, which is not
-	// a failure and is not reported as one.
-	Evidence PunchEvidence
+	// Tunnel is the tunnel on this host the probes go through, or nil when they leave from the
+	// host's own address. Only a probe that goes through a tunnel can take a direct path: on the
+	// userspace tier the node's /128 and its direct peers exist only inside the process holding
+	// the tunnel, so the host's own connect is routed to the box that announces the agent block,
+	// the box delivers it, and the answer comes back the same way. nil is therefore always
+	// relayed, whatever any tunnel on the host has published.
+	//
+	// There is deliberately no way to pass the control plane's class here. It is a candidacy: the
+	// plane cannot see whether a direct handshake landed, and a path that was offered is not a
+	// path the packets took.
+	Tunnel *PingTunnel
+	// HostSource is, for a run with no Tunnel, the address this host's routing would send the
+	// probe from (the caller learns it without sending anything). It is what the sentence names:
+	// a non-agent address is the host's own, outside every tunnel; an agent address is a tunnel
+	// this CLI does not hold. Invalid when it could not be learned.
+	HostSource netip.Addr
+}
+
+// OutcomeError is a probe failure that already knows its outcome, so the classifier does not have
+// to read it out of an error's text. The tunnel probe uses it: through a SOCKS proxy only one reply
+// code is a refusal from the far end, and a local failure to reach the proxy is not an answer.
+type OutcomeError struct {
+	Outcome Outcome
+	Detail  string
+}
+
+func (e *OutcomeError) Error() string { return e.Detail }
+
+// PingTunnel is the tunnel a probe goes through: the node's /128, and a reader for what that
+// tunnel's device publishes about the peer (wgtun's path record).
+type PingTunnel struct {
+	From string
+	// Read returns the published evidence for the peer. Ping reads it before the first probe and
+	// again after every answered one, and calls an answer direct only when every read names the
+	// same routed period (PunchEvidence.Epoch and Instance). While the device holds the peer's /128
+	// on the direct peer, wireguard-go sends every probe to that peer (longest-prefix match) and
+	// accepts an answer from the peer's address only from that peer (it drops a packet whose source
+	// the delivering peer does not hold), so an answer that came back through a box in that period
+	// would have been dropped, not counted. The tunnel publishes the end of a routed period before
+	// any write of its own takes the /128 away, which makes the claim exact for every write the
+	// tunnel makes; a removal it did not make is found, and published, on its monitor's next tick.
+	Read func() PunchEvidence
 }
 
 // Ping runs Count attempts against one address, calling onAttempt (when non-nil) as each
@@ -123,6 +159,10 @@ func Ping(ctx context.Context, addr netip.Addr, opts PingOptions, probe TCPProbe
 		Target:  firstNonEmpty(opts.Target, opts.Address),
 		Address: opts.Address,
 		Port:    opts.Port,
+	}
+	v := newVerdict(opts.Tunnel, opts.HostSource)
+	if opts.Tunnel != nil {
+		sum.From = opts.Tunnel.From
 	}
 	var total float64
 	for i := 1; i <= opts.Count; i++ {
@@ -146,10 +186,25 @@ func Ping(ctx context.Context, addr netip.Addr, opts PingOptions, probe TCPProbe
 			att.Outcome, att.RTTMs = OutcomeOpen, ms(rtt)
 		} else {
 			att.Outcome, att.Detail = classify(err)
-			// A refusal came back over the network, so it has a real round trip; the
-			// probe cannot report one on an error, so time the call here.
+			// A refusal came back over the network, so it has a real round trip. A probe that
+			// timed the exchange itself says so; otherwise the call is timed here.
 			if att.Outcome == OutcomeRefused {
 				att.RTTMs = ms(elapsed)
+				if rtt > 0 {
+					att.RTTMs = ms(rtt)
+				}
+			}
+		}
+		if att.Outcome.Answered() {
+			att.Path = PathRelayed
+			switch {
+			case opts.Tunnel == nil:
+				att.Path = PathEdge
+			case !v.before.Published:
+				att.Path = PathUnknown
+			}
+			if direct, ok := v.answered(); ok {
+				att.Path = direct
 			}
 		}
 		sum.Sent++
@@ -171,17 +226,64 @@ func Ping(ctx context.Context, addr netip.Addr, opts PingOptions, probe TCPProbe
 	if sum.Answered > 0 {
 		sum.AvgMs = total / float64(sum.Answered)
 	}
-	// The device's own record outranks the control plane's offer. WithProbe then retracts a
-	// direct claim that this run's own packets just contradicted.
-	obs := Observation{Direct: opts.DirectClass != "", Class: opts.DirectClass}
-	if opts.Evidence.Found {
-		obs = Observation{Direct: opts.Evidence.Direct, Class: opts.Evidence.Class, Punch: opts.Evidence}
-	}
-	obs = obs.WithProbe(sum.Sent > 0, sum.Answered > 0)
+	obs := v.observation().WithProbe(sum.Sent > 0, sum.Answered > 0)
 	sum.Path = PathFor(obs)
 	sum.Why = ReasonFor(obs)
 	sum.Note = pingNote(sum)
 	return sum
+}
+
+// verdict is the path claim of one run, built from the tunnel's own record as the run went.
+type verdict struct {
+	tunnel   *PingTunnel
+	source   netip.Addr    // the host's own source, for a run with no tunnel
+	before   PunchEvidence // the record before the first probe
+	answers  int
+	direct   int  // answers whose re-read still named the routed period of before
+	moved    bool // an answer's re-read named another period, or none
+	measured bool
+}
+
+func newVerdict(t *PingTunnel, source netip.Addr) *verdict {
+	v := &verdict{tunnel: t, source: source}
+	if t != nil && t.Read != nil {
+		v.before = t.Read()
+	}
+	return v
+}
+
+// answered re-reads the record after an answer and returns the direct class it may carry, if any.
+func (v *verdict) answered() (string, bool) {
+	v.answers++
+	if v.tunnel == nil || v.tunnel.Read == nil || !v.before.Direct || v.before.Epoch == 0 {
+		return "", false
+	}
+	now := v.tunnel.Read()
+	if !now.Direct || now.Epoch != v.before.Epoch || now.Instance != v.before.Instance {
+		v.moved = true
+		return "", false
+	}
+	v.direct++
+	return PathFor(Observation{Direct: true, Class: v.before.Class}), true
+}
+
+// observation is the run's claim: direct only when the probes went through a tunnel and every
+// answer was placed on the routed period the record named before the first one.
+func (v *verdict) observation() Observation {
+	if v.tunnel == nil {
+		return Observation{Vantage: VantageHost, HostSource: v.source}
+	}
+	o := Observation{Vantage: VantageTunnel, Via: v.tunnel.From, Class: v.before.Class, Punch: v.before}
+	switch {
+	case v.answers > 0 && v.direct == v.answers:
+		o.Direct = true
+	case v.answers == 0:
+		// Nothing came back; WithProbe retracts any claim, and the reason says nothing answered.
+		o.Direct = v.before.Direct
+	default:
+		o.Changed = v.moved
+	}
+	return o
 }
 
 // pingNote states what the run proved, and for a silent run names both causes rather
@@ -190,19 +292,35 @@ func pingNote(s PingSummary) string {
 	switch {
 	case s.Sent == 0:
 		return "no attempt ran"
+	case s.Answered > 0 && s.Path == PathEdge:
+		return "an answer came from Whisper's edge for that address. It shows neither that the node " +
+			"is up nor the path between two nodes: the box that took the probe answers for the address " +
+			"itself when the node is not connected to it."
+	case s.Answered > 0 && s.Path == PathUnknown:
+		return "the path exists; whether a box was in the middle is not known here."
 	case s.Answered > 0 && s.Path != PathRelayed && s.Path != PathNoPath:
 		return "the path exists and it is direct: these packets did not go through a box, " +
-			"so this round trip is the raw network between the two nodes."
+			"so this round trip is the network between the two nodes and the tunnel's work at each end."
 	case s.Answered > 0:
 		return "the path exists and it is relayed by a Whisper box, so this round trip " +
 			"includes the hairpin out to the box and back."
 	case s.hasOutcome(OutcomeNoRoute):
-		return "this host could not send the packet at all: it has no route to the peer's " +
-			"address family. That is a local network fault, not a fault at the peer."
+		return "this host could not send the packet at all: " + s.noRouteWhy() + ". That is a " +
+			"local network fault, not a fault at the peer."
 	default:
 		return "nothing came back. Either the peer terminates on a different box, which has " +
 			"no path today, or nothing is listening and the refusal is being dropped."
 	}
+}
+
+// noRouteWhy is the first no-route attempt's own reason, or the usual one when it gave none.
+func (s PingSummary) noRouteWhy() string {
+	for _, a := range s.Attempts {
+		if a.Outcome == OutcomeNoRoute && strings.TrimSpace(a.Detail) != "" {
+			return a.Detail
+		}
+	}
+	return "it has no route to the peer's address family"
 }
 
 func (s PingSummary) hasOutcome(o Outcome) bool {
@@ -225,6 +343,10 @@ func (s PingSummary) hasOutcome(o Outcome) bool {
 func classify(err error) (Outcome, string) {
 	if err == nil {
 		return OutcomeOpen, ""
+	}
+	var oe *OutcomeError
+	if errors.As(err, &oe) {
+		return oe.Outcome, oe.Detail
 	}
 	var ne net.Error
 	if errors.As(err, &ne) && ne.Timeout() {

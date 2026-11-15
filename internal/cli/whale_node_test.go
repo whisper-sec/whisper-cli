@@ -158,11 +158,10 @@ func TestFmtMs_NeverPrintsAZeroAsAMeasurement(t *testing.T) {
 	}
 }
 
-// TestPingAttemptLine_NamesThePathAndNeverClaimsDirect. The direct-path work added the two classes a
-// pair can honestly be direct on, so the rule is no longer "never say direct" - it is "say
-// exactly what the control plane assigned, and say relayed for everything else, including
-// every case where we could not ask".
-func TestPingAttemptLine_NamesThePathAndNeverClaimsDirect(t *testing.T) {
+// TestPingAttemptLine_NamesThePathTheAttemptTook. Each answered attempt carries the path whale.Ping
+// placed it on from the tunnel's own record, and the line prints exactly that: never a class the
+// control plane offered, and relayed for an answer nothing placed.
+func TestPingAttemptLine_NamesThePathTheAttemptTook(t *testing.T) {
 	node := whaleNode{Addr: netip.MustParseAddr("2a04:2a01:1:4::b"), Name: "db-01"}
 	for _, a := range []whale.Attempt{
 		{Seq: 1, Outcome: whale.OutcomeOpen, RTTMs: 24.1},
@@ -170,24 +169,22 @@ func TestPingAttemptLine_NamesThePathAndNeverClaimsDirect(t *testing.T) {
 		{Seq: 3, Outcome: whale.OutcomeNoReply, Detail: "timed out"},
 		{Seq: 4, Outcome: whale.OutcomeNoRoute, Detail: "network is unreachable"},
 	} {
-		// No class: this is the pair the plane said nothing about, or could not be asked.
-		line := pingAttemptLine(a, node, 443, "")
+		line := pingAttemptLine(a, node, 443)
 		if strings.Contains(strings.ToLower(line), "direct") {
 			t.Fatalf("attempt line claims a direct path nothing established: %q", line)
 		}
 		if !strings.Contains(line, "db-01") {
 			t.Fatalf("attempt line does not name the peer: %q", line)
 		}
-		if a.Outcome.Answered() && !strings.Contains(line, whale.PathRelayed) {
-			t.Fatalf("an answered attempt did not name the path: %q", line)
+		if a.Outcome.Answered() && !strings.Contains(line, "path="+whale.PathRelayed) {
+			t.Fatalf("an answer nothing placed did not read relayed: %q", line)
 		}
-		// A class the plane did assign is named verbatim, and an invented one is not.
 		if a.Outcome.Answered() {
-			if got := pingAttemptLine(a, node, 443, whale.PathDirectLocal); !strings.Contains(got, whale.PathDirectLocal) {
-				t.Fatalf("a direct-local pair did not name its path: %q", got)
-			}
-			if got := pingAttemptLine(a, node, 443, "punched"); !strings.Contains(got, whale.PathRelayed) {
-				t.Fatalf("an unrecognised class was not rendered as relayed: %q", got)
+			for _, path := range []string{whale.PathDirectLocal, whale.PathEdge} {
+				a.Path = path
+				if got := pingAttemptLine(a, node, 443); !strings.Contains(got, "path="+path) {
+					t.Fatalf("an attempt placed on %s did not say so: %q", path, got)
+				}
 			}
 		}
 	}

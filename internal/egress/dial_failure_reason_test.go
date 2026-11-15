@@ -12,6 +12,7 @@ package egress
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"testing"
@@ -114,5 +115,45 @@ func TestDialFailureRecordStaysEmptyWhenNothingFails(t *testing.T) {
 
 	if why, at := p.LastDialFailure(); why != "" || !at.IsZero() {
 		t.Fatalf("a successful dial recorded a failure: %q at %v", why, at)
+	}
+}
+
+// codedFailure is a dialer error that names its RFC 1928 reply, the way the tunnel's dialer does.
+type codedFailure struct{ code byte }
+
+func (e codedFailure) Error() string    { return "could not reach the target over the Whisper tunnel" }
+func (e codedFailure) SOCKSReply() byte { return e.code }
+
+type codedDialer struct{ err error }
+
+func (d codedDialer) Dial(context.Context, string) (net.Conn, error) { return nil, d.err }
+
+// TestSocks5ReplyIsTheDialersOwnCode: a dialer that knows which kind of failure it saw gets that
+// reply on the wire, so "connection refused" means a refusal and a client may count it as an answer; a
+// dialer that says nothing keeps the generic 0x05 it always had, and a code outside RFC 1928's failures
+// is not sent.
+func TestSocks5ReplyIsTheDialersOwnCode(t *testing.T) {
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{codedFailure{0x05}, "rep=5"},
+		{codedFailure{0x04}, "rep=4"},
+		{codedFailure{0x06}, "rep=6"},
+		{codedFailure{0x02}, "rep=2"},
+		{fmt.Errorf("wrapped: %w", codedFailure{0x03}), "rep=3"},
+		{errors.New(dialreason_why), "rep=5"},
+		{codedFailure{0x00}, "rep=5"},
+		{codedFailure{0x42}, "rep=5"},
+	} {
+		p, err := StartWithDialer(codedDialer{err: tc.err}, nil)
+		if err != nil {
+			t.Fatalf("StartWithDialer: %v", err)
+		}
+		_, derr := socks5Dial(p.Addr(), "[2a04:2a01:4::b]:443")
+		p.Stop()
+		if derr == nil || !strings.Contains(derr.Error(), tc.want) {
+			t.Fatalf("a dial failing with %v replied %v, want %s", tc.err, derr, tc.want)
+		}
 	}
 }

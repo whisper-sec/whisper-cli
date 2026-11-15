@@ -33,8 +33,9 @@ func newContainCmd() *cobra.Command {
 			"It is the weaker sibling of `sudo whisper run --enforce`, which starts a process in a\n" +
 			"network namespace of its own. Containment refuses a process that runs as root or holds a\n" +
 			"capability, because that process could undo it; it cannot stop the process becoming root\n" +
-			"later through sudo or a setuid program, nor another process on this host that dials on\n" +
-			"its behalf over loopback or a unix socket, nor a daemon it detached from its tree before.\n" +
+			"later through sudo, a setuid program or one with file capabilities, nor another process on\n" +
+			"this host that dials on its behalf over loopback or a unix socket, nor a daemon it\n" +
+			"detached from its tree before.\n" +
 			"Names are resolved by this host's resolver when that is on loopback; a lookup sent\n" +
 			"straight to a resolver outside Whisper is refused.\n\n" +
 			"Which agent: as for `whisper run --enforce`: --agent <name|id|/128>, --name <name>, the\n" +
