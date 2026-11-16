@@ -43,8 +43,25 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == sealProbeArg {
 		sealProbe()
 	}
+	if len(os.Args) > 1 && os.Args[1] == ProbeArg {
+		RunProbe()
+	}
+	// As root, one run of this package at a time on a host: each test may run in a network namespace
+	// of its own, but the cgroup hierarchy, /run/whisper and the agents' locks are the host's, and two
+	// runs containing the same test agents would see each other's containments. Only the run itself
+	// takes the lock: a test that starts this binary again as a helper (-test.run=...Helper) passes it
+	// the environment, and must not wait for the lock its own parent holds.
+	if os.Geteuid() == 0 && os.Getenv(testsLockedEnv) == "" {
+		if f, err := os.OpenFile("/run/whisper-enforce-tests.lock", os.O_RDWR|os.O_CREATE|syscall.O_CLOEXEC, 0o600); err == nil {
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX) // held until the run exits
+			_ = os.Setenv(testsLockedEnv, "1")
+		}
+	}
 	os.Exit(m.Run())
 }
+
+// testsLockedEnv tells a helper this binary starts that the run already holds the host-wide lock.
+const testsLockedEnv = "WHISPER_ENFORCE_TESTS_LOCKED"
 
 func needRoot(t *testing.T) {
 	t.Helper()

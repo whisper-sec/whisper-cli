@@ -314,7 +314,7 @@ func escapeCommand(f []string) error {
 		}
 		return uring.sendFixed0([]byte("x"))
 	}
-	return fmt.Errorf("unknown command %q", f[0])
+	return residueCommand(f) // contain_residue_root_linux_test.go
 }
 
 func sockaddr(ap netip.AddrPort) unix.Sockaddr {
@@ -1412,11 +1412,14 @@ func synRecvOn(port int) bool {
 }
 
 // Once the tunnel stops, a connection of the containment still ending (FIN_WAIT1, LAST_ACK) would
-// retransmit from the /128 by the host's main table: the address stays refused on the host until the
-// agent's next device, which clears it.
+// retransmit from the /128 by the host's main table: while a socket could still send from it, the
+// address stays refused on the host, and the agent's next device clears that refusal and routes the
+// address through its own tunnel.
 func TestTheAgentsAddressStaysRefusedAfterTheTunnelStops(t *testing.T) {
 	needRoot(t)
+	withoutDestroy(t) // a kernel that can end the connection leaves nothing that needs the refusal
 	ns, _ := hostTUN(t)
+	tcpFrom(t, tSelf) // a connection the kernel could still send from the /128 for (contain_residue_root_linux_test.go)
 	ns.Close()
 	out, _ := exec.Command("ip", "-6", "route", "get", "2606:4700:4700::1111", "from", tSelf.String()).CombinedOutput()
 	if !strings.Contains(strings.ToLower(string(out)), "permission denied") && !strings.Contains(string(out), "prohibit") {

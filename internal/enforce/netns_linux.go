@@ -366,5 +366,6 @@ func (n *Namespace) Close() {
 	// then it is what keeps a socket that carries the mark, and is not the containment's, out.
 	if n.host != nil {
 		n.host.gate.detach()
+		n.host.afterStop(n.HostInode)
 	}
 }

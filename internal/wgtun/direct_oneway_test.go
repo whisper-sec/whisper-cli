@@ -366,16 +366,148 @@ func (p *sharedPair) goDirectWith(t *testing.T, forA, forB Peer) {
 	}
 	// A row with no window goes direct on its first attempts. A windowed one meets only in windows both ends
 	// attend, and each window one end misses backs it off, as far as every sixteenth (attends).
-	bound := 30 * time.Second
-	for _, w := range []Rendezvous{forA.Rendezvous, forA.Window} {
-		if !w.IsZero() {
-			bound += (1 << maxWindowBackoff) * w.Period
-			break
-		}
-	}
-	if !waitFor(bound, func() bool { return p.directEverywhere(t) }) {
+	if !waitFor(directBound(30*time.Second, forA), func() bool { return p.directEverywhere(t) }) {
 		t.Fatalf("the pair never went direct: %s", p.describe(t))
 	}
+}
+
+// heardSincePromotion reports whether n routes far directly and has received something from it at least a
+// kick interval after the promotion: a later pass saw its bytes grow, or a newer handshake (lastSeen moves past
+// promotedAt only then), late enough that it is the far end's own sending (its keepalive or the kick keepHeard
+// sends for it) and not a packet left over from the handshake.
+func heardSincePromotion(n, far *natNode) bool {
+	n.tun.mu.Lock()
+	defer n.tun.mu.Unlock()
+	d := n.tun.direct[far.pubHex]
+	return d != nil && d.promoted && d.routed && d.lastSeen.Sub(d.promotedAt) >= n.tun.kickEvery()
+}
+
+// peerTimes is n's bookkeeping for far, for a failure message and a flap's log line.
+func peerTimes(n, far *natNode) (demotes int, demotedAt, promotedAt, lastSeen time.Time) {
+	n.tun.mu.Lock()
+	defer n.tun.mu.Unlock()
+	if d := n.tun.direct[far.pubHex]; d != nil {
+		return d.demotes, d.demotedAt, d.promotedAt, d.lastSeen
+	}
+	return 0, time.Time{}, time.Time{}, time.Time{}
+}
+
+// countKinds counts the entries of log at or after from and before until whose type is one of types.
+func countKinds(log []sentKind, from, until time.Time, types ...byte) int {
+	n := 0
+	for _, k := range log {
+		if k.at.Before(from) || !k.at.Before(until) {
+			continue
+		}
+		for _, typ := range types {
+			if k.typ == typ {
+				n++
+				break
+			}
+		}
+	}
+	return n
+}
+
+// judgeWithdrawal measures a withdrawal that came between a pair going direct and settling, so a settle can
+// never wait through a fault. A withdrawal is the design's answer to silence: nothing counted from the far end
+// for the dead window. Two records say it was not silence, each for a span early enough in the window (more
+// than half of it before the withdrawal) that no processing delay explains it:
+//
+//   - n's NAT handed n's device an initiation or transport packet from far: n failed to count what arrived (a
+//     keypair it cannot use). A response is not counted on purpose when it answers nothing, so it is left out;
+//   - far sent initiations or transport packets to an endpoint that is neither n's nor its box's: far was
+//     sending, at the wrong place.
+//
+// Either is a one-way blackhole. Otherwise it is reported as silence, with the far end's own send record.
+func (p *sharedPair) judgeWithdrawal(t *testing.T, n, far *natNode) (blackhole bool, why string) {
+	t.Helper()
+	n.tun.mu.Lock()
+	dead := orDur(n.tun.directDead, directDeadAfter)
+	n.tun.mu.Unlock()
+	demotes, at, _, _ := peerTimes(n, far)
+	from, until := at.Add(-dead), at.Add(-dead/2)
+	near := n.endpoint(t)
+	box := netip.AddrPortFrom(netip.IPv6Loopback(), uint16(p.box.udpPort)).String()
+	n.nat.mu.Lock()
+	reached := countKinds(n.nat.recvd[far.endpoint(t)], from, until, 1, 4)
+	n.nat.mu.Unlock()
+	far.nat.mu.Lock()
+	sent := countKinds(far.nat.kinds[near], from, at, 1, 4)
+	misplaced, where := 0, ""
+	for dst, log := range far.nat.kinds {
+		if dst == near || dst == box {
+			continue
+		}
+		if c := countKinds(log, from, until, 1, 4); c > 0 {
+			misplaced, where = misplaced+c, dst
+		}
+	}
+	far.nat.mu.Unlock()
+	switch {
+	case reached > 0:
+		return true, fmt.Sprintf("%s withdrew its direct path to %s (withdrawal %d) although its device was handed %d "+
+			"packet(s) from it between %v and %v before the withdrawal: not silence but a one-way blackhole",
+			n.addr, far.addr, demotes, reached, dead, dead/2)
+	case misplaced > 0:
+		return true, fmt.Sprintf("%s withdrew its direct path to %s (withdrawal %d) while %s sent %d packet(s) to %s, "+
+			"neither this end nor its box, between %v and %v before the withdrawal: a one-way blackhole at the wrong endpoint",
+			n.addr, far.addr, demotes, far.addr, misplaced, where, dead, dead/2)
+	}
+	return false, fmt.Sprintf("%s withdrew the path (withdrawal %d): nothing from %s reached it in the first half of the "+
+		"dead window before (the far end recorded %d send(s) to it in the whole window), so it was the silence the design "+
+		"falls back on", n.addr, demotes, far.addr, sent)
+}
+
+// settledDirect waits until the pair routes each other directly AND each end has heard the other since its
+// promotion: the path has carried traffic both ways, so a check that follows measures a path that is up,
+// not one a moment from its first keepalive. It waits on that state rather than for a time.
+//
+// Why a promotion alone is not enough (a race run at load 17 on eight CPUs): a promotion is a
+// handshake, and an end whose own keepalive keeps losing the race to the far end's sends nothing until its
+// monitor kicks a keepalive (keepHeard, kickEvery: four seconds at these test timers), so the far end must
+// hear that kick within its eight-second dead window. With every goroutine starved for seconds the kick came
+// too late: one end withdrew a path it had promoted 8.5 s earlier, and the exchange that followed the
+// promotion straight away was cut. That is the design falling back to the relay, as it should, when a
+// path goes unheard for a dead window; production's window is twenty seconds against a five-second kick. A
+// path that never carries both ways never satisfies this, so a real fault still fails here, at the bound,
+// with both devices' state in the message; and a withdrawal on the way is measured (judgeWithdrawal), so the
+// wait can pass through the fallback the design makes and never through a blackhole.
+func (p *sharedPair) settledDirect(t *testing.T, step string, within time.Duration) {
+	t.Helper()
+	ends := []struct{ self, far *natNode }{{p.a, p.b}, {p.b, p.a}}
+	before := map[*natNode]int{}
+	for _, e := range ends {
+		before[e.self], _, _, _ = peerTimes(e.self, e.far)
+	}
+	settled := waitFor(within, func() bool {
+		return p.directEverywhere(t) && heardSincePromotion(p.a, p.b) && heardSincePromotion(p.b, p.a)
+	})
+	for _, e := range ends {
+		if demotes, _, _, _ := peerTimes(e.self, e.far); demotes > before[e.self] {
+			if blackhole, why := p.judgeWithdrawal(t, e.self, e.far); blackhole {
+				t.Fatalf("%s: %s: %s", step, why, p.describe(t))
+			} else {
+				t.Logf("%s: %s", step, why)
+			}
+		}
+	}
+	if !settled {
+		t.Fatalf("%s: the pair did not settle direct, heard both ways since its promotion, within %v: %s",
+			step, within, p.describe(t))
+	}
+}
+
+// directBound is how long a pair given these rows may take to go direct: at once for a row with no window,
+// and at the next window both ends attend for the others, which the backoff may push out to every
+// sixteenth.
+func directBound(base time.Duration, forA Peer) time.Duration {
+	for _, w := range []Rendezvous{forA.Rendezvous, forA.Window} {
+		if !w.IsZero() {
+			return base + (1<<maxWindowBackoff)*w.Period
+		}
+	}
+	return base
 }
 
 // leg is one exchange's account, from the sending node's side.
@@ -519,11 +651,23 @@ func (p *sharedPair) describe(t *testing.T) string {
 	p.notesMu.Lock()
 	notes := strings.Join(p.notes, "\n    ")
 	p.notesMu.Unlock()
+	times := func(n, far *natNode) string {
+		demotes, demotedAt, promotedAt, lastSeen := peerTimes(n, far)
+		rel := func(at time.Time) string {
+			if at.IsZero() {
+				return "-"
+			}
+			return "+" + at.Sub(p.began).Round(time.Millisecond).String()
+		}
+		return fmt.Sprintf("%s: withdrawals %d, last at %s, promoted at %s, last heard at %s", n.addr, demotes, rel(demotedAt),
+			rel(promotedAt), rel(lastSeen))
+	}
 	return fmt.Sprintf("a routes b direct=%v (record %q promoted=%v), b routes a direct=%v (record %q promoted=%v); "+
-		"a->b %+v err=%v; b->a %+v err=%v; a's NAT dropped %d from b, b's NAT dropped %d from a; %s\n  the tunnels said:\n    %s",
+		"a->b %+v err=%v; b->a %+v err=%v; a's NAT dropped %d from b, b's NAT dropped %d from a; %s; [%s] [%s]\n  the tunnels said:\n    %s",
 		routedTo(t, p.a.tun, p.b.pubHex, p.b.addr), ra.Path, ra.Promoted,
 		routedTo(t, p.b.tun, p.a.pubHex, p.a.addr), rb.Path, rb.Promoted,
-		ab, errAB, ba, errBA, p.a.nat.droppedFrom(p.b.endpoint(t)), p.b.nat.droppedFrom(p.a.endpoint(t)), p.devices(t), notes)
+		ab, errAB, ba, errBA, p.a.nat.droppedFrom(p.b.endpoint(t)), p.b.nat.droppedFrom(p.a.endpoint(t)), p.devices(t),
+		times(p.a, p.b), times(p.b, p.a), notes)
 }
 
 // rowShape is the kind of row the plane sends for a pair: a direct row with no window (a plane from before
@@ -612,6 +756,7 @@ func TestOneWay_ADirectPathThatDiesOneWayFallsBackOnBothEnds(t *testing.T) {
 			forA, forB := rowsFor(t, tc.shape, p)
 			p.goDirectWith(t, forA, forB)
 			t.Logf("direct %v after the pair started", time.Since(began).Round(time.Millisecond))
+			p.settledDirect(t, "before the cut", directBound(30*time.Second+3*opts("").DirectDeadAfter, forA))
 			p.carried(t, "before the cut", leg.direct, exchangeWithin)
 			oa := startRouteOracle(p.a.tun, p.dirA, p.a.addr, p.b.addr)
 			ob := startRouteOracle(p.b.tun, p.dirB, p.b.addr, p.a.addr)
@@ -681,13 +826,7 @@ func TestOneWay_ADirectPathThatDiesOneWayFallsBackOnBothEnds(t *testing.T) {
 			p.b.nat.healFrom(p.a.endpoint(t))
 			// The pair goes direct again once a hold is over: at once for a row with no window, and at the next
 			// window both ends attend for the others, which the backoff may have pushed out to every sixteenth.
-			healBound := 3*dead + 20*time.Second
-			for _, w := range []Rendezvous{forA.Rendezvous, forA.Window} {
-				if !w.IsZero() {
-					healBound += (1 << maxWindowBackoff) * w.Period
-					break
-				}
-			}
+			healBound := directBound(3*dead+20*time.Second, forA)
 			if !waitFor(healBound, func() bool { return p.directEverywhere(t) }) {
 				t.Fatalf("the healed path was never promoted again on both ends: %s", p.describe(t))
 			}
@@ -710,6 +849,8 @@ func TestOneWay_ADirectPathThatDiesOneWayFallsBackOnBothEnds(t *testing.T) {
 				}
 			}
 
+			// The healed path must carry the data, measured once it has carried traffic both ways (settledDirect).
+			p.settledDirect(t, "after the heal", healBound)
 			stA, _ := stateOf(p.a.tun, p.b.addr)
 			stB, _ := stateOf(p.b.tun, p.a.addr)
 			p.carried(t, "after the heal", leg.direct, exchangeWithin)
@@ -722,6 +863,101 @@ func TestOneWay_ADirectPathThatDiesOneWayFallsBackOnBothEnds(t *testing.T) {
 			}
 			oa.check(t)
 			ob.check(t)
+		})
+	}
+}
+
+// TestOneWay_AWithdrawalIsJudgedSilenceOrBlackhole is the control for the settle's judge (judgeWithdrawal):
+// a guard nobody has seen fail is not evidence. On real devices with the monitors driven here, the same direct
+// pair loses b's direction three ways: as silence (b's packets dropped before they reach a's device, a cut), as
+// a blackhole a's device is handed (b's packets damaged, so it cannot count them), and as a blackhole at the wrong
+// endpoint (b sending somewhere that is not a). a withdraws every time, on the dead-path rule; the judge must call
+// the first silence and the other two blackholes.
+func TestOneWay_AWithdrawalIsJudgedSilenceOrBlackhole(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping the real-device one-way failure test in -short")
+	}
+	for _, tc := range []struct {
+		name      string
+		blackhole bool
+	}{{"silence", false}, {"blackhole", true}, {"elsewhere", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			heavy(t)
+			idle := func(dir string) Options {
+				o := onewayOpts(dir)
+				o.HealthInterval = time.Hour // idle monitors: every pass is driven here
+				// A three-second window: the judge's half of it still holds several of b's fifth-of-a-second sends,
+				// and each case costs a few seconds rather than a dead window of eight.
+				o.DirectDeadAfter = 3 * time.Second
+				return o
+			}
+			p := startSharedPairWith(t, idle)
+			pass := func(now time.Time) {
+				for _, n := range []*natNode{p.a, p.b} {
+					if read, ok := n.tun.readPeers(); ok {
+						n.tun.directPass(now, read)
+					}
+				}
+			}
+			if err := p.a.tun.SetDirectPeers([]Peer{directRowTo(t, p.b)}); err != nil {
+				t.Fatal(err)
+			}
+			time.Sleep(time.Second)
+			if err := p.b.tun.SetDirectPeers([]Peer{directRowTo(t, p.a)}); err != nil {
+				t.Fatal(err)
+			}
+			if !waitFor(20*time.Second, func() bool { pass(time.Now()); return p.directEverywhere(t) }) {
+				t.Fatalf("the pair never went direct: %s", p.devices(t))
+			}
+			from := p.b.endpoint(t)
+			// elsewhere: b's sends go to a port nobody holds, and b stops hearing a, so it cannot roam back.
+			elsewhere := ""
+			switch tc.name {
+			case "silence":
+				p.a.nat.cutFrom(from)
+			case "blackhole":
+				p.a.nat.mu.Lock()
+				p.a.nat.mangle[from] = true
+				p.a.nat.mu.Unlock()
+			case "elsewhere":
+				elsewhere = "endpoint=[::1]:9\n"
+				p.b.nat.cutFrom(p.a.endpoint(t))
+			}
+			// b goes on sending while a counts nothing from it: a keepalive every fifth of a second, so the judge's
+			// window always holds several, whichever way the two ends' own timers race.
+			stop := make(chan struct{})
+			sent := make(chan struct{})
+			go func() {
+				defer close(sent)
+				tick := time.NewTicker(200 * time.Millisecond)
+				defer tick.Stop()
+				for {
+					select {
+					case <-stop:
+						return
+					case <-tick.C:
+						_ = p.b.tun.dev.IpcSet("public_key=" + p.a.pubHex + "\nupdate_only=true\n" + elsewhere +
+							"persistent_keepalive_interval=0\npersistent_keepalive_interval=2\n")
+					}
+				}
+			}()
+			dead := orDur(p.a.tun.directDead, directDeadAfter)
+			began := time.Now()
+			if !waitFor(dead+10*time.Second, func() bool {
+				pass(time.Now())
+				demotes, _, _, _ := peerTimes(p.a, p.b)
+				return demotes > 0
+			}) {
+				t.Fatalf("a never withdrew a path it could not hear: %s", p.devices(t))
+			}
+			close(stop)
+			<-sent
+			blackhole, why := p.judgeWithdrawal(t, p.a, p.b)
+			t.Logf("%v after the damage: %s", time.Since(began).Round(time.Millisecond), why)
+			if blackhole != tc.blackhole {
+				t.Fatalf("the judge called a %s withdrawal blackhole=%v: %s", tc.name, blackhole, why)
+			}
 		})
 	}
 }
@@ -847,6 +1083,112 @@ func TestOneWay_AfterACutBothWaysTheOpenerRestartsFirst(t *testing.T) {
 	for _, k := range p.b.nat.kinds[p.a.endpoint(t)] {
 		if k.typ == 1 && k.at.After(healed) {
 			t.Fatalf("the end still holding sent an initiation %v after the heal; it should only have answered", k.at.Sub(healed))
+		}
+	}
+}
+
+// TestOneWay_AShortLivedPathWaitsForItsWindowItDoesNotGiveUp is the reading a live check caught on v0.268.1, on
+// real devices and through the monitor's own pass: a windowed direct pair whose path dies within a rekey of
+// coming up, while the untimed train that opened it is inside directRearmAfter, goes back to the pair's
+// window (restartFor with fresh=false). Between the end of the quiet hold and the first window it attends
+// it is waiting, not spent: it must read punching with no attempt, never gave-up, in the tunnel's state and
+// in the record `whale ping` reads. Once a window it attended has produced no handshake, gave-up is the
+// finding, with that attempt counted. Production timers, idle monitors, every pass driven here; the hold,
+// which would run seventy seconds of wall clock from the pass's future instant, is ended by hand.
+func TestOneWay_AShortLivedPathWaitsForItsWindowItDoesNotGiveUp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping the real-device one-way failure test in -short")
+	}
+	t.Parallel()
+	heavy(t)
+	idle := func(dir string) Options {
+		o := onewayOpts(dir)
+		o.DirectKeepalive, o.DirectDeadAfter, o.PunchEvery, o.DirectRearmAfter = 0, 0, 0, 0 // production: 5 s, 20 s, 5 s, 2 min
+		o.HealthInterval = time.Hour                                                        // idle monitors: every pass is driven here
+		return o
+	}
+	p := startSharedPairWith(t, idle)
+	pass := func(now time.Time) {
+		for _, n := range []*natNode{p.a, p.b} {
+			read, ok := n.tun.readPeers()
+			if !ok {
+				t.Fatal("could not read a device")
+			}
+			n.tun.directPass(now, read)
+		}
+	}
+	forA, forB := rowsFor(t, windowedRow, p)
+	if err := p.a.tun.SetDirectPeers([]Peer{forA}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(time.Second)
+	if err := p.b.tun.SetDirectPeers([]Peer{forB}); err != nil {
+		t.Fatal(err)
+	}
+	if !waitFor(30*time.Second, func() bool { pass(time.Now()); return p.directEverywhere(t) }) {
+		t.Fatalf("the pair never went direct: %s", p.devices(t))
+	}
+
+	// Cut both ways; one pass on each end thirty seconds on: past the dead-path window, well inside a rekey
+	// of the promotion and inside directRearmAfter of the untimed train, so both rows go back to the window.
+	p.a.nat.cutFrom(p.b.endpoint(t))
+	p.b.nat.cutFrom(p.a.endpoint(t))
+	pass(time.Now().Add(30 * time.Second))
+	if !waitFor(2*time.Second, func() bool { return p.relayedEverywhere(t) }) {
+		t.Fatalf("the two ends did not both withdraw: %s", p.devices(t))
+	}
+	ends := []struct{ self, far *natNode }{{p.a, p.b}, {p.b, p.a}}
+	for _, e := range ends {
+		st, _ := stateOf(e.self.tun, e.far.addr)
+		if st.Punch.Phase != PunchResting || !st.Punch.Timed || st.Punch.Attempts != 0 {
+			t.Fatalf("%s in its hold reads %+v, want resting, back on the window, no attempt", e.self.addr, st.Punch)
+		}
+	}
+
+	// The hold is over and the first window has not been attended yet.
+	for _, e := range ends {
+		e.self.tun.mu.Lock()
+		if d := e.self.tun.direct[e.far.pubHex]; d != nil && d.punch != nil {
+			d.punch.holdUntil = time.Now().Add(-time.Millisecond)
+		}
+		e.self.tun.mu.Unlock()
+		e.self.tun.publishPaths()
+		dir := p.dirA
+		if e.self == p.b {
+			dir = p.dirB
+		}
+		st, _ := stateOf(e.self.tun, e.far.addr)
+		rec, ok := published(t, dir, e.self.addr, e.far.addr)
+		if st.Punch.Phase != PunchTrying || st.Punch.Attempts != 0 || !st.Punch.Timed {
+			t.Fatalf("%s after its hold, before its window, reads %+v, want punching with no attempt", e.self.addr, st.Punch)
+		}
+		if !ok || rec.Punch.Phase != string(PunchTrying) || rec.Punch.Attempts != 0 {
+			t.Fatalf("%s published %+v after its hold, want punching with no attempt", e.self.addr, rec.Punch)
+		}
+	}
+
+	// The window: each end joins it, and with the cut still in place nothing comes back. Once it is over the
+	// miss is the finding, gave-up with the attempt behind it.
+	pass(time.Now())
+	for _, e := range ends {
+		if st, _ := stateOf(e.self.tun, e.far.addr); st.Punch.Phase != PunchTrying || st.Punch.Attempts != 1 {
+			t.Fatalf("%s in its window reads %+v, want punching with its one attempt", e.self.addr, st.Punch)
+		}
+	}
+	if !waitFor(30*time.Second, func() bool {
+		pass(time.Now())
+		for _, e := range ends {
+			if st, _ := stateOf(e.self.tun, e.far.addr); st.Punch.Phase != PunchGaveUp {
+				return false
+			}
+		}
+		return true
+	}) {
+		t.Fatalf("an attended window with no handshake did not end as a finding: %s", p.devices(t))
+	}
+	for _, e := range ends {
+		if st, _ := stateOf(e.self.tun, e.far.addr); st.Punch.Attempts < 1 {
+			t.Fatalf("%s reads gave-up with no attempt: %+v", e.self.addr, st.Punch)
 		}
 	}
 }

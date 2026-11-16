@@ -842,6 +842,79 @@ func TestDirectData_APromotionDecidedBeforeAReArmIsNotWritten(t *testing.T) {
 	}
 }
 
+// TestDirectData_AQuietDecidedBeforeAReArmIsNotWritten: the monitor decides to silence (or withdraw) an entry,
+// and a refresh re-arms the key before the write. The re-arm has written the new entry's own state, so the
+// stale quiet must not land on it: it would drop a session the new entry may have just answered, or switch
+// off the keepalive its arm set.
+func TestDirectData_AQuietDecidedBeforeAReArmIsNotWritten(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping the real-device data-path test in -short")
+	}
+	t.Parallel()
+	heavy(t)
+	a, b, _, _ := idlePair(t, 7106, nil)
+	for _, demoting := range []bool{false, true} {
+		a.tun.mu.Lock()
+		decided := a.tun.direct[b.pubHex]
+		old := decided.peer
+		a.tun.mu.Unlock()
+		moved := directRowTo(t, b)
+		moved.Address = mustAddr(t, "2a04:2a01:4::bb")
+		if demoting {
+			moved.Address = mustAddr(t, "2a04:2a01:4::bc")
+		}
+		if err := a.tun.SetDirectPeers([]Peer{moved}); err != nil {
+			t.Fatal(err)
+		}
+		if present, ka, _ := peerSection(t, a.tun, b.pubHex); !present || ka == "0" || ka == "" {
+			t.Fatalf("the re-arm did not leave a keepalive to protect (present %v, keepalive %q)", present, ka)
+		}
+		a.tun.quietDirectPeer(old, decided, demoting)
+		if present, ka, _ := peerSection(t, a.tun, b.pubHex); !present || ka == "0" || ka == "" {
+			t.Fatalf("demoting=%v: a quiet decided for the replaced entry was written onto the re-armed peer (keepalive %q)", demoting, ka)
+		}
+	}
+}
+
+// TestDirectData_APeerTheDeviceLostDoesNotEndItsWindowAsAMiss: a timed train whose window landed the handshake
+// is promoted with that window still marked as attended. When the device then loses the peer (a write that
+// removed it and one that failed to put it back), the promotion is cleared without a demotion, and the window,
+// left open, used to end as a miss on the next pass: a gave-up after a success, and a backoff step on top.
+func TestDirectData_APeerTheDeviceLostDoesNotEndItsWindowAsAMiss(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping the real-device data-path test in -short")
+	}
+	t.Parallel()
+	heavy(t)
+	a, b, _, pump := idlePair(t, 7107, nil)
+	now := time.Now()
+	a.tun.mu.Lock()
+	d := a.tun.direct[b.pubHex]
+	// The window this promotion came from: joined, one attempt, its silence an hour away.
+	d.punch.window = Rendezvous{At: now.Add(-time.Second), Until: now.Add(5 * time.Second), Period: time.Minute, Slot: 7}
+	d.punch.attending, d.punch.attended, d.punch.slot, d.punch.attempts = true, true, 7, 1
+	d.punch.quietAt = now.Add(time.Hour)
+	// A refresh carried a new placement while the window was attended: it waits for the window's end.
+	newer := Rendezvous{At: now.Add(30 * time.Second), Until: now.Add(36 * time.Second), Period: 2 * time.Minute, Slot: 9}
+	d.punch.adoptWindow(newer)
+	a.tun.mu.Unlock()
+	if err := a.tun.dev.IpcSet("public_key=" + b.pubHex + "\nremove=true\n"); err != nil {
+		t.Fatal(err)
+	}
+	pump(now)
+	pump(now.Add(2 * time.Hour)) // past the window's silence
+	a.tun.mu.Lock()
+	missed, info := d.punch.missed, d.punch.info(false)
+	window, pending := d.punch.window, d.punch.pending
+	a.tun.mu.Unlock()
+	if info.Phase == PunchGaveUp || missed != 0 {
+		t.Fatalf("a window whose handshake landed ended as a miss after the device lost the peer: %+v, missed %d", info, missed)
+	}
+	if window.Period != newer.Period || !pending.IsZero() {
+		t.Fatalf("the placement a refresh left pending was not taken when the window closed: window %+v, pending %+v", window, pending)
+	}
+}
+
 // TestDirectData_TheDeviceIsBroughtBackInLineWithoutDroppingTheRoute: a prefix on a promoted peer that is
 // not its /128 is taken off one at a time, so the /128 never leaves the device and its routed period does
 // not change; a box peer that lost its default route gets it back; a tracked peer missing from the device

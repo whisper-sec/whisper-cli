@@ -400,3 +400,58 @@ func TestReleaseRemovesTheHolder(t *testing.T) {
 		t.Fatal("the holder outlived Release")
 	}
 }
+
+// A prune of an agent's leftover rules holds its lock shared, without publishing a holder, for a few
+// milliseconds; an enforced run that starts meanwhile waits it out instead of refusing.
+func TestAPrunesShortHoldIsWaitedOut(t *testing.T) {
+	useTempLockDir(t)
+	hold := lockSharedQuiet(lockAgent)
+	if hold == nil {
+		t.Fatal("the prune's shared hold could not be taken on a free agent")
+	}
+	if liveHolder(lockAgent) != 0 {
+		t.Fatal("the prune's hold published itself as the agent's holder")
+	}
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		hold.Release()
+	}()
+	l, err := LockExclusive(lockAgent)
+	if err != nil {
+		t.Fatalf("an enforced run refused over a prune's short hold: %v", err)
+	}
+	l.Release()
+}
+
+// The wait is bounded: a hold that stays (a root connect serving the agent) is still refused, and an
+// agent an enforced run holds is never taken by a prune.
+func TestAHoldThatStaysIsStillRefusedAndAPruneNeverTakesARun(t *testing.T) {
+	useTempLockDir(t)
+	old := sharedHoldWait
+	sharedHoldWait = 50 * time.Millisecond
+	t.Cleanup(func() { sharedHoldWait = old })
+	conn, err := LockShared(lockAgent)
+	if err != nil || conn == nil {
+		t.Fatalf("LockShared: %v", err)
+	}
+	start := time.Now()
+	_, err = LockExclusive(lockAgent)
+	if err == nil {
+		t.Fatal("an enforced run took an agent a connect holds")
+	}
+	if !strings.Contains(err.Error(), "pid "+strconv.Itoa(os.Getpid())) {
+		t.Fatalf("the refusal does not name the process holding the agent shared: %v", err)
+	}
+	if took := time.Since(start); took > 2*time.Second {
+		t.Fatalf("the refusal waited %s", took)
+	}
+	conn.Release()
+	run, err := LockExclusive(lockAgent)
+	if err != nil {
+		t.Fatalf("LockExclusive: %v", err)
+	}
+	defer run.Release()
+	if lockSharedQuiet(lockAgent) != nil {
+		t.Fatal("a prune took the lock of an agent an enforced run holds")
+	}
+}

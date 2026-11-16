@@ -82,9 +82,11 @@ func withFakeHost(t *testing.T, euid int, mountinfo string) string {
 	if err := os.Mkdir(proc, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	oldProc, oldMI, oldEuid := procRoot, mountinfoPath, geteuid
+	oldProc, oldMI, oldEuid, oldProbe := procRoot, mountinfoPath, geteuid, attributionProbe
 	procRoot, mountinfoPath, geteuid = proc, mi, func() int { return euid }
-	t.Cleanup(func() { procRoot, mountinfoPath, geteuid = oldProc, oldMI, oldEuid })
+	// The attribution probe makes a real cgroup; contain_residue_root_linux_test.go runs it for real.
+	attributionProbe = func(string) error { return nil }
+	t.Cleanup(func() { procRoot, mountinfoPath, geteuid, attributionProbe = oldProc, oldMI, oldEuid, oldProbe })
 	// This process, and init, in this process's own namespaces, which stand in for the host's.
 	fakeNamespaces(t, proc, "thread-self")
 	fakeNamespaces(t, proc, "1")
@@ -247,6 +249,22 @@ func TestPreflightPassesAnUnprivilegedProcess(t *testing.T) {
 	fakeProc(t, proc, 4242, 1, plain, 0)
 	if err := Preflight(4242); err != nil {
 		t.Fatalf("refused: %v", err)
+	}
+}
+
+// Preflight's last word is the attribution probe's, run on the v2 hierarchy it found: a kernel that
+// does not tell a cgroup's programs about its sockets is refused before anything is touched.
+func TestPreflightRefusesWhatTheAttributionProbeRefuses(t *testing.T) {
+	proc := withFakeHost(t, 0, v2mount)
+	fakeProc(t, proc, 4242, 1, plain, 0)
+	asked := ""
+	attributionProbe = func(root string) error {
+		asked = root
+		return containErr("this kernel does not tell a cgroup's programs about the sockets made in it")
+	}
+	refusal(t, Preflight(4242), "does not tell a cgroup's programs")
+	if asked != "/sys/fs/cgroup" {
+		t.Fatalf("the probe was run on %q, not the v2 hierarchy", asked)
 	}
 }
 

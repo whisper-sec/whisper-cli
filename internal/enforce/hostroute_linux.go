@@ -57,6 +57,13 @@ const (
 	hostRulePrio  = 4300
 	hostTableBase = 4300
 	maxHostSlots  = 256
+	// hostGuardPrio is the guard's, just above every slot: while a device swaps its agent's rules from an
+	// earlier containment's to its own, "from <the /128> prohibit" there keeps the address refused.
+	hostGuardPrio = hostRulePrio - 1
+	// hostRuleProto is the protocol every rule a containment installs carries (FRA_PROTOCOL, an rtnetlink
+	// route protocol number nothing else registers), so a prune can tell its own rules from a host's: a
+	// rule added without a priority lands at a slot's priority, and in the shape of an address rule.
+	hostRuleProto = 0x57
 	// legacyMarkBase | slot is the mark an earlier release gave every containment on a slot. It
 	// is only ever deleted again, for a killed containment whose record predates the counter.
 	legacyMarkBase = 0x77630000
@@ -319,15 +326,24 @@ func CreateHostDevice(self netip.Addr) (*Namespace, error) {
 	// A device a killed command left is found by its record, which nobody holds any more, and its
 	// gate and rules go before this one's are made.
 	reapDeadDevices()
+	// The guard keeps the agent's address refused while its rules from an earlier containment (whose
+	// connections may still be ending) give way to this one's: make before break. A guard a killed
+	// command left is this one's now, and goes with it.
+	if err := addGuard(self); err != nil {
+		dev.Close()
+		return nil, fmt.Errorf("enforce: could not keep the agent's address refused while its rules are replaced: %w", err)
+	}
 	// The record goes down, held, before the gate goes on, so no gate is ever on the root cgroup
 	// without a record that names it. The gate goes on before any rule routes the mark into the
 	// device, so no packet carrying the mark ever reaches the device unchecked.
 	rec, err := holdDeviceRecord(devRecord{Gen: gen, Slot: n, Mark: hr.Mark, Index: idx, Self: self.String()})
 	if err != nil {
+		_ = removeGuard(self) // nothing was swapped yet
 		dev.Close()
 		return nil, err
 	}
 	if hr.gate, err = attachRootGate(hr.Mark, idx, gen); err != nil {
+		_ = removeGuard(self)
 		dev.Close()
 		releaseDeviceRecord(rec)
 		return nil, err
@@ -342,11 +358,82 @@ func CreateHostDevice(self netip.Addr) (*Namespace, error) {
 	removeAgentAddrRules(self)
 	if err := hr.install(self); err != nil {
 		hr.removeRules()
+		// The earlier containment's refusal went with the swap; one stays for whatever of it still ends,
+		// or else the guard does.
+		if addRuleBody(tagged(ruleBodyProhibit(unix.AF_INET6, hr.Prio, self))) == nil {
+			_ = removeGuard(self)
+		}
 		dev.Close()
 		hr.gate.detach() // last, once nothing can enter the device
 		return nil, err
 	}
+	// The guard sits above every slot and would refuse this containment's own traffic from the address.
+	if err := removeGuard(self); err != nil {
+		hr.removeRules()
+		dev.Close()
+		hr.gate.detach()
+		return nil, fmt.Errorf("enforce: could not take away the guard that kept the agent's address refused while its "+
+			"rules were replaced (%v), and it would refuse the containment's own traffic: `ip -6 rule del from %s prohibit "+
+			"pref %d` removes it", err, self, hostGuardPrio)
+	}
+	// Other agents' refusals that nothing needs any more go now (refusals_linux.go), so a host that
+	// contains many agents does not gather one per agent per boot. This one's agent is live, and kept.
+	pruneAgentRefusals(self, host)
 	return &Namespace{fd: -1, Inode: host, HostInode: host, Dev: dev, host: &hr}, nil
+}
+
+// addGuard puts "from self prohibit" at the guard's priority; one already there (a killed command's)
+// is taken as this one's.
+func addGuard(self netip.Addr) error {
+	return addRuleBody(tagged(ruleBodyProhibit(unix.AF_INET6, hostGuardPrio, self)))
+}
+
+// removeGuard takes the guard away again, and reports whether one is still there.
+func removeGuard(self netip.Addr) error {
+	r, err := openRTNL()
+	if err != nil {
+		return err
+	}
+	defer r.close()
+	body := tagged(ruleBodyProhibit(unix.AF_INET6, hostGuardPrio, self))
+	for i := 0; i < 64; i++ {
+		if err := r.do(unix.RTM_DELRULE, 0, body); err != nil {
+			if errors.Is(err, unix.ENOENT) {
+				return nil
+			}
+			return err
+		}
+	}
+	return errors.New("the guard would not go")
+}
+
+// addRuleBody adds one rule; an identical rule already there is not an error.
+func addRuleBody(body []byte) error {
+	r, err := openRTNL()
+	if err != nil {
+		return err
+	}
+	defer r.close()
+	if err := r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, body); err != nil && !errors.Is(err, unix.EEXIST) {
+		return err
+	}
+	return nil
+}
+
+// afterStop runs once the tunnel is gone (its rules removed, its TUN closed, its gate detached): it
+// ends the TCP sockets that could still send from the agent's address and removes the agent's refusal
+// once nothing needs it, and any other agent's that nothing needs either. The caller holds the agent's
+// lock, as every command that makes a host device does. While a containment record names the agent (a
+// killed containment this command failed to take over, or a release that could not give everything
+// back), its connections are that containment's, held as they are, and nothing of them is ended.
+func (hr *HostRoute) afterStop(hostNS uint64) {
+	if !hr.self.Is6() {
+		return
+	}
+	if !containedAgents()[hr.self] {
+		endAgentSockets(hr.self)
+	}
+	pruneAgentRefusals(hr.self, hostNS)
 }
 
 // devRecord names a tunnel device's gate and rules, for as long as the device lives: its file is
@@ -426,9 +513,10 @@ func (h *heldRecord) drop() {
 // cgroup and its mark's rule. Both are named by the dead device's generation, which no live device
 // shares, so a reap that comes late, or twice, touches nothing alive. Its agent's address rules are
 // not touched here: this runs under another agent's lock, and that agent's next containment may
-// already hold the same slot with rules of the same shape. They go with the agent's next device,
-// which clears them under its own lock, or with the slot's next holder; until then the dead one's
-// prohibit refuses the old /128. A device whose record is still held is alive and is left alone.
+// already hold the same slot with rules of the same shape. The slot's next holder takes the lookup,
+// and the prohibit goes with the agent's next device, which clears it under its own lock, or with
+// the first prune once nothing needs it (refusals_linux.go); until then it refuses the old /128. A
+// device whose record is still held is alive and is left alone.
 // A gate a containment record names is left too: a containment that was killed while it held a
 // process keeps it, fail closed, until `whisper contain --release` or the agent's next containment
 // takes it over.
@@ -651,12 +739,28 @@ func attachRootGate(mark uint32, tunIdx int, gen uint32) (*rootGate, error) {
 	return g, nil
 }
 
-// adopt tags a socket as the containment's own.
+// dialTag is the tag this command's own dials carry. A socket the sweep adopts carries the
+// generation instead, which never reaches this value, and counts only while the containment's cgroup
+// is named to the gate: the release unnames it (setCgroup(0)), and with that every socket the sweep
+// adopted stops being the containment's at once, wherever it is (in flight on a unix socket, passed
+// out of the tree, waiting in an adopted listener's queue), while the command's own dials go on.
+// Positive, so it compares as a 32-bit immediate unchanged.
+const dialTag = 0x7fff0000
+
+// adopt tags a socket the sweep found as the containment's own, for as long as the containment holds.
 func (g *rootGate) adopt(fd int) error {
 	if g == nil {
 		return errors.New("enforce: the containment has no gate")
 	}
 	return g.tags.Update(int32(fd), g.gen, ebpf.UpdateAny)
+}
+
+// adoptDial tags one of this command's own dials, for the life of the device.
+func (g *rootGate) adoptDial(fd int) error {
+	if g == nil {
+		return errors.New("enforce: the containment has no gate")
+	}
+	return g.tags.Update(int32(fd), uint32(dialTag), ebpf.UpdateAny)
 }
 
 // forget removes a socket's tag: it is given back to the program, no longer the containment's.
@@ -716,7 +820,8 @@ func isNilCloser(c interface{ Close() error }) bool {
 }
 
 // rootGateSpec judges a packet that is the containment's: one that carries mark (under
-// hostMarkMask), or whose socket is adopted (tagged in tags; a request socket by its listener). Such a
+// hostMarkMask), or whose socket is adopted (tagged in tags; a request socket by its listener; a tag
+// the sweep gave counts only while cfg names the containment's cgroup, dialTag always). Such a
 // packet passes through loopback; through the tunnel only if it is adopted or comes from the cgroup
 // cfg names; anywhere else never. Every other packet passes. Being adopted is checked whatever the
 // mark: a connection a pinned listener completes after the sweep takes its binding and mark from the
@@ -743,7 +848,20 @@ func rootGateSpec(mark uint32, tunIdx, loIdx int, gen uint32, tags, cfg *ebpf.Ma
 			asm.Mov.Imm(asm.R4, 0),
 			asm.FnSkStorageGet.Call(),
 			asm.JEq.Imm(asm.R0, 0, "checked"),
-			asm.Mov.Imm(asm.R7, 1),
+			// The command's own dial is adopted for the device's life; a socket the sweep adopted only
+			// while the containment's cgroup is named to the gate, which the release undoes.
+			asm.LoadMem(asm.R2, asm.R0, 0, asm.Word),
+			asm.JEq.Imm(asm.R2, dialTag, "adopted"),
+			asm.Mov.Imm(asm.R2, 0),
+			asm.StoreMem(asm.RFP, -4, asm.R2, asm.Word),
+			asm.Mov.Reg(asm.R2, asm.RFP),
+			asm.Add.Imm(asm.R2, -4),
+			asm.LoadMapPtr(asm.R1, cfg.FD()),
+			asm.FnMapLookupElem.Call(),
+			asm.JEq.Imm(asm.R0, 0, "checked"),
+			asm.LoadMem(asm.R2, asm.R0, 0, asm.DWord),
+			asm.JEq.Imm(asm.R2, 0, "checked"),
+			asm.Mov.Imm(asm.R7, 1).WithSymbol("adopted"),
 			// Neither marked nor adopted: not the containment's.
 			asm.LoadMem(asm.R2, asm.R6, skbMarkOff, asm.Word).WithSymbol("checked"),
 			asm.And.Imm32(asm.R2, hostMarkMask),
@@ -836,10 +954,10 @@ func (hr *HostRoute) install(self netip.Addr) error {
 			return r.rule(unix.RTM_NEWRULE, unix.AF_INET6, hr.Prio, hr.Mark, hr.Table)
 		}},
 		step{"select the tunnel's table for the agent's address", func() error {
-			return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, ruleBodyFrom(unix.AF_INET6, hr.Prio, self, hr.Table))
+			return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, tagged(ruleBodyFrom(unix.AF_INET6, hr.Prio, self, hr.Table)))
 		}},
 		step{"refuse the agent's address any other way", func() error {
-			return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, ruleBodyProhibit(unix.AF_INET6, hr.Prio, self))
+			return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, tagged(ruleBodyProhibit(unix.AF_INET6, hr.Prio, self)))
 		}},
 	)
 	if hr.CarryV4 {
@@ -849,7 +967,7 @@ func (hr *HostRoute) install(self netip.Addr) error {
 				return r.rule(unix.RTM_NEWRULE, unix.AF_INET, hr.Prio, hr.Mark, hr.Table)
 			}},
 			step{"select the tunnel's table for the translator's address", func() error {
-				return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, ruleBodyFrom(unix.AF_INET, hr.Prio, CLATv4, hr.Table))
+				return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, tagged(ruleBodyFrom(unix.AF_INET, hr.Prio, CLATv4, hr.Table)))
 			}},
 		)
 	}
@@ -871,13 +989,13 @@ func (hr *HostRoute) install(self netip.Addr) error {
 // not an error.
 func (hr *HostRoute) removeRules() {
 	deleteRules(hr.Prio, hr.Table, hr.Mark, hostMarkMask)
-	// The lookup for the agent's address goes; its prohibit stays, as a killed containment's does:
-	// a connection of the containment still ending (FIN_WAIT1, LAST_ACK) after the tunnel is gone
-	// would otherwise retransmit from the /128 by the host's main table. The agent's next device
-	// clears it under the agent's lock, and so does the slot's next holder.
+	// The lookup for the agent's address goes; its prohibit stays for now: a connection of the
+	// containment still ending (FIN_WAIT1, LAST_ACK, TIME_WAIT) after the tunnel is gone would
+	// otherwise retransmit from the /128 by the host's main table. afterStop removes it once no socket
+	// could still send from the /128, and so does any later prune (refusals_linux.go).
 	if hr.self.Is6() {
 		for _, r := range dumpRules(unix.AF_INET6) {
-			if r.prio == hr.Prio && r.src == hr.self && r.action != frActProhibit {
+			if r.prio == hr.Prio && r.src == hr.self && r.action == frActToTbl && r.table == hr.Table {
 				deleteRuleBodies(func(fam uint8) []byte {
 					if fam != unix.AF_INET6 {
 						return nil
@@ -902,12 +1020,16 @@ func (hr *HostRoute) removeRules() {
 // removeAgentAddrRulesAt deletes self's own rules at prio: "from self lookup" (any table) and
 // "from self prohibit". It never touches the translator's 192.0.0.2, which another agent's
 // containment may hold.
-func removeAgentAddrRulesAt(self netip.Addr, prio uint32) {
+func removeAgentAddrRulesAt(self netip.Addr, prio uint32) { removeAgentRulesAt(self, prio, true) }
+
+// removeAgentRulesAt is removeAgentAddrRulesAt, leaving the prohibit when prohibitToo is false.
+func removeAgentRulesAt(self netip.Addr, prio uint32, prohibitToo bool) {
 	if !self.Is6() {
 		return
 	}
 	for _, r := range dumpRules(unix.AF_INET6) {
-		if r.prio == prio && r.src == self {
+		lookup := r.action == frActToTbl && r.table == hostTableBase+(prio-hostRulePrio)
+		if r.prio == prio && r.src == self && (lookup || prohibitToo && r.action == frActProhibit) {
 			deleteRuleBodies(func(fam uint8) []byte {
 				if fam != unix.AF_INET6 {
 					return nil
@@ -943,9 +1065,38 @@ func removeAgentAddrRules(self netip.Addr) {
 //
 // A prohibit left there is not deleted: it names only its own agent's /128, so it is harmless to the
 // new holder, and it may still be refusing that address to a connection of the old containment that
-// is ending. That agent's next device clears it.
+// is ending. That agent's next device clears it, or the first prune once nothing needs it.
+//
+// Only what a containment installs is taken, a release that did not tag its rules included: a mark
+// rule with a containment's mark, and a lookup of the slot's table from the translator's 192.0.0.2 or
+// from a single IPv6 address. A host's own rule that happens to sit at the priority goes untouched.
 func removeSlotRules(prio, table uint32) {
-	deleteRuleBodies(func(fam uint8) []byte { return ruleBodyAny(fam, prio, table) })
+	r, err := openRTNL()
+	if err != nil {
+		return
+	}
+	defer r.close()
+	slot := prio - hostRulePrio
+	for _, fam := range []uint8{unix.AF_INET6, unix.AF_INET} {
+		for _, ri := range dumpRules(fam) {
+			if ri.prio != prio || ri.table != table || ri.action != frActToTbl {
+				continue
+			}
+			var body []byte
+			_, ours := genOf(ri.mark)
+			switch {
+			case ri.mark != 0 && (ours || ri.mark == legacyMarkBase|slot):
+				body = ruleBody(fam, prio, ri.mark, ri.mask, table)
+			case ri.mark == 0 && fam == unix.AF_INET && ri.src == CLATv4:
+				body = ruleBodyFrom(fam, prio, ri.src, table)
+			case ri.mark == 0 && fam == unix.AF_INET6 && ri.src.Is6() && !ri.src.Is4In6():
+				body = ruleBodyFrom(fam, prio, ri.src, table)
+			}
+			if body != nil {
+				_ = r.do(unix.RTM_DELRULE, 0, body)
+			}
+		}
+	}
 }
 
 // deleteRules deletes, in both families, the rules at prio that look up table and carry exactly
@@ -974,8 +1125,10 @@ func deleteRuleBodies(body func(fam uint8) []byte) {
 }
 
 // RemoveStaleRules clears the rules a killed containment left: the ones at its slot carrying its
-// own mark, and (given its agent) the agent's own address rules there. The translator's rule is
-// left: it may be a live containment's now, and the slot's next holder clears it otherwise. A mark belongs to one containment for the whole boot, so this can never take the rule
+// own mark, and (given its agent) the agent's lookup there. Its prohibit is left to the prune
+// (pruneAgentRefusals), which removes it only once no socket could still send from the /128. The
+// translator's rule is left: it may be a live containment's now, and the slot's next holder clears it
+// otherwise. A mark belongs to one containment for the whole boot, so this can never take the rule
 // of a live containment that holds the slot now. They are harmless while they stay (their table
 // is empty, or another containment's that does not admit their mark); this only tidies. A record
 // from before the counter has no mark; its slot's shared mark is removed only while no device
@@ -987,7 +1140,7 @@ func RemoveStaleRules(slot int, mark uint32, self netip.Addr) {
 	prio, table := hostRulePrio+uint32(slot), hostTableBase+uint32(slot)
 	if mark != 0 {
 		deleteRules(prio, table, mark, hostMarkMask)
-		removeAgentAddrRulesAt(self, prio)
+		removeAgentRulesAt(self, prio, false)
 		return
 	}
 	if _, err := ifIndex(fmt.Sprintf("wsc%d", slot)); err == nil {
@@ -1047,9 +1200,9 @@ func slotRuleMarks() []uint32 {
 
 // ruleInfo is what a dump says about one policy rule.
 type ruleInfo struct {
-	prio, table, mark uint32
-	action            uint8
-	src               netip.Addr // the full-length source a rule names, or invalid
+	prio, table, mark, mask uint32
+	action, proto           uint8
+	src                     netip.Addr // the full-length source a rule names, or invalid
 }
 
 // dumpRules reads every policy rule of one family.
@@ -1083,8 +1236,12 @@ func dumpRules(fam uint8) []ruleInfo {
 				ri.prio = binary.NativeEndian.Uint32(val)
 			case typ == fraFwmark && len(val) >= 4:
 				ri.mark = binary.NativeEndian.Uint32(val)
+			case typ == fraFwmask && len(val) >= 4:
+				ri.mask = binary.NativeEndian.Uint32(val)
 			case typ == fraTable && len(val) >= 4:
 				ri.table = binary.NativeEndian.Uint32(val)
+			case typ == fraProtocol && len(val) >= 1:
+				ri.proto = val[0]
 			case typ == fraSrc:
 				if a, ok := netip.AddrFromSlice(val); ok && int(srcLen) == a.BitLen() {
 					ri.src = a
@@ -1124,7 +1281,7 @@ func (hr *HostRoute) dial(ctx context.Context, network, addr, host string, while
 				if err := unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_MARK, mark); err != nil {
 					return err
 				}
-				if err := gate.adopt(int(fd)); err != nil {
+				if err := gate.adoptDial(int(fd)); err != nil {
 					return err
 				}
 				return bindToDevice(int(fd), index, name)
@@ -1189,6 +1346,7 @@ const (
 	fraFwmark     = 10 // FRA_FWMARK
 	fraTable      = 15 // FRA_TABLE
 	fraFwmask     = 16 // FRA_FWMASK
+	fraProtocol   = 21 // FRA_PROTOCOL (Linux 4.17)
 	frActToTbl    = 1  // FR_ACT_TO_TBL
 	frActProhibit = 8  // FR_ACT_PROHIBIT
 )
@@ -1228,22 +1386,24 @@ func ruleBodyProhibit(fam uint8, prio uint32, src netip.Addr) []byte {
 	return body
 }
 
-// ruleBodyAny names only the priority and the table, which a delete then matches whatever the
-// rule's mark (or source).
-func ruleBodyAny(fam uint8, prio, table uint32) []byte {
-	h := fibRuleHdr{Family: fam, Table: unix.RT_TABLE_UNSPEC, Action: frActToTbl}
-	body := append([]byte(nil), (*[unsafe.Sizeof(fibRuleHdr{})]byte)(unsafe.Pointer(&h))[:]...)
-	body = append(body, nlAttr(fraPriority, u32(prio))...)
-	body = append(body, nlAttr(fraTable, u32(table))...)
-	return body
-}
-
 func (r *rtnl) rule(typ uint16, fam uint8, prio, mark, table uint32) error {
 	flags := uint16(0)
+	body := ruleBody(fam, prio, mark, hostMarkMask, table)
 	if typ == unix.RTM_NEWRULE {
 		flags = unix.NLM_F_CREATE | unix.NLM_F_EXCL
+		body = tagged(body)
 	}
-	return r.do(typ, flags, ruleBody(fam, prio, mark, hostMarkMask, table))
+	return r.do(typ, flags, body)
+}
+
+// tagged adds hostRuleProto to a rule body. A rule a containment installs carries it, and a delete
+// that names it matches only such a rule: that is how a prune deletes. The other deletes name the
+// exact shapes a containment installs (a containment's mark, a lookup of the slot's own table from a
+// single address, the agent's own address under its lock), so they also take the rules of a release
+// that did not tag them, which last until the next boot at most; a host's own rule in such a shape
+// (table 4300+n at priority 4300+n, or the agent's own /128) is the only one they could take.
+func tagged(body []byte) []byte {
+	return append(body, nlAttr(fraProtocol, []byte{hostRuleProto})...)
 }
 
 // hostAddrs lists every address on every interface of the calling thread's namespace.

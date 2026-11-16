@@ -55,3 +55,39 @@ func exclusiveFlockHeld(dfd int, name string) (held, known bool) {
 	}
 	return false, true
 }
+
+// sharedFlockHolders names the processes holding a shared flock on the lock file name in the directory
+// dfd, from the kernel's lock table, so a refusal can say who holds an agent when no enforced run does.
+// It is empty when the table cannot be read.
+func sharedFlockHolders(dfd int, name string) []int {
+	var st unix.Stat_t
+	if err := unix.Fstatat(dfd, name, &st, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return nil
+	}
+	f, err := os.Open(procLocks)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	major, minor := uint64(unix.Major(uint64(st.Dev))), uint64(unix.Minor(uint64(st.Dev)))
+	var out []int
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fs := strings.Fields(sc.Text())
+		if len(fs) < 6 || fs[1] != "FLOCK" || fs[3] != "READ" {
+			continue
+		}
+		id := strings.Split(fs[5], ":")
+		if len(id) != 3 {
+			continue
+		}
+		maj, e1 := strconv.ParseUint(id[0], 16, 64)
+		mn, e2 := strconv.ParseUint(id[1], 16, 64)
+		ino, e3 := strconv.ParseUint(id[2], 10, 64)
+		pid, e4 := strconv.Atoi(fs[4])
+		if e1 == nil && e2 == nil && e3 == nil && e4 == nil && maj == major && mn == minor && ino == uint64(st.Ino) {
+			out = append(out, pid)
+		}
+	}
+	return out
+}

@@ -229,12 +229,17 @@ func buildWhaleStatus(cx context.Context, agentFile string, wantPeers, probe boo
 			"this host is pinned to %s, which is not in the fleet this key can see - "+
 				"the node half and the peer half are describing different accounts", view.Self.Address))
 	}
+	if inFleet && len(peers) == 1 {
+		// A fleet of one is what an agent's own key sees, by design: the control plane lists an agent key's
+		// own rows and nothing else. Said, so a reader holding one does not take it for missing peers.
+		view.Notes = append(view.Notes, whaleFleetOfOneNote)
+	}
 	// How old is the copy each node is answering from? Read each node's SOA and report the
 	// age, so a fleet answering from different snapshots is visible rather than inferred.
 	// The zone the fleet's names live in is the one to date. Bounded and fail-open: no
 	// answer costs the line and nothing else.
-	if zone := fleetZone(peers); zone != "" {
-		view.Snapshot = readZoneSnapshot(cx, zone, time.Now())
+	if zone, ages := readFleetSnapshot(cx, peers, time.Now()); zone != "" {
+		view.Snapshot = ages
 		view.SnapshotNote = whale.SnapshotNote(zone, view.Snapshot)
 	}
 
@@ -263,6 +268,10 @@ func buildWhaleStatus(cx context.Context, agentFile string, wantPeers, probe boo
 	}
 	return view
 }
+
+// whaleFleetOfOneNote is the note under a fleet listing that holds only this node.
+const whaleFleetOfOneNote = "only this node is listed. An agent's own key lists that agent alone, by design, " +
+	"as does the owner's key of an account with one agent; an owner's key lists every agent on its account"
 
 // whaleStatusProbeConcurrency bounds the fan-out of --probe so a large fleet does not
 // open a hundred sockets at once.
@@ -301,35 +310,6 @@ func probeWhalePeers(cx context.Context, peers []whaleStatusPeer, self string) {
 		}(i, addr)
 	}
 	wg.Wait()
-}
-
-// fleetZone is the DNS zone the fleet's names actually live in, taken from the peers
-// themselves rather than assumed. Per-agent tenancy puts each agent under its own tenant
-// label, so the zone to date is the one they SHARE: the parent of the tenant label, which
-// is the apex the SOA and the signing live at.
-//
-// A BYOD fleet whose names sit under the customer's own domain lands on that domain, which
-// is the right answer for it. A mixed set with no single shared zone yields nothing rather
-// than one of them: dating a zone half the fleet does not use would be worse than saying
-// nothing, and this line is only worth printing when it describes everybody.
-func fleetZone(peers []whalePeer) string {
-	zones := map[string]bool{}
-	for _, p := range peers {
-		tenantZone := agentDomain(p.FQDN) // <tenant>.<apex>
-		if tenantZone == "" {
-			continue
-		}
-		if apex := agentDomain(tenantZone); apex != "" {
-			zones[apex] = true
-		}
-	}
-	if len(zones) != 1 {
-		return ""
-	}
-	for z := range zones {
-		return z
-	}
-	return ""
 }
 
 // tenantOfFQDN pulls the tenant label out of an agent fqdn (<agent>.<tenant>.agents...).

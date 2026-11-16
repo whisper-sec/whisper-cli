@@ -159,9 +159,8 @@ func TestTheCounterRefusesWhenEveryMarkIsTaken(t *testing.T) {
 	}
 }
 
-// An any-mark delete names only the priority and the table, so the kernel takes the rule whatever
-// its mark; a marked one names the mark under the containment's mask; a source rule names the
-// address and its length.
+// A marked rule names the mark under the containment's mask; a source rule names the address and
+// its length; a tagged one carries the containment's route protocol, which a delete then matches.
 func TestRuleBodiesNameWhatTheyMatch(t *testing.T) {
 	attrs := func(b []byte) map[uint16][]byte {
 		out := map[uint16][]byte{}
@@ -173,9 +172,9 @@ func TestRuleBodiesNameWhatTheyMatch(t *testing.T) {
 		return out
 	}
 	u := func(b []byte) uint32 { return binary.NativeEndian.Uint32(b) }
-	any := attrs(ruleBodyAny(unix.AF_INET6, 4300, 4300))
-	if _, has := any[fraFwmark]; has || u(any[fraPriority]) != 4300 || u(any[fraTable]) != 4300 {
-		t.Fatalf("an any-mark body %v", any)
+	if tag := attrs(tagged(ruleBodyProhibit(unix.AF_INET6, 4300, netip.MustParseAddr("2a04:2a01:0:1::42")))); len(tag[fraProtocol]) != 1 ||
+		tag[fraProtocol][0] != hostRuleProto {
+		t.Fatalf("a tagged body %v", tag)
 	}
 	one := attrs(ruleBody(unix.AF_INET, 4301, markFor(9), hostMarkMask, 4301))
 	if u(one[fraFwmark]) != markFor(9) || u(one[fraFwmask]) != hostMarkMask {
@@ -250,7 +249,7 @@ func TestRingHeldFilesCountsWhatTheRingHolds(t *testing.T) {
 }
 
 // On a kernel before 5.15 a mounted cgroup v1 net_cls or net_prio controller can turn off the cgroup
-// v2 attribution of every socket; from 5.15 the kernel keeps both.
+// v2 attribution of every socket, at any moment, so it refuses; from 5.15 the kernel keeps both.
 func TestOldKernelsWithV1SocketClassifiersRefuse(t *testing.T) {
 	v1 := "#subsys_name\thierarchy\tnum_cgroups\tenabled\ncpuset\t0\t1\t1\nnet_cls\t5\t1\t1\nnet_prio\t5\t1\t1\n"
 	unified := "#subsys_name\thierarchy\tnum_cgroups\tenabled\nnet_cls\t0\t1\t1\nnet_prio\t0\t1\t1\n"

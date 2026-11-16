@@ -401,7 +401,7 @@ func (tr *punchTrain) fallBack() {
 	}
 	tr.window = tr.fallback
 	tr.attending, tr.attended, tr.pending = false, false, Rendezvous{}
-	tr.gaveUp = true
+	tr.gaveUp = tr.attempts > 0 // a row with no candidate to aim at fell back without trying anything
 }
 
 // adoptFallback takes the window a refresh carried for a direct row: as the next fallback while the train
@@ -600,8 +600,12 @@ func (tr *punchTrain) aimWindow(now time.Time) Candidate {
 // packet that landed after the tick decided to silence, and reports whether it did. A second deferral
 // is refused, so a peer that keeps sending can never keep this side sending for longer than a window
 // and two periods.
+//
+// A train that has made no attempt has nothing to extend: it would join a window it never sent in, and the end
+// of that window would read gave-up with no attempt behind it. quietDirectPeer already refuses an entry
+// a refresh re-armed after the decision; this is the train's own line behind it.
 func (tr *punchTrain) deferQuiet(now time.Time, period time.Duration) bool {
-	if tr == nil || !tr.timed() || tr.extended {
+	if tr == nil || !tr.timed() || tr.extended || tr.attempts == 0 {
 		return false
 	}
 	if period <= 0 {
@@ -613,6 +617,20 @@ func (tr *punchTrain) deferQuiet(now time.Time, period time.Duration) bool {
 	tr.attending, tr.gaveUp, tr.extended = true, false, true
 	tr.quietAt = now.Add(period)
 	return true
+}
+
+// closeWindow ends the window being attended without counting it as missed, and takes the window a refresh
+// carried while it was attended (adoptWindow keeps that one pending until the window is over), so a stale
+// placement cannot come back at the end of a later window.
+func (tr *punchTrain) closeWindow() {
+	if tr == nil {
+		return
+	}
+	tr.attending = false
+	if !tr.pending.IsZero() {
+		tr.takeWindow(tr.pending)
+		tr.pending = Rendezvous{}
+	}
 }
 
 // freshEvidence starts the backoff over: the far side's mapping moved, so what was learned about the
@@ -702,9 +720,14 @@ func (tr *punchTrain) restart(now time.Time, first Candidate) {
 // came up and died within one rekey, while an untimed train for the key ran within directRearmAfter, is not
 // fresh evidence: such a direct row goes back to its window with the backoff it had, so a far end that
 // completes one handshake and goes quiet cannot keep buying this node untimed trains (Tunnel.reconcile).
+//
+// A row sent back to its window is waiting for that window, not spent: nothing has been tried since the
+// withdrawal. So it reads resting for its quiet hold and punching after it, until the first window it
+// attends. It used to be marked spent, which after the hold read gave-up, and `whale ping` then said "the
+// punch failed: 0 attempts" when no attempt had been made at all.
 func (tr *punchTrain) restartFor(now time.Time, first Candidate, fresh bool) {
 	if tr != nil && !fresh && !tr.fallback.IsZero() {
-		tr.attempts, tr.gaveUp, tr.startedAt, tr.lastAt = 0, true, now, time.Time{}
+		tr.attempts, tr.gaveUp, tr.startedAt, tr.lastAt = 0, false, now, time.Time{}
 		tr.window, tr.attending, tr.attended, tr.pending = tr.fallback, false, false, Rendezvous{}
 		return
 	}
@@ -731,7 +754,8 @@ func (tr *punchTrain) restartFresh(now time.Time, first Candidate) {
 		// A timed train restarts by attending the next window it can, from the first rung of the
 		// backoff: the path was up a moment ago, so this is the likeliest time it comes back. The
 		// window counts as a train when it is attended, not here.
-		tr.attending, tr.attended, tr.missed = false, false, 0
+		tr.closeWindow()
+		tr.attended, tr.missed = false, 0
 	} else {
 		tr.trains++
 	}
@@ -793,9 +817,11 @@ func (tr *punchTrain) info(promoted bool) PunchInfo {
 		if !tr.withdrawnAt.IsZero() {
 			in.Since = tr.withdrawnAt // the withdrawal, even when a re-arm inside the hold built a new train
 		}
-	case tr.gaveUp:
+	case tr.gaveUp && tr.attempts > 0:
 		in.Phase = PunchGaveUp
 	default:
+		// Running, or waiting for its first attempt. A train that has made no attempt cannot have failed,
+		// whatever its flags say, so gave-up is never reported with zero attempts.
 		in.Phase = PunchTrying
 	}
 	return in

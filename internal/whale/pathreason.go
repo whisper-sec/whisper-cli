@@ -82,8 +82,15 @@ func (e PunchEvidence) InFlight() bool { return e.Found && e.Phase == string(wgt
 // EvidenceFor turns one published peer record into the evidence the surface renders. rec comes
 // from wgtun.PathStateRecord.PeerFor; age and stale come from the record that held it.
 func EvidenceFor(rec wgtun.PathPeerRecord, age time.Duration, stale bool) PunchEvidence {
+	phase := rec.Punch.Phase
+	if phase == string(wgtun.PunchGaveUp) && rec.Punch.Attempts <= 0 {
+		// A train that made no attempt has not failed: it is waiting for its first one. A tunnel from
+		// v0.268.1 or before wrote gave-up for a direct row put back on its window after a quiet hold, until
+		// that window came, so a record read from one is taken for what it is.
+		phase = string(wgtun.PunchTrying)
+	}
 	return PunchEvidence{
-		Phase:      rec.Punch.Phase,
+		Phase:      phase,
 		Attempts:   rec.Punch.Attempts,
 		Candidates: rec.Punch.Candidates,
 		Endpoint:   firstNonEmpty(rec.Punch.Winner, rec.Punch.Trying, rec.Endpoint),
@@ -186,8 +193,18 @@ func ReasonFor(o Observation) string {
 			"whisper that does not read its routing back from the device, so its direct claim is not " +
 			"evidence. Restart the connection to measure the path"
 	}
-	switch e.Phase {
+	phase := e.Phase
+	if phase == string(wgtun.PunchGaveUp) && e.Attempts <= 0 {
+		phase = string(wgtun.PunchTrying) // no attempt, no failure: see EvidenceFor
+	}
+	switch phase {
 	case string(wgtun.PunchTrying):
+		if e.Timed && e.Attempts <= 0 {
+			return stale + fmt.Sprintf(
+				"relayed while a direct path is being opened: the first attempt waits for the next punch "+
+					"window this node attends, at %s. Traffic is unaffected meanwhile - it keeps going through the box",
+				plural(e.Candidates, "endpoint"))
+		}
 		at := ""
 		if e.Endpoint != "" {
 			at = ", currently at " + e.Endpoint

@@ -83,7 +83,14 @@ func runContain(pid int, agent, agentFile string) error {
 			logf("whisper: %s", n)
 		}
 	}
-	defer release()
+	// However this ends: the process released while the tunnel still carries the goodbye of what the
+	// release ended, then the tunnel stopped, then the containment's mark taken off those sockets, and
+	// only then the agent's lock let go (enforcedUp.close).
+	up.afterStop = c.Finish
+	defer func() {
+		release()
+		up.close()
+	}()
 
 	v4 := up.v4note
 	if !hr.CarryV4 {

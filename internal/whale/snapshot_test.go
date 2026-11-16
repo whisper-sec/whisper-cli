@@ -168,6 +168,88 @@ func TestSnapshotNote_NothingDatableIsSaidPlainly(t *testing.T) {
 	}
 }
 
+// TestSnapshotNote_ANotEpochAnchoredZoneIsSaidOnceQuietly is the noise a live check of v0.268.1 saw: four
+// nameservers, one serial that is not a time, and the same long reason repeated four times
+// followed by a warning. A zone numbered some other way is a property of the zone, not a fault,
+// so it is said once, with the serial, and nothing is dated or warned about.
+func TestSnapshotNote_ANotEpochAnchoredZoneIsSaidOnceQuietly(t *testing.T) {
+	var ages []SnapshotAge
+	for _, ns := range []string{"ns-tld1.example", "ns-tld2.example", "ns-tld3.example", "ns-tld4.example"} {
+		ages = append(ages, AgeOf(ns, 101427, snapNow))
+	}
+	note := SnapshotNote("app", ages)
+	want := "app snapshot age: not epoch-anchored (serial 101427 from 4 nameservers), so it cannot be read as a time."
+	if note != want {
+		t.Fatalf("note = %q\nwant   %q", note, want)
+	}
+	if !ages[0].NotAnchored || ages[0].Known {
+		t.Fatalf("a small serial must be marked not epoch-anchored and not dated: %+v", ages[0])
+	}
+}
+
+// TestSnapshotNote_ANotEpochAnchoredNodeAmongDatedOnesIsNamedOnce: when only some nodes answer
+// with such a serial, they are named once, and since their serial is not the dated nodes' the
+// two are answering from different snapshots, which is still the warning this line exists for.
+func TestSnapshotNote_ANotEpochAnchoredNodeAmongDatedOnesIsNamedOnce(t *testing.T) {
+	serial := uint32(snapNow.Unix() - 120)
+	note := SnapshotNote("example.com", []SnapshotAge{
+		AgeOf("ns1", serial, snapNow),
+		AgeOf("ns2", serial, snapNow),
+		AgeOf("ns3", 2026111501, snapNow),
+	})
+	for _, want := range []string{"ns1 2m", "ns2 2m", "ns3 not epoch-anchored (serial 2026111501)", "THE NODES DISAGREE"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note = %q, missing %q", note, want)
+		}
+	}
+	if strings.Count(note, "not epoch-anchored") != 1 || strings.Contains(note, "cannot be read as a time,") {
+		t.Fatalf("the reason must be said once: %q", note)
+	}
+}
+
+// TestSnapshotNote_NotEpochAnchoredSerialsThatDifferStillDisagree: undatable is not unreadable.
+// Two nodes on two serials are on two snapshots whether or not either serial is a time.
+func TestSnapshotNote_NotEpochAnchoredSerialsThatDifferStillDisagree(t *testing.T) {
+	note := SnapshotNote("app", []SnapshotAge{AgeOf("ns1", 101427, snapNow), AgeOf("ns2", 101420, snapNow)})
+	for _, want := range []string{"serials ns1 101427, ns2 101420", "THE NODES DISAGREE"} {
+		if !strings.Contains(note, want) {
+			t.Fatalf("note = %q, missing %q", note, want)
+		}
+	}
+	// A node that did not answer beside an undatable one is still a gap worth naming.
+	gap := SnapshotNote("app", []SnapshotAge{AgeOf("ns1", 101427, snapNow), {Server: "ns2", Note: "did not answer for the zone's SOA"}})
+	for _, want := range []string{"ns2 unknown (did not answer", "ns1 not epoch-anchored (serial 101427)", "of unknown age"} {
+		if !strings.Contains(gap, want) {
+			t.Fatalf("note = %q, missing %q", gap, want)
+		}
+	}
+}
+
+// TestAgeOf_FarAheadIsTheZonesNumberingNotTheClock: a serial years ahead is a YYYYMMDDnn date or a
+// provider's counter, whichever provider it is, and is said to be not epoch-anchored without a
+// warning; a serial a day ahead names the clock. The rule reads the lead alone, so it holds the same
+// when the clock itself is in 2033, where an epoch serial an hour or two ahead of the clock happens to
+// spell a valid YYYYMMDDnn and must still be reported as a lead, not as a date.
+func TestAgeOf_FarAheadIsTheZonesNumberingNotTheClock(t *testing.T) {
+	for _, serial := range []uint32{2026111501, 2419984191} {
+		if a := AgeOf("ns1", serial, snapNow); a.Known || !a.NotAnchored || !strings.Contains(a.Note, "not epoch-anchored") {
+			t.Fatalf("serial %d years ahead reads %+v, want not epoch-anchored", serial, a)
+		}
+	}
+	day := AgeOf("ns1", uint32(snapNow.Unix()+86_400), snapNow)
+	if day.Known || day.NotAnchored || !strings.Contains(day.Note, "this host's clock is behind") {
+		t.Fatalf("a day ahead reads %+v, want the clock named", day)
+	}
+	in2033 := time.Date(2033, 4, 1, 0, 0, 0, 0, time.UTC)
+	const lead = 1996010100 // 23 h ahead of that clock, and it spells 1996-01-01
+	if a := AgeOf("ns1", lead, in2033); a.Known || a.NotAnchored || !strings.Contains(a.Note, "this host's clock is behind") {
+		t.Fatalf("in 2033 a day's lead that spells a date reads %+v, want the clock named", a)
+	}
+	if a := AgeOf("ns1", uint32(in2033.Unix()-600), in2033); !a.Known || a.Age != 10*time.Minute {
+		t.Fatalf("in 2033 an epoch serial ten minutes old reads %+v", a)
+	}
+}
+
 // TestSnapshotNote_EmptyYieldsNothing: a footnote that says nothing is worse than no
 // footnote, so a run that read no nodes prints no line at all.
 func TestSnapshotNote_EmptyYieldsNothing(t *testing.T) {

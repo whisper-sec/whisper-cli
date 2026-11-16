@@ -106,6 +106,60 @@ func TestReasonFor_AWithdrawnPathRestingSaysWhy(t *testing.T) {
 	}
 }
 
+// TestReasonFor_NoAttemptIsNeverAPunchFailure is the guard against a false failure. "relayed because
+// the punch failed" is a finding about attempts that were made, so a row with no attempt behind it can never produce
+// it, in whatever phase, timed or not, fresh or stale, probed or not. That includes a record from a tunnel
+// of v0.268.1 or before, which wrote gave-up for a direct row put back on its window after a quiet hold
+// until the window came: the record is read as the wait it was, and --until-direct waits on it.
+func TestReasonFor_NoAttemptIsNeverAPunchFailure(t *testing.T) {
+	phases := []string{string(wgtun.PunchIdle), string(wgtun.PunchTrying), string(wgtun.PunchResting),
+		string(wgtun.PunchEstablished), string(wgtun.PunchGaveUp), ""}
+	for _, phase := range phases {
+		for _, timed := range []bool{false, true} {
+			for _, stale := range []bool{false, true} {
+				rec := punchedRecord(phase, 0, 1, "198.51.100.7:51820", "", false)
+				rec.Punch.Timed = timed
+				obs := ObservationFor(rec, time.Second, stale)
+				for _, o := range []Observation{obs, obs.WithProbe(true, true), obs.WithProbe(true, false)} {
+					if why := ReasonFor(o); strings.Contains(why, "punch failed") || strings.Contains(why, "different external port") {
+						t.Fatalf("phase %q timed=%v stale=%v with no attempt reads %q", phase, timed, stale, why)
+					}
+				}
+				// Evidence built by hand, not through EvidenceFor, is held to the same rule.
+				e := PunchEvidence{Found: true, Phase: phase, Candidates: 1, Timed: timed}
+				if why := ReasonFor(Observation{Punch: e}); strings.Contains(why, "punch failed") {
+					t.Fatalf("hand-built evidence in phase %q with no attempt reads %q", phase, why)
+				}
+			}
+		}
+	}
+
+	// The record a live check read on v0.268.1, after the hold and before the pair's window.
+	old := punchedRecord(string(wgtun.PunchGaveUp), 0, 1, "198.51.100.7:51820", "", false)
+	old.Punch.Timed = true
+	ev := EvidenceFor(old, time.Second, false)
+	if ev.Phase != string(wgtun.PunchTrying) || !ev.InFlight() {
+		t.Fatalf("an older tunnel's gave-up with no attempt reads phase %q (in flight %v), want punching", ev.Phase, ev.InFlight())
+	}
+	why := ReasonFor(Observation{Punch: ev})
+	for _, want := range []string{"being opened", "the first attempt waits for the next punch window this node attends", "1 endpoint",
+		"Traffic is unaffected"} {
+		if !strings.Contains(why, want) {
+			t.Fatalf("ReasonFor = %q, missing %q", why, want)
+		}
+	}
+	if strings.Contains(why, "0 attempts") {
+		t.Fatalf("ReasonFor = %q counts attempts that a waiting row has not made", why)
+	}
+
+	// With an attempt behind it, gave-up is still the finding it always was.
+	failed := punchedRecord(string(wgtun.PunchGaveUp), 1, 1, "198.51.100.7:51820", "", false)
+	failed.Punch.Timed = true
+	if why := ReasonFor(ObservationFor(failed, time.Second, false)); !strings.Contains(why, "punch failed: 1 attempt across 1 endpoint") {
+		t.Fatalf("a window that produced no handshake reads %q, want the failure with its attempt", why)
+	}
+}
+
 func TestReasonFor_AnInFlightTraversalSaysTrafficIsUnaffected(t *testing.T) {
 	obs := ObservationFor(punchedRecord(string(wgtun.PunchTrying), 3, 2, "203.0.113.7:41234", "", false), time.Second, false)
 	why := ReasonFor(obs)

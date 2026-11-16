@@ -74,6 +74,18 @@ type Containment struct {
 	route     HostRoute
 	statePath string
 	notes     []string // what detach could not undo
+	// releasedFrom is who was in the containment when it was released, for Finish.
+	releasedFrom []int
+	// prev is the record of a killed containment of this agent that this one is taking over, and how
+	// many sockets it had touched: a takeover that fails puts it back.
+	prev        *containRecord
+	prevTouched int
+	// moved is every process this containment wrote into its cgroup, with its start time (so a pid
+	// used again is not taken for it): a takeover that fails moves out exactly these.
+	moved map[int]string
+	// clearing is every mark release takes off (this containment's, and that of each killed one it
+	// took over), kept for Finish.
+	clearing map[uint32]bool
 }
 
 // touchedSock is a socket the containment marked (and pinned, when Bound says so) and left
@@ -169,7 +181,30 @@ func Preflight(pid int) error {
 				"see none of the process's sockets; it was not contained", c)
 		}
 	}
-	return nil
+	// What is mounted cannot show a controller used and unmounted earlier in the boot, so the mechanism
+	// itself is tested too.
+	root, _ := cgroup2Mount(string(mi))
+	return attributionProbe(root)
+}
+
+// v1SocketClassifier names a cgroup v1 controller that, on a kernel before 5.15, turns off the
+// cgroup v2 attribution of sockets the containment's programs rely on, for every socket on the host,
+// once anything uses it (Mullvad's split tunnelling does, and so does a container runtime that joins
+// every mounted v1 controller). Mounted, it can be used at any moment, after a containment began as
+// well, so it is refused. It returns "" when there is none, or when the kernel keeps both (5.15+).
+func v1SocketClassifier(release, cgroups string) string {
+	var major, minor int
+	if _, err := fmt.Sscanf(release, "%d.%d", &major, &minor); err != nil || major > 5 || (major == 5 && minor >= 15) {
+		return ""
+	}
+	for _, line := range strings.Split(cgroups, "\n") {
+		f := strings.Fields(line)
+		// subsys_name hierarchy num_cgroups enabled: a hierarchy other than 0 is a mounted v1 one.
+		if len(f) >= 4 && (f[0] == "net_cls" || f[0] == "net_prio") && f[1] != "0" && f[3] == "1" {
+			return f[0]
+		}
+	}
+	return ""
 }
 
 // The initial pid and cgroup namespaces' inodes are fixed by the kernel (PROC_PID_INIT_INO and
@@ -210,25 +245,6 @@ func leaderExited(pid int) bool {
 		return false
 	}
 	return len(threadsOf(pid)) > 1
-}
-
-// v1SocketClassifier names a cgroup v1 controller that, on a kernel before 5.15, turns off the
-// cgroup v2 attribution of sockets the containment's programs rely on, for every socket on the host,
-// once anything uses it (Mullvad's split tunnelling does). It returns "" when there is none, or when
-// the kernel keeps both (5.15+).
-func v1SocketClassifier(release, cgroups string) string {
-	var major, minor int
-	if _, err := fmt.Sscanf(release, "%d.%d", &major, &minor); err != nil || major > 5 || (major == 5 && minor >= 15) {
-		return ""
-	}
-	for _, line := range strings.Split(cgroups, "\n") {
-		f := strings.Fields(line)
-		// subsys_name hierarchy num_cgroups enabled: a hierarchy other than 0 is a mounted v1 one.
-		if len(f) >= 4 && (f[0] == "net_cls" || f[0] == "net_prio") && f[1] != "0" && f[3] == "1" {
-			return f[0]
-		}
-	}
-	return ""
 }
 
 // sameNamespace reports whether two tasks (pids, or "thread-self") are in the same namespace of kind.
@@ -313,9 +329,16 @@ func Contain(pid int, self netip.Addr, route HostRoute, logf func(string, ...any
 	}
 	ok := false
 	defer func() {
-		if !ok {
-			c.undo()
+		if ok {
+			return
 		}
+		// A takeover that fails leaves the killed containment's members held, as they were: releasing
+		// them would let a process that was cut off out onto the host's network.
+		if c.prev != nil {
+			c.undoTakeover()
+			return
+		}
+		c.undo(true)
 	}()
 	// The record goes down before anything is attached, so a killed command never leaves a program
 	// that `whisper contain --release` cannot find again.
@@ -342,8 +365,40 @@ func Contain(pid int, self netip.Addr, route HostRoute, logf func(string, ...any
 	if err := c.writeRecord(); err != nil { // the origins, before anything of theirs is touched
 		return nil, err
 	}
-	if err := c.sockets(); err != nil {
-		return nil, err
+	for attempt := 0; ; attempt++ {
+		err := c.sockets()
+		if err == nil {
+			break
+		}
+		// Descriptors in flight on a unix socket are often a passing moment in a busy program: it is let
+		// run until they have been received, frozen again, and swept again from the start.
+		// Not in a takeover: letting the tree run would run the killed containment's members under this
+		// attempt's programs, and a child they fork then is one more to tell apart on a failure.
+		var fl *inFlightError
+		if !errors.As(err, &fl) || attempt >= inFlightRetries || c.prev != nil {
+			return nil, err
+		}
+		logf("whisper: pid %d has descriptors in flight on a unix socket; letting it run until they are received, "+
+			"then sweeping again", c.Pid)
+		if err := c.waitInFlight(fl.socks); err != nil {
+			return nil, err
+		}
+		// As the first pass: move, wait for frozen, and once more while frozen proves the tree complete.
+		if err := c.moveTree(); err != nil {
+			return nil, err
+		}
+		if err := c.waitFrozen(); err != nil {
+			return nil, err
+		}
+		if err := c.moveTree(); err != nil {
+			return nil, err
+		}
+		if err := c.checkMembers(); err != nil {
+			return nil, err
+		}
+		if err := c.writeRecord(); err != nil {
+			return nil, err
+		}
 	}
 	if err := c.writeRecord(); err != nil {
 		return nil, err
@@ -359,12 +414,8 @@ func Contain(pid int, self netip.Addr, route HostRoute, logf func(string, ...any
 }
 
 func (c *Containment) makeCgroup() error {
-	parent := filepath.Dir(c.dir)
-	if err := os.Mkdir(parent, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-		return containErr("could not create the cgroup %s: %v", parent, err)
-	}
-	if err := os.Mkdir(c.dir, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
-		return containErr("could not create the cgroup %s: %v", c.dir, err)
+	if err := mkdirUnder(c.dir); err != nil {
+		return err
 	}
 	if _, err := os.Stat(filepath.Join(c.dir, "cgroup.freeze")); err != nil {
 		return containErr("this kernel's cgroup v2 has no freezer (cgroup.freeze, Linux 5.2+), which containment " +
@@ -377,6 +428,14 @@ func (c *Containment) makeCgroup() error {
 	rec, err := readRecord(c.statePath)
 	switch {
 	case err == nil:
+		prev := rec
+		prev.Origin = make(map[int]string, len(rec.Origin))
+		for p, o := range rec.Origin {
+			prev.Origin[p] = o
+		}
+		prev.Pinned = append([]touchedSock(nil), rec.Pinned...)
+		prev.Adopt = append([]uint32(nil), rec.Adopt...)
+		c.prev, c.prevTouched = &prev, len(rec.Pinned)
 		for p, o := range rec.Origin {
 			c.origin[p] = o
 		}
@@ -396,6 +455,24 @@ func (c *Containment) makeCgroup() error {
 		return containErr("could not freeze the containment's cgroup: %v", err)
 	}
 	return nil
+}
+
+// mkdirUnder makes dir and its parent cgroup (ContainParent). Another containment's release removes
+// that parent when it leaves it empty, which can land between the two: then both are made again.
+func mkdirUnder(dir string) error {
+	parent := filepath.Dir(dir)
+	for try := 0; ; try++ {
+		if err := os.Mkdir(parent, 0o755); err != nil && !errors.Is(err, os.ErrExist) {
+			return containErr("could not create the cgroup %s: %v", parent, err)
+		}
+		err := os.Mkdir(dir, 0o755)
+		if err == nil || errors.Is(err, os.ErrExist) {
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) || try >= 8 {
+			return containErr("could not create the cgroup %s: %v", dir, err)
+		}
+	}
 }
 
 // attach loads and attaches the cgroup's programs, and names the cgroup to the tunnel's gate on
@@ -512,6 +589,10 @@ func (c *Containment) moveTree() error {
 			if c.inside(p) || exited(p) {
 				continue
 			}
+			if other := c.heldElsewhere(p); other != "" {
+				return containErr("pid %d, in pid %d's tree, is held by another agent's containment (%s): moving it here "+
+					"would make it speak as this agent; nothing was changed", p, c.Pid, other)
+			}
 			if _, seen := c.origin[p]; !seen {
 				if b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(p), "cgroup")); err == nil {
 					if cg, ok := cgroupPath(string(b)); ok {
@@ -519,6 +600,7 @@ func (c *Containment) moveTree() error {
 					}
 				}
 			}
+			started := startTime(p)
 			if err := writeFile(procs, strconv.Itoa(p)); err != nil {
 				if errors.Is(err, syscall.ESRCH) {
 					if p == c.Pid {
@@ -529,6 +611,10 @@ func (c *Containment) moveTree() error {
 				}
 				return containErr("could not move pid %d into the containment's cgroup: %v", p, err)
 			}
+			if c.moved == nil {
+				c.moved = map[int]string{}
+			}
+			c.moved[p] = started
 			moved++
 		}
 		if moved == 0 {
@@ -536,6 +622,23 @@ func (c *Containment) moveTree() error {
 		}
 	}
 	return containErr("pid %d's tree kept changing while it was moved (%d rounds), so it was not contained", c.Pid, settleRounds)
+}
+
+// heldElsewhere names the cgroup of another containment p is in, or "".
+func (c *Containment) heldElsewhere(p int) string {
+	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(p), "cgroup"))
+	if err != nil {
+		return ""
+	}
+	cg, ok := cgroupPath(string(b))
+	if !ok {
+		return ""
+	}
+	if rest, under := strings.CutPrefix(cg, "/"+ContainParent+"/"); under && filepath.Join(c.root, cg) != c.dir &&
+		!strings.HasPrefix(rest, "probe-") {
+		return cg
+	}
+	return ""
 }
 
 // inside reports whether p is in the containment's cgroup now.
@@ -893,6 +996,7 @@ func (c *Containment) sockets() error {
 		}
 	}
 	var refuse []string
+	var inFlight []sockRef // the unix sockets refused for descriptors in flight, and only for that
 	if _, _, e := unix.Syscall6(unix.SYS_KCMP, uintptr(c.Pid), uintptr(c.Pid), kcmpFiles, 0, 0, 0); e != 0 {
 		return containErr("kcmp is not available here (%v: CONFIG_KCMP off, or a security module denies it), so whether a "+
 			"process outside pid %d's tree shares its descriptor table cannot be checked; it was not contained", e, c.Pid)
@@ -994,13 +1098,18 @@ func (c *Containment) sockets() error {
 			case n > 0:
 				refuse = append(refuse, fmt.Sprintf("pid %d fd %d: %d descriptor%s in flight on a unix socket, sent and not "+
 					"yet received, which nothing can reach until they are (often a passing moment: try again)", w.pid, w.fd, n, plural(n)))
+				inFlight = append(inFlight, w)
 			}
 		}
 		plan = append(plan, decided{w, dup, ip, listening == 1, a})
 	}
 	if len(refuse) > 0 {
-		return containErr("pid %d holds socket%s a containment cannot reach or close off (%s); nothing was changed. "+
+		err := containErr("pid %d holds socket%s a containment cannot reach or close off (%s); nothing was changed. "+
 			"`sudo whisper run --enforce` is the form that covers every socket", c.Pid, plural(len(refuse)), strings.Join(refuse, "; "))
+		if len(inFlight) == len(refuse) {
+			return &inFlightError{error: err, socks: inFlight}
+		}
+		return err
 	}
 	// Decided for all before acting on any, so a refusal above changed nothing. What it is about to
 	// change is in the record first, so a command killed halfway leaves a record that gives back all
@@ -1103,6 +1212,153 @@ func (c *Containment) drainAcceptQueue(listener int) int {
 		n++
 	}
 	return n
+}
+
+// inFlightError is a sweep refused only because unix sockets had descriptors in flight.
+type inFlightError struct {
+	error
+	socks []sockRef
+}
+
+func (e *inFlightError) Unwrap() error { return e.error }
+
+// inFlightRetries and inFlightWait bound how often, and for how long each time, a containment lets the
+// process run so that descriptors in flight are received.
+var (
+	inFlightRetries = 2
+	inFlightWait    = 100 * time.Millisecond
+)
+
+// waitInFlight thaws the tree until every one of socks shows no descriptor in flight, or inFlightWait
+// has passed, and freezes it again. While it runs, the target's sockets from before are as they were
+// before the containment began: none has been touched yet (the sweep decides for all before acting
+// on any), and Contain has not returned. A takeover's earlier members stay under their root gates.
+func (c *Containment) waitInFlight(socks []sockRef) error {
+	freeze := filepath.Join(c.dir, "cgroup.freeze")
+	if err := writeFile(freeze, "0"); err != nil {
+		return containErr("could not let pid %d run for its descriptors in flight: %v; it was not contained", c.Pid, err)
+	}
+	deadline := time.Now().Add(inFlightWait)
+	for time.Now().Before(deadline) {
+		clear := true
+		for _, r := range socks {
+			if info, err := fdinfo(r); err == nil {
+				if n, ok := scmInFlight(info); ok && n > 0 {
+					clear = false
+					break
+				}
+			}
+		}
+		if clear {
+			break
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if err := writeFile(freeze, "1"); err != nil {
+		return containErr("could not freeze pid %d again: %v; it was not contained", c.Pid, err)
+	}
+	return c.waitFrozen()
+}
+
+// undoTakeover is what a failed takeover of a killed containment runs instead of undo: only what this
+// attempt changed is undone, and the killed containment is left holding its members as it did. The
+// processes this attempt moved in go back; the sockets it touched get back exactly what they had (a
+// mark a killed containment gave them included); the killed containment's own programs go back on the
+// cgroup (its gate, which lets out only through its device, gone with its command, and loopback, and
+// its mark); its record is written back as it was read. Its gates on the root cgroup were never
+// touched. A socket this attempt shut down stays shut down: that cannot be undone.
+func (c *Containment) undoTakeover() []string {
+	var notes []string
+	freeze := filepath.Join(c.dir, "cgroup.freeze")
+	_ = writeFile(freeze, "1")
+	_ = c.waitFrozen()
+	for i := len(c.touched) - 1; i >= c.prevTouched; i-- {
+		if err := restoreSockExact(c.touched[i], c.route.gate); err != nil {
+			notes = append(notes, err.Error())
+		}
+	}
+	fallback := c.origin[c.Pid]
+	for _, p := range c.takenOverIn() {
+		o, ok := c.origin[p]
+		if !ok {
+			o = fallback
+		}
+		if err := c.moveOut(p, o); err != nil {
+			notes = append(notes, err.Error())
+		}
+	}
+	reattached := true
+	if err := c.reattachPrev(); err != nil {
+		// What stays attached is this attempt's, whose gate lets out through this attempt's device while
+		// it lives. So the process stays frozen, which holds it whatever is attached, until a release.
+		reattached = false
+		notes = append(notes, err.Error()+fmt.Sprintf("; pid %d stays frozen in the containment until "+
+			"`sudo whisper contain --release %d`", c.prev.Pid, c.prev.Pid))
+	}
+	if err := writeRecordValue(c.statePath, *c.prev); err != nil {
+		notes = append(notes, "the killed containment's record could not be written back: "+err.Error())
+	}
+	if reattached {
+		_ = writeFile(freeze, "0")
+	}
+	if c.gate != nil {
+		c.gate.Close()
+	}
+	if c.mark != nil {
+		c.mark.Close()
+	}
+	return notes
+}
+
+// takenOverIn names the members a failed takeover gives back: exactly the processes it moved in
+// itself, each still the same process (its start time). Nothing is given back by ancestry: a process
+// the killed containment held may have a parent this attempt moved in, and a child can be given any
+// parent (CLONE_PARENT, a subreaper). A takeover never lets the tree run, and a process written into
+// the frozen cgroup freezes on entry, so nothing it moved in has forked since; anything else in the
+// cgroup stays held, as it was.
+func (c *Containment) takenOverIn() []int {
+	var give []int
+	for _, p := range c.members() {
+		if started, ours := c.moved[p]; ours && started != "" && startTime(p) == started {
+			give = append(give, p)
+		}
+	}
+	return give
+}
+
+// reattachPrev puts the killed containment's own programs back on the cgroup in place of this
+// attempt's: its gate, for its device's index (a record from before indexes has none, which matches
+// no device), and its mark program (a record from before generations used the slot's mark).
+func (c *Containment) reattachPrev() error {
+	prev := c.prev
+	mark := prev.Mark
+	if mark == 0 {
+		mark = legacyMarkBase | uint32(prev.Slot)
+	}
+	gate, err := ebpf.NewProgram(gateSpec(prev.Index, loIndex()))
+	if err != nil {
+		return fmt.Errorf("the killed containment's gate could not be loaded again: %v", err)
+	}
+	defer gate.Close()
+	markp, err := ebpf.NewProgram(markSpec(mark))
+	if err != nil {
+		return fmt.Errorf("the killed containment's mark program could not be loaded again: %v", err)
+	}
+	defer markp.Close()
+	fd, err := unix.Open(c.dir, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("the killed containment's cgroup could not be opened: %v", err)
+	}
+	defer unix.Close(fd)
+	for _, a := range []struct {
+		p  *ebpf.Program
+		at ebpf.AttachType
+	}{{gate, ebpf.AttachCGroupInetEgress}, {markp, ebpf.AttachCGroupInetSockCreate}} {
+		if err := link.RawAttachProgram(link.RawAttachProgramOptions{Target: fd, Program: a.p, Attach: a.at}); err != nil {
+			return fmt.Errorf("the killed containment's programs could not be put back: %v", err)
+		}
+	}
+	return nil
 }
 
 // socketNetns returns the inode of the network namespace a socket was made in. known is false on a
@@ -1212,16 +1468,36 @@ func (c *Containment) Populated() bool {
 // moved back to the cgroup it came from (or the hierarchy's root, when that one is gone), the
 // programs are detached and the cgroup removed. The tunnel itself is the caller's to stop.
 func (c *Containment) Release() []string {
-	return c.undo()
+	return c.undo(false)
 }
 
-// undo is Release, and also what a failed Contain runs. It returns a note per thing it could
-// not put back.
-func (c *Containment) undo() []string {
+// Finish runs once the tunnel has stopped, after Release. It takes the containment's mark off the
+// sockets the release ended, which kept it so that nothing of their goodbye ever took the host's own
+// routes. They keep their pin to the device that is gone, so they reach nothing; what is taken off is
+// only a mark nothing routes any more.
+func (c *Containment) Finish() {
+	if c == nil {
+		return
+	}
+	c.clearMarks(c.releasedFrom, nil, c.clearing)
+}
+
+// undo is Release, and also what a failed Contain and `whisper contain --release` run. tunnelGone
+// says the tunnel is gone already, or is about to go without the caller calling Finish, so the
+// sockets it ends lose the mark at once. It returns a note per thing it could not put back.
+func (c *Containment) undo(tunnelGone bool) []string {
 	var notes []string
 	_ = writeFile(filepath.Join(c.dir, "cgroup.freeze"), "1") // nobody forks while they are moved back
 	_ = c.waitFrozen()                                        // best effort: what follows reads their tables
+	c.releasedFrom = c.members()
+	c.clearing = c.ourMarks() // before the adopted generations are let go below
 	cut := c.cutAgentSockets()
+	// From here only this command's own dials enter the tunnel: unnaming the cgroup voids every tag the
+	// sweep gave as well (rootGateSpec). A socket that the release below cannot reach (in flight on a
+	// unix socket, passed out of the tree, waiting in an adopted listener's queue) still carries the
+	// mark, and without this it would go on leaving as the agent until the tunnel stops; so would a
+	// socket just ended, which TCP lets connect again.
+	_ = c.route.gate.setCgroup(0)
 	// The gates a takeover adopted come off first: they would hold every socket they tagged, given
 	// back below, to the tunnel that is gone.
 	var left []uint32 // still named by the record if it is kept, so nothing is left unnamed
@@ -1260,6 +1536,14 @@ func (c *Containment) undo() []string {
 		}
 	}
 	c.touched = owed
+	// What the members made inside carries the containment's mark from its first moment, and kept it
+	// for good. It is taken off now, while they are frozen, so a released process speaks as itself from
+	// the moment it is let go. The sockets just ended keep it, and their pin, until the tunnel has stopped
+	// (Finish): what is left of their goodbye then leaves through the tunnel or nowhere.
+	if tunnelGone {
+		cut = nil
+	}
+	c.clearMarks(c.releasedFrom, cut, c.clearing)
 	fallback := c.origin[c.Pid]
 	for round := 0; round < settleRounds; round++ {
 		ms := c.members()
@@ -1383,11 +1667,38 @@ func restoreSock(s touchedSock, gate *rootGate) error {
 	return nil
 }
 
+// restoreSockExact gives a socket back exactly the mark and binding it had before this containment
+// touched it, a killed containment's mark included: what a failed takeover gives back.
+func restoreSockExact(s touchedSock, gate *rootGate) error {
+	dup, err := getfdAt(s.Pid, s.Tid, s.Fd)
+	if err != nil {
+		return nil
+	}
+	defer unix.Close(dup)
+	var st unix.Stat_t
+	if unix.Fstat(dup, &st) != nil || st.Ino != s.Ino {
+		return nil
+	}
+	gate.forget(dup)
+	if s.Bound {
+		if err := unix.SetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_BINDTOIFINDEX, s.WasIndex); err != nil {
+			return fmt.Errorf("pid %d's socket (fd %d) could not be given its binding back: %v", s.Pid, s.Fd, err)
+		}
+	}
+	if s.Marked {
+		if err := unix.SetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_MARK, int(s.WasMark)); err != nil {
+			return fmt.Errorf("pid %d's socket (fd %d) could not be given its mark back: %v", s.Pid, s.Fd, err)
+		}
+	}
+	return nil
+}
+
 // cutAgentSockets ends the members' sockets whose local address is the agent's (the /128, or
 // 192.0.0.2 for a translated one). They were made inside the containment and leave from an
 // address this host holds only while the tunnel does: once it is gone their next packet would take
 // the host's own uplink with the agent's address as source. Each is pinned to the tunnel by index,
-// so it never leaves another way, and shut down while the tunnel still carries the goodbye.
+// so it never leaves another way, and shut down while the tunnel still carries the goodbye; a
+// retransmission of that goodbye after the release is refused like anything else of the cgroup's.
 func (c *Containment) cutAgentSockets() map[uint64]bool {
 	cut := map[uint64]bool{}
 	if !c.self.IsValid() {
@@ -1406,13 +1717,57 @@ func (c *Containment) cutAgentSockets() map[uint64]bool {
 				if c.route.Index > 0 {
 					_ = bindToDevice(dup, c.route.Index, c.route.Name)
 				}
+				// The goodbye leaves inside shutdown, while the gate still lets the cgroup's sockets in.
+				// Then the socket stops being the containment's: TCP lets it connect again, and the gate
+				// must not take that into the tunnel.
 				_ = unix.Shutdown(dup, unix.SHUT_RDWR)
+				c.route.gate.forget(dup)
 				cut[r.ino] = true
 			}
 		}
 		unix.Close(dup)
 	}
 	return cut
+}
+
+// ourMarks is this containment's mark and that of every killed containment of the agent it took over.
+func (c *Containment) ourMarks() map[uint32]bool {
+	ours := map[uint32]bool{}
+	if c.route.Mark != 0 {
+		ours[c.route.Mark] = true
+	}
+	for _, g := range c.adopted {
+		ours[markFor(g)] = true
+	}
+	return ours
+}
+
+// clearMarks takes the marks in ours (compared under their mask) off every IP socket in pids'
+// descriptor tables, except the ones in skip. Release gave back every socket it touched already, so
+// what still carries the mark is what the members made inside it, or a socket it ended. A socket
+// passed out of the tree keeps it: nothing routes it once the tunnel is gone.
+func (c *Containment) clearMarks(pids []int, skip map[uint64]bool, ours map[uint32]bool) {
+	if len(ours) == 0 || len(pids) == 0 {
+		return
+	}
+	socks, _, _ := tableSockets(pids)
+	for _, r := range socks {
+		if skip[r.ino] {
+			continue
+		}
+		dup, err := getfdAt(r.pid, r.tid, r.fd)
+		if err != nil {
+			continue
+		}
+		var st unix.Stat_t
+		fam, _ := unix.GetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_DOMAIN)
+		if unix.Fstat(dup, &st) == nil && st.Ino == r.ino && (fam == unix.AF_INET || fam == unix.AF_INET6) {
+			if m, err := unix.GetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_MARK); err == nil && ours[uint32(m)&hostMarkMask] {
+				_ = unix.SetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_MARK, 0)
+			}
+		}
+		unix.Close(dup)
+	}
 }
 
 // addrOfCgroupName reads the agent's /128 back from a containment's cgroup name (containCgroupName).
@@ -1437,6 +1792,15 @@ func addrOfCgroupName(name string) netip.Addr {
 func (c *Containment) writeRecord() error {
 	rec := containRecord{Pid: c.Pid, Slot: c.route.Slot, Gen: c.route.Gen, Mark: c.route.Mark, Index: c.route.Index,
 		Adopt: c.adopted, Origin: c.origin, Pinned: c.touched}
+	if err := writeRecordValue(c.statePath, rec); err != nil {
+		return containErr("could not write the containment's record under %s (%v), without which a killed command "+
+			"would leave what nobody can undo; it was not contained", containState, err)
+	}
+	return nil
+}
+
+// writeRecordValue replaces the record at path whole, by rename.
+func writeRecordValue(path string, rec containRecord) error {
 	b, err := json.Marshal(rec)
 	if err == nil {
 		err = secureDir(containState)
@@ -1451,17 +1815,13 @@ func (c *Containment) writeRecord() error {
 			err = cerr
 		}
 		if err == nil {
-			err = os.Rename(f.Name(), c.statePath)
+			err = os.Rename(f.Name(), path)
 		}
 		if err != nil {
 			_ = os.Remove(f.Name())
 		}
 	}
-	if err != nil {
-		return containErr("could not write the containment's record under %s (%v), without which a killed command "+
-			"would leave what nobody can undo; it was not contained", containState, err)
-	}
-	return nil
+	return err
 }
 
 func readRecord(path string) (containRecord, error) {
@@ -1522,6 +1882,13 @@ func ReleaseStale(pid int, self netip.Addr) ([]int, []string, error) {
 		if filepath.Clean(dir) != "/"+ContainParent || leaf == "" {
 			return nil, nil, containErr("pid %d is not contained (its cgroup is %s)", pid, cg)
 		}
+		// Its rules and its sockets are the host namespace's, where the process is: a release run from
+		// another one would read and tidy that one instead.
+		if !sameNamespace(strconv.Itoa(pid), "thread-self", "net") {
+			return nil, nil, containErr("this command runs in another network namespace than pid %d, whose containment's "+
+				"rules and sockets it could not reach; nothing was changed. Run `sudo whisper contain --release %d` from "+
+				"the host", pid, pid)
+		}
 		name = leaf
 	} else {
 		name = containCgroupName(self)
@@ -1551,6 +1918,17 @@ func ReleaseStale(pid int, self netip.Addr) ([]int, []string, error) {
 		defer l.Release()
 	}
 	rec, rerr := readRecord(c.statePath)
+	if rerr == nil || errors.Is(rerr, os.ErrNotExist) {
+		// Last, still under the agent's lock: the TCP sockets that could still send from the /128 are
+		// ended, and its refusal goes once nothing needs it (refusals_linux.go). Not on a refusal: then
+		// nothing is changed.
+		defer func() {
+			if !containedAgents()[c.self] { // a record kept for what could not be given back holds them still
+				endAgentSockets(c.self)
+			}
+			pruneAgentRefusals(c.self, 0)
+		}()
+	}
 	switch {
 	case rerr == nil:
 		c.origin, c.touched = rec.Origin, rec.Pinned
@@ -1569,7 +1947,7 @@ func ReleaseStale(pid int, self netip.Addr) ([]int, []string, error) {
 			"back; nothing was changed", c.statePath, rerr)
 	}
 	moved := c.members()
-	notes := c.undo()
+	notes := c.undo(true) // the killed command's tunnel is gone
 	return moved, notes, nil
 }
 

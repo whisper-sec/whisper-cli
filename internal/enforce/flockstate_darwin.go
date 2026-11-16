@@ -7,3 +7,6 @@ package enforce
 
 // exclusiveFlockHeld has no kernel lock table to read here; the holder file's pid decides.
 func exclusiveFlockHeld(int, string) (held, known bool) { return false, false }
+
+// sharedFlockHolders has no kernel lock table to read here.
+func sharedFlockHolders(int, string) []int { return nil }

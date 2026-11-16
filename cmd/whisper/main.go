@@ -23,5 +23,10 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == enforce.InitArg {
 		enforce.RunInit()
 	}
+	// `whisper contain` re-executes it once, as a probe of whether the kernel tells a cgroup's
+	// programs about the sockets made in it.
+	if len(os.Args) > 1 && os.Args[1] == enforce.ProbeArg {
+		enforce.RunProbe()
+	}
 	os.Exit(cli.Execute())
 }

@@ -1293,6 +1293,11 @@ func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, 
 				if d.routed {
 					unrouted = true
 				}
+				if d.promoted && d.punch != nil {
+					// The device lost the peer, not the path. A window the train joined before the promotion is
+					// over: left open it would end as a miss, read gave-up and back the pair off after a success.
+					d.punch.closeWindow()
+				}
 				d.promoted, d.routed, d.epoch = false, false, 0
 				// A peer written back fresh has no session and counters from zero: only its own first
 				// handshake may promote it, and its bytes count from nothing.
@@ -1409,7 +1414,7 @@ func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, 
 			t.note("whisper: %s is now a direct path (%s via %s); the relay is the fallback",
 				peerLabel(a.p), orText(a.p.Path, "direct"), orText(won.Endpoint, a.p.Endpoint))
 		case a.demote:
-			t.quietDirectPeer(a.p, true)
+			t.quietDirectPeer(a.p, a.d, true)
 			if a.unproven {
 				t.note("whisper: the direct path to %s has completed no handshake in %s although packets still "+
 					"arrive from it, so it is not answering both ways - falling back to the relay",
@@ -1419,7 +1424,7 @@ func (t *Tunnel) reconcileDirectPeers(now time.Time, seen map[string]time.Time, 
 					peerLabel(a.p))
 			}
 		case a.quiet:
-			t.quietDirectPeer(a.p, false)
+			t.quietDirectPeer(a.p, a.d, false)
 		case a.punch && a.once:
 			t.punchAtInstant(a.p, a.cand, a.at, a.slot)
 		case a.punch:
@@ -1612,7 +1617,12 @@ func (t *Tunnel) publishBeforeUnroute() {
 // counters start again from zero for a peer written back fresh, so the tracked rx is reset with it;
 // left as it was, a session that came up later would have to out-count the old one before its
 // keepalives proved anything.
-func (t *Tunnel) quietDirectPeer(p Peer, demoting bool) {
+//
+// Only for the entry the decision was made for. A refresh that re-armed the key in between has written
+// the new entry's own state (silent for a timed row or one inside the key's quiet hold, which the demotion
+// recorded before this write), so a stale quiet would only wipe a session the new entry may have just
+// answered, or silence the keepalive its arm set.
+func (t *Tunnel) quietDirectPeer(p Peer, decided *directPeer, demoting bool) {
 	t.peerWrite.Lock()
 	defer t.peerWrite.Unlock()
 	// One fresh read of what the device has received from this peer, the last moment before the
@@ -1632,7 +1642,7 @@ func (t *Tunnel) quietDirectPeer(p Peer, demoting bool) {
 	}
 	t.mu.Lock()
 	d := t.direct[p.PublicKeyHex]
-	if d == nil || d.promoted {
+	if d == nil || d != decided || d.promoted {
 		t.mu.Unlock()
 		return
 	}

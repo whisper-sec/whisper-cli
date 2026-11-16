@@ -202,6 +202,7 @@ type peerNS struct {
 	ns        string // the namespace's name under /run/netns
 	addr      string
 	hostIf    string
+	peerIf    string // the veth end inside the namespace
 	accepted  atomic.Int32
 	bytes     atomic.Int32
 	datagrams atomic.Int32 // what reached the UDP socket on the same address and port
@@ -213,8 +214,8 @@ func startPeer(t *testing.T) *peerNS {
 		t.Skip("needs iproute2 (ip) to build the peer namespace")
 	}
 	name := fmt.Sprintf("wct%d", os.Getpid())
-	p := &peerNS{ns: name, hostIf: "wctA" + fmt.Sprint(os.Getpid()%1000)}
-	peerIf := "wctB" + fmt.Sprint(os.Getpid()%1000)
+	p := &peerNS{ns: name, hostIf: "wctA" + fmt.Sprint(os.Getpid()%1000), peerIf: "wctB" + fmt.Sprint(os.Getpid()%1000)}
+	peerIf := p.peerIf
 	run := func(args ...string) {
 		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
 			t.Fatalf("ip %v: %v %s", args, err, out)

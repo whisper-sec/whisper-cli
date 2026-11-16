@@ -236,6 +236,9 @@ type enforcedUp struct {
 	logf   func(string, ...any)
 	label  string
 	v4note string
+	// afterStop runs once the tunnel has stopped and before the agent's lock is let go: a containment
+	// takes its mark off the sockets its release ended (Containment.Finish), still under the lock.
+	afterStop func()
 	// resolvers are the in-tunnel resolvers the box named, the only DNS destinations.
 	resolvers []netip.Addr
 }
@@ -258,6 +261,10 @@ func (u *enforcedUp) close() {
 	}
 	if u.early != nil {
 		u.early.stop()
+	}
+	if u.afterStop != nil {
+		u.afterStop()
+		u.afterStop = nil
 	}
 	u.lock.Release()
 }
@@ -396,6 +403,18 @@ func bringUpEnforced(o enforcedBringUp) (_ *enforcedUp, err error) {
 	cfg, err := wireGuardConfig(ce, wgKey)
 	if err != nil {
 		return nil, err
+	}
+	// The device about to be made is the agent's at cfg.Address, and it is made under that agent's
+	// exclusive lock, always: a containment's tunnel device in the host namespace is made only so, and
+	// the pruning of other agents' leftover rules rests on it.
+	if u.lock == nil {
+		if u.lock, err = enforce.LockExclusive(cfg.Address); err != nil {
+			return nil, usageErr("%s", err.Error())
+		}
+	}
+	if !u.lock.HoldsExclusive(cfg.Address) {
+		return nil, &client.ProblemError{Status: 502, Detail: "the control plane answered for " + cfg.Address.String() +
+			", not the agent this command holds, so " + o.notDone}
 	}
 	resolvers := wgtun.DNSServers(ce.wgDNS, ce.wgQuick)
 	if len(resolvers) == 0 {

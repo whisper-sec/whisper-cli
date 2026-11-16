@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -51,7 +52,13 @@ var isPrivileged = func() bool { return os.Geteuid() == lockOwner }
 // AgentLock is a held lock; Release it when the command stops serving the agent.
 type AgentLock struct {
 	f      *os.File
-	holder string // the name of the holder file an exclusive lock published in LockDir, removed on Release
+	holder string     // the name of the holder file an exclusive lock published in LockDir, removed on Release
+	addr   netip.Addr // the agent an exclusive lock was taken for
+}
+
+// HoldsExclusive reports whether l is an exclusive lock on agent a that is still held.
+func (l *AgentLock) HoldsExclusive(a netip.Addr) bool {
+	return l != nil && l.f != nil && l.holder != "" && l.addr == a.Unmap()
 }
 
 // Release drops the lock. Safe on a nil lock and safe to call twice.
@@ -159,13 +166,22 @@ func LockExclusive(a netip.Addr) (*AgentLock, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB); err != nil {
+	err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	// A lock held shared by no enforced run may be a prune of the agent's leftover rules, which holds
+	// it for a few milliseconds (refusals_linux.go): wait that out rather than refuse. A connect that
+	// holds it is still refused, only half a second later.
+	for deadline := time.Now().Add(sharedHoldWait); errors.Is(err, unix.EWOULDBLOCK) && liveHolder(a) == 0 &&
+		time.Now().Before(deadline); {
+		time.Sleep(10 * time.Millisecond)
+		err = unix.Flock(int(f.Fd()), unix.LOCK_EX|unix.LOCK_NB)
+	}
+	if err != nil {
 		f.Close()
 		if errors.Is(err, unix.EWOULDBLOCK) {
 			if pid := liveHolder(a); pid > 0 {
 				return nil, &HeldError{Addr: a, PID: pid, Exclusive: true}
 			}
-			return nil, &HeldError{Addr: a} // shared holders: one or more root connects
+			return nil, &HeldError{Addr: a, Shared: sharedFlockHolders(dfd, lockName(a))} // shared holders: root connects
 		}
 		return nil, fmt.Errorf("cannot lock the agent %s: %w", a, err)
 	}
@@ -175,7 +191,34 @@ func LockExclusive(a netip.Addr) (*AgentLock, error) {
 		f.Close()
 		return nil, err
 	}
-	return &AgentLock{f: f, holder: holderName(a)}, nil
+	return &AgentLock{f: f, holder: holderName(a), addr: a.Unmap()}, nil
+}
+
+// sharedHoldWait bounds how long LockExclusive waits out a shared hold that no enforced run published.
+var sharedHoldWait = 500 * time.Millisecond
+
+// lockSharedQuiet takes the agent's lock shared, without waiting and without publishing a holder:
+// the hold of a prune of the agent's leftover rules, which only keeps the agent's next containment
+// from starting while they are deleted. It returns nil when the lock is held exclusively or cannot be
+// taken at all (not root, an untrusted lock directory), and the agent is then left alone.
+func lockSharedQuiet(a netip.Addr) *AgentLock {
+	if !isPrivileged() {
+		return nil
+	}
+	dfd, err := openLockDir(true)
+	if err != nil {
+		return nil
+	}
+	defer unix.Close(dfd)
+	f, err := openLock(dfd, a, unix.O_RDONLY)
+	if err != nil {
+		return nil
+	}
+	if unix.Flock(int(f.Fd()), unix.LOCK_SH|unix.LOCK_NB) != nil {
+		f.Close()
+		return nil
+	}
+	return &AgentLock{f: f}
 }
 
 // LockShared is what a `whisper connect` takes while it serves an agent. As root it holds a shared lock,

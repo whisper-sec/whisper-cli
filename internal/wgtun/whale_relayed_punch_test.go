@@ -48,6 +48,13 @@ type natBind struct {
 	// kinds is every send per destination with its WireGuard message type (1 initiation, 2 response,
 	// 3 cookie, 4 transport), so a test can say not only when this node sent but what.
 	kinds map[string][]sentKind
+	// recvd is every packet this NAT let through to the device, per source, with its type and when the
+	// device took it off the socket: what a node was handed, as against what it then counted.
+	recvd map[string][]sentKind
+	// mangle is the sources whose packets this NAT lets through damaged (the last byte of the
+	// authentication tag flipped): handed to the device, which cannot count them. A blackhole, for the
+	// control that a test can tell one from silence.
+	mangle map[string]bool
 }
 
 // sentKind is one send: when, and the WireGuard message type in its first byte.
@@ -60,7 +67,8 @@ func newNatBind(life time.Duration) *natBind {
 	return &natBind{
 		Bind: conn.NewDefaultBind(), life: life,
 		sentTo: map[string]time.Time{}, sends: map[string][]time.Time{}, dropped: map[string]int{},
-		cut: map[string]bool{}, kinds: map[string][]sentKind{},
+		cut: map[string]bool{}, kinds: map[string][]sentKind{}, recvd: map[string][]sentKind{},
+		mangle: map[string]bool{},
 	}
 }
 
@@ -103,6 +111,11 @@ func (n *natBind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 				if last, ok := n.sentTo[src]; !ok || now.Sub(last) > n.life || n.cut[src] {
 					sizes[j] = 0
 					n.dropped[src]++
+				} else if sizes[j] > 0 {
+					n.recvd[src] = append(n.recvd[src], sentKind{at: now, typ: packets[j][0]})
+					if n.mangle[src] {
+						packets[j][sizes[j]-1] ^= 0xff
+					}
 				}
 			}
 			n.mu.Unlock()
