@@ -21,14 +21,19 @@ import (
 
 // netns_linux.go builds the agent's network namespace and runs code inside it.
 //
-// A Linux namespace belongs to a THREAD, not a process. Every function here that touches
-// the agent's namespace does so on a goroutine that locks its OS thread, enters the
-// namespace, does its work and returns WITHOUT unlocking. The Go runtime then destroys that
-// thread instead of returning it to the pool, so no other goroutine can ever be scheduled on
-// a thread inside the agent's namespace. That matters in the other direction too: the
-// WireGuard socket, every control-plane request and every name lookup run on ordinary
-// threads, which never left the host's namespace, so the tunnel's own underlay can never be
-// routed into the tunnel.
+// A Linux namespace belongs to a THREAD, not a process. Every function here that touches the
+// agent's namespace does so through awayAndBack: on a goroutine that locks its OS thread, enters
+// the namespace, does its work, then moves the thread back to the namespace it came from and hands
+// it to the runtime only once it is seen to be there. A thread that cannot be seen back stays
+// locked and ends with its goroutine, so no other goroutine is ever scheduled on a thread inside
+// the agent's namespace. That matters in the other direction too: the WireGuard socket, every
+// control-plane request and every name lookup run on ordinary threads, all in the host's namespace,
+// so the tunnel's own underlay can never be routed into the tunnel.
+//
+// Going home, rather than letting the thread end, matters twice. An ended thread fires the
+// parent-death signal of every child it started, whatever goroutine started it. And Go never ends
+// the main thread: it parks it, inside whatever namespace it was in, where /proc/self/net then
+// shows that namespace to the whole process.
 
 // IfName is the name of the namespace's one non-loopback interface.
 const IfName = "wsp0"
@@ -83,35 +88,47 @@ func nsInode() (uint64, error) {
 // CreateNamespace makes a new network namespace holding loopback and a TUN device that
 // carries self (the /128) and 192.0.0.2, with a default route of each family through it.
 // On any error everything it made is gone again.
-func CreateNamespace(self netip.Addr) (*Namespace, error) {
+func CreateNamespace(self netip.Addr) (*Namespace, error) { return createNamespace(self, nil) }
+
+// createNamespace is CreateNamespace. onThread, when set, runs first on the thread that will build the
+// namespace, before it leaves home, so a test can follow that very thread home, a refused build's too.
+func createNamespace(self netip.Addr, onThread func()) (*Namespace, error) {
 	if !self.Is6() || self.Is4In6() {
 		return nil, errors.New("enforce: the agent address must be an IPv6 /128")
 	}
-	type result struct {
-		ns  *Namespace
-		err error
+	var host uint64
+	var ns *Namespace
+	err := awayAndBack(func() error {
+		if onThread != nil {
+			onThread()
+		}
+		var err error
+		if host, err = nsInode(); err != nil {
+			return fmt.Errorf("enforce: cannot read this host's network namespace: %w", err)
+		}
+		if err := unix.Unshare(unix.CLONE_NEWNET); err != nil {
+			if errors.Is(err, unix.EPERM) {
+				return errors.New("enforce: creating a network namespace needs root (run it with sudo)")
+			}
+			return fmt.Errorf("enforce: cannot create a network namespace: %w", err)
+		}
+		return nil
+	}, func() error {
+		var err error
+		ns, err = buildNamespace(self, host)
+		return err
+	})
+	if err != nil {
+		return nil, err
 	}
-	ch := make(chan result, 1)
-	go func() {
-		runtime.LockOSThread() // never unlocked: this thread ends with this goroutine
-		ns, err := buildNamespace(self)
-		ch <- result{ns, err}
-	}()
-	r := <-ch
-	return r.ns, r.err
+	return ns, nil
 }
 
-func buildNamespace(self netip.Addr) (*Namespace, error) {
-	host, err := nsInode()
-	if err != nil {
-		return nil, fmt.Errorf("enforce: cannot read this host's network namespace: %w", err)
-	}
-	if err := unix.Unshare(unix.CLONE_NEWNET); err != nil {
-		if errors.Is(err, unix.EPERM) {
-			return nil, errors.New("enforce: creating a network namespace needs root (run it with sudo)")
-		}
-		return nil, fmt.Errorf("enforce: cannot create a network namespace: %w", err)
-	}
+// buildNamespace fills the namespace the calling thread has just unshared into (host is the inode of
+// the one it came from): it holds the new one by a descriptor, makes the TUN and configures both.
+// It runs only after the unshare succeeded (awayAndBack), and checks the namespace is not the host's
+// all the same, so nothing it makes could land there.
+func buildNamespace(self netip.Addr, host uint64) (*Namespace, error) {
 	fd, err := unix.Open("/proc/thread-self/ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("enforce: cannot hold the new namespace: %w", err)
@@ -238,37 +255,25 @@ func (n *Namespace) enterHandle() (int, error) {
 	return fd, err
 }
 
-// run executes fn on a fresh thread inside the namespace. The thread is discarded afterwards.
-// The thread enters through a descriptor of its own (enterHandle) and closes it once it is in;
-// the inode check stays as the last word on where it landed.
+// run executes fn on a thread inside the namespace, which then goes back to the namespace it came
+// from (awayAndBack). The thread enters through a descriptor of its own (enterHandle), which it
+// takes and closes itself, so the descriptor has one owner and no other goroutine ever sees its
+// number; the inode check stays as the last word on where it landed.
 func (n *Namespace) run(fn func() error) error {
-	fd, err := n.enterHandle()
-	if err != nil {
-		return err
-	}
 	hook := n.beforeEnter
-	ch := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread() // never unlocked: this thread ends with this goroutine
-		answered := false
-		answer := func(err error) { answered = true; ch <- err }
-		// A goroutine that ends without answering (runtime.Goexit) must not leave run waiting.
-		defer func() {
-			if !answered {
-				ch <- errors.New("enforce: the thread inside the agent's namespace ended without an answer")
-			}
-		}()
-		if err := enterThrough(fd, hook); err != nil {
-			answer(fmt.Errorf("enforce: cannot enter the agent's namespace: %w", err))
-			return
+	return awayAndBack(func() error {
+		fd, err := n.enterHandle()
+		if err != nil {
+			return err
+		}
+		if err := enterThrough(fd, hook); err != nil { // closes fd, whatever happens on the way
+			return fmt.Errorf("enforce: cannot enter the agent's namespace: %w", err)
 		}
 		if ino, err := nsInode(); err != nil || ino != n.Inode {
-			answer(errors.New("enforce: entered the wrong network namespace"))
-			return
+			return errors.New("enforce: entered the wrong network namespace")
 		}
-		answer(fn())
-	}()
-	return <-ch
+		return nil
+	}, fn)
 }
 
 // enterThrough moves the calling thread into the namespace fd names and closes fd, whatever
@@ -279,6 +284,54 @@ func enterThrough(fd int, hook func()) error {
 		hook()
 	}
 	return unix.Setns(fd, unix.CLONE_NEWNET)
+}
+
+// errNoAnswer is awayAndBack's answer when the work ended its goroutine (runtime.Goexit, which a
+// t.Fatal in a callback is) instead of returning.
+var errNoAnswer = errors.New("enforce: the thread in another network namespace ended without an answer")
+
+// awayAndBack runs enter, and then if enter returns nil runs fn, on one thread locked to them. It
+// then moves that thread back to the network namespace it started in, and hands it to the runtime
+// only once /proc/thread-self/ns/net is seen to be that namespace again; a thread that cannot be
+// seen back stays locked and ends with its goroutine, so nothing else is ever scheduled on a thread
+// left in another namespace. It answers last, so when it returns the thread is home or is ending and
+// will run nothing else. The answer is enter's error, else fn's, or errNoAnswer when either ended
+// its goroutine. enter and fn may move the thread to another network namespace; they must change
+// nothing else about it.
+func awayAndBack(enter, fn func() error) error {
+	ch := make(chan error, 1)
+	go func() {
+		err := errNoAnswer
+		defer func() { ch <- err }() // registered first, so it runs last: after the thread is home or locked to end
+		runtime.LockOSThread()
+		home, herr := unix.Open("/proc/thread-self/ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
+		if herr != nil {
+			runtime.UnlockOSThread() // it never left
+			err = fmt.Errorf("enforce: cannot hold this thread's own namespace: %w", herr)
+			return
+		}
+		var at unix.Stat_t
+		if herr := unix.Fstat(home, &at); herr != nil {
+			unix.Close(home)
+			runtime.UnlockOSThread()
+			err = fmt.Errorf("enforce: cannot hold this thread's own namespace: %w", herr)
+			return
+		}
+		defer func() {
+			_ = unix.Setns(home, unix.CLONE_NEWNET)
+			unix.Close(home)
+			var now unix.Stat_t
+			if unix.Stat("/proc/thread-self/ns/net", &now) == nil && now.Dev == at.Dev && now.Ino == at.Ino {
+				runtime.UnlockOSThread()
+			}
+		}()
+		e := enter()
+		if e == nil {
+			e = fn()
+		}
+		err = e
+	}()
+	return <-ch
 }
 
 // DialContext opens a connection from inside the namespace, so it leaves exactly as the

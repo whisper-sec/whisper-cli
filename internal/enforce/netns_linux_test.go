@@ -12,8 +12,10 @@ import (
 	"io"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -35,8 +37,9 @@ import (
 // TestMain lets the test binary be the agent's init, the way the CLI binary is: Spawn
 // re-executes /proc/self/exe with InitArg.
 func TestMain(m *testing.M) {
-	if len(os.Args) > 1 && os.Args[1] == InitArg {
-		RunInit()
+	// The helpers the CLI's main starts, through the same dispatch it uses, so a helper missing there fails here.
+	if run := ReexecEntry(os.Args); run != nil {
+		run()
 	}
 	if len(os.Args) > 1 && os.Args[1] == containHelperArg {
 		containHelper()
@@ -47,20 +50,37 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 2 && os.Args[1] == deviceHelperArg {
 		deviceHelper()
 	}
-	if len(os.Args) > 1 && os.Args[1] == ProbeArg {
-		RunProbe()
-	}
 	if len(os.Args) > 1 && os.Args[1] == fallbackProbeArg {
 		fallbackProbe()
 	}
 	if len(os.Args) > 1 && os.Args[1] == sandboxHelperArg {
 		sandboxHelper()
 	}
+	if len(os.Args) > 1 && os.Args[1] == otherNSSpawnerArg {
+		otherNSSpawner()
+	}
+	if len(os.Args) > 1 && os.Args[1] == otherNSChildArg {
+		otherNSChild()
+	}
+	if len(os.Args) > 2 && os.Args[1] == otherNSOwnerArg {
+		otherNSOwner()
+	}
+	if len(os.Args) > 1 && os.Args[1] == probeHangArg {
+		probeHang()
+	}
+	if len(os.Args) > 2 && os.Args[1] == fakeNetworkdArg {
+		fakeNetworkd()
+	}
 	// As root, one run of this package at a time on a host: each test may run in a network namespace
 	// of its own, but the cgroup hierarchy, /run/whisper and the agents' locks are the host's, and two
 	// runs containing the same test agents would see each other's containments. Only the run itself
 	// takes the lock: a test that starts this binary again as a helper (-test.run=...Helper) passes it
 	// the environment, and must not wait for the lock its own parent holds.
+	// The root suite contains test processes in namespaces of its own on a host whose own networkd may well take a
+	// placed device (any Ubuntu with systemd-networkd does), so the placed-device check would refuse every one of
+	// them; its own tests (networkd_root_linux_test.go) give it the configuration they mean.
+	placedDeviceCheckAtStart = placedDeviceCheck
+	placedDeviceCheck = func(int, procStatus) error { return nil }
 	if os.Geteuid() == 0 && os.Getenv(testsLockedEnv) == "" {
 		if f, err := os.OpenFile("/run/whisper-enforce-tests.lock", os.O_RDWR|os.O_CREATE|syscall.O_CLOEXEC, 0o600); err == nil {
 			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
@@ -79,6 +99,9 @@ func TestMain(m *testing.M) {
 
 // testsLockedEnv tells a helper this binary starts that the run already holds the host-wide lock.
 const testsLockedEnv = "WHISPER_ENFORCE_TESTS_LOCKED"
+
+// placedDeviceCheckAtStart is what Preflight's placed-device check was before TestMain stubbed it.
+var placedDeviceCheckAtStart func(int, procStatus) error
 
 // testsLock is the host-wide lock's file, kept referenced for the whole run.
 var testsLock *os.File
@@ -647,5 +670,116 @@ func TestAFailedStartSealsTheHandleBeforeTheTUNCloses(t *testing.T) {
 	}
 	if !td.closed() || !td.sealedFirst {
 		t.Fatalf("failed start: the TUN was closed=%v with the handle sealed first=%v; want closed, after the seal", td.closed(), td.sealedFirst)
+	}
+}
+
+// threadNS maps every thread of this process to its network namespace.
+func threadNS(t *testing.T) map[string]unix.Stat_t {
+	t.Helper()
+	out := map[string]unix.Stat_t{}
+	tasks, _ := os.ReadDir("/proc/self/task")
+	for _, task := range tasks {
+		var st unix.Stat_t
+		if unix.Stat(filepath.Join("/proc/self/task", task.Name(), "ns", "net"), &st) == nil {
+			out[task.Name()] = st
+		}
+	}
+	return out
+}
+
+// homeNS is this thread's own network namespace, the host's.
+func homeNS(t *testing.T) unix.Stat_t {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Stat("/proc/thread-self/ns/net", &st); err != nil {
+		t.Fatal(err)
+	}
+	return st
+}
+
+// atHome reports whether the thread tid is alive and in the home namespace, read once, as awayAndBack promises it is
+// when it returns. What that catches is a thread ended inside (gone) or left inside (read there). It does not pin
+// the order of the answer and the way home: the woken caller usually runs only after the thread is back, so a version
+// that answered first would mostly read home as well.
+func atHome(t *testing.T, tid int, home unix.Stat_t) (unix.Stat_t, bool) {
+	t.Helper()
+	var st unix.Stat_t
+	if unix.Stat(filepath.Join("/proc/self/task", strconv.Itoa(tid), "ns", "net"), &st) != nil {
+		return st, false // gone: a version that ended the thread inside
+	}
+	return st, st.Dev == home.Dev && st.Ino == home.Ino
+}
+
+// strayThreads names the threads that are away from home and are new, or were moved there since before: a thread an
+// earlier test left somewhere is not this one's business, and one that came home is no stray.
+func strayThreads(t *testing.T, before map[string]unix.Stat_t, home unix.Stat_t) []string {
+	t.Helper()
+	var out []string
+	for tid, st := range threadNS(t) {
+		if st.Dev == home.Dev && st.Ino == home.Ino {
+			continue
+		}
+		if was, ok := before[tid]; !ok || st.Dev != was.Dev || st.Ino != was.Ino {
+			out = append(out, tid)
+		}
+	}
+	return out
+}
+
+// run hands its thread back even when it cannot enter: a version that never unlocks ends the thread whatever
+// happens (its tid is gone), so this catches it without root. As root run enters this thread's own namespace and
+// runs fn; unprivileged setns refuses before fn, which is also an answer. Either way the thread is home after.
+func TestRunHandsItsThreadBackEvenWhenItCannotEnter(t *testing.T) {
+	n := hereNamespace(t)
+	home := homeNS(t)
+	for i := 0; i < 20; i++ {
+		tid := 0
+		n.beforeEnter = func() { tid = unix.Gettid() }
+		ran := false
+		err := n.run(func() error { ran = true; return nil })
+		enteredOrRefused(t, err, ran)
+		if st, ok := atHome(t, tid, home); !ok {
+			t.Fatalf("run %d: thread %d is not home after run (now %d)", i, tid, st.Ino)
+		}
+	}
+}
+
+// awayAndBack reports work that ends its goroutine (a t.Fatal in a callback) and still hands its thread back home.
+// It needs no root: enter does not move the thread, so fn runs and then calls Goexit.
+func TestAwayAndBackReportsWorkThatEndsItsGoroutine(t *testing.T) {
+	home := homeNS(t)
+	for i := 0; i < 20; i++ {
+		tid := 0
+		err := awayAndBack(func() error { return nil }, func() error {
+			tid = unix.Gettid()
+			runtime.Goexit()
+			return nil
+		})
+		if !errors.Is(err, errNoAnswer) {
+			t.Fatalf("round %d: awayAndBack must report the goroutine that ended: got %v", i, err)
+		}
+		if st, ok := atHome(t, tid, home); !ok {
+			t.Fatalf("round %d: thread %d is not home after the work ended its goroutine (now %d)", i, tid, st.Ino)
+		}
+	}
+}
+
+// CreateNamespace refused for want of root gives back the thread it took, every time: a version that never unlocks
+// ends it, and its tid is gone. Unprivileged, the build after a failed unshare never runs, and the refusal says root
+// is needed. The root suite builds instead (TestTheThreadThatBuiltTheNamespaceComesBack).
+func TestCreateNamespaceRefusedGivesItsThreadBack(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("this pins the refusal path; the root suite builds a namespace instead")
+	}
+	home := homeNS(t)
+	for i := 0; i < 20; i++ {
+		tid := 0
+		ns, err := createNamespace(tSelf, func() { tid = unix.Gettid() })
+		if err == nil || !strings.Contains(err.Error(), "needs root") || ns != nil {
+			t.Fatalf("round %d: unprivileged createNamespace must refuse with the needs-root message, got %v", i, err)
+		}
+		if st, ok := atHome(t, tid, home); !ok {
+			t.Fatalf("round %d: thread %d is not home after a refused build (now %d)", i, tid, st.Ino)
+		}
 	}
 }

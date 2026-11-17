@@ -984,6 +984,11 @@ func gateSourceCheck(self netip.Addr, tunIdx, loIdx int) asm.Instructions {
 // cfg names; anywhere else never. Being adopted is checked whatever the mark: a connection a pinned
 // listener completes after the sweep takes its binding and mark from the request, made before the
 // pin, so it carries neither, but the kernel copies the listener's tag to it. Every other packet passes; keeping the agent's address in is sourceGateSpec's.
+// tunIdx and loIdx are the host namespace's, and the gate on the root cgroup sees every namespace's
+// packets. A packet from another namespace that carries the mark reaches the "ours" check only from
+// the containment's cgroup (no socket of another namespace is adopted), where it is admitted only
+// when its device is the tunnel's number or loopback's; in that namespace the tunnel's number names
+// whatever device holds it there, if any. That comparison is not what keeps such a member contained.
 func rootGateSpec(mark uint32, tunIdx, loIdx int, gen uint32, tags, cfg *ebpf.Map) *ebpf.ProgramSpec {
 	insns := asm.Instructions{
 		asm.Mov.Reg(asm.R6, asm.R1),

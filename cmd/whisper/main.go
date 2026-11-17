@@ -18,15 +18,12 @@ import (
 )
 
 func main() {
-	// `whisper run --enforce` re-executes this binary as the agent's init, inside the agent's
-	// namespaces. It is not a command anyone types, so it is dispatched before the command tree.
-	if len(os.Args) > 1 && os.Args[1] == enforce.InitArg {
-		enforce.RunInit()
-	}
-	// `whisper contain` re-executes it once, as a probe of whether the kernel tells a cgroup's
-	// programs about the sockets made in it.
-	if len(os.Args) > 1 && os.Args[1] == enforce.ProbeArg {
-		enforce.RunProbe()
+	// `whisper run --enforce` re-executes this binary as the agent's init, inside the agent's namespaces, and
+	// `whisper contain` as its probes (whether the kernel tells a cgroup's programs about its sockets, and whether it
+	// lets a process place a device in a namespace it holds no capability over). None is a command anyone types, so
+	// each is dispatched before the command tree.
+	if run := enforce.ReexecEntry(os.Args); run != nil {
+		run()
 	}
 	os.Exit(cli.Execute())
 }

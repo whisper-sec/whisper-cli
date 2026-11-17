@@ -34,8 +34,12 @@ import (
 // and clone3 -> ENOSYS (its flags live behind a pointer BPF cannot read; glibc and Go then fall back to
 // clone, whose flags it can). A nested user namespace is not a way out today: a namespace the agent
 // makes in it holds loopback and, on a host with tunnel modules loaded, their fallback devices,
-// which are tied to that namespace (links_linux.go), so this only narrows the kernel surface the
-// agent can reach.
+// which are tied to that namespace (links_linux.go). A kernel without the peer-namespace check lets
+// it put the far end of a veth or netkit pair in any namespace it can name (networkd.go), but in its
+// own pid namespace and mount namespace that is only its own, one it made, or one whose nsfs file it
+// can open, and the mount points of named ones (/run/netns) are hidden from it; nothing there brings
+// such a device up, and on Linux 6.8 it cannot arrive up by itself. So this only narrows the kernel
+// surface the agent can reach.
 const (
 	SeccompDefault = "default"
 	SeccompStrict  = "strict"

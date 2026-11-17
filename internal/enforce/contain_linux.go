@@ -181,6 +181,11 @@ func Preflight(pid int) error {
 				"see none of the process's sockets; it was not contained", c)
 		}
 	}
+	// A device the process could place itself and some systemd-networkd would bring up and let out passes no
+	// program of the containment (networkd.go).
+	if err := placedDeviceCheck(pid, st); err != nil {
+		return err
+	}
 	// What is mounted cannot show a controller used and unmounted earlier in the boot, so the mechanism
 	// itself is tested too.
 	root, _ := cgroup2Mount(string(mi))
@@ -544,7 +549,16 @@ func cgroupID(dir string) (uint64, error) {
 	return binary.NativeEndian.Uint64(b), nil
 }
 
-// gateSpec passes a packet only when it leaves through the tunnel device or loopback.
+// gateSpec passes a packet only when the device it leaves by has the tunnel's index or loopback's.
+// Both numbers are the host's namespace's (loopback is 1 in every namespace). The gate runs on the
+// cgroup, so it sees the packets of every member, a sandboxed child in a namespace of its own
+// included; there the tunnel's number names whatever device holds it, if any, and the gate would pass
+// a packet leaving by it. Comparing a number across namespaces is not what keeps such a member in:
+// what keeps it in is that its namespace has no device that routes off the host, which the number
+// collision does not conjure. checkMembers refuses any member that holds a capability, and an
+// accepted member's namespace was found holding only loopback and the idle fallbacks. Whatever could
+// give that namespace a way out holds CAP_NET_RAW over it too, and a packet socket there meets no
+// cgroup program at all, so a gate bound to the namespace would not close it either.
 func gateSpec(tunIdx, loIdx int) *ebpf.ProgramSpec {
 	return &ebpf.ProgramSpec{
 		Name: "whisper_gate",
@@ -1751,6 +1765,23 @@ func (c *Containment) cutAgentSockets() map[uint64]bool {
 	if !c.self.IsValid() {
 		return cut
 	}
+	// The tunnel's index is a number of the host's namespace, the one the tunnel is in. A socket made
+	// in a member's own namespace (a sandbox's, which the sweep kept because it reaches nothing past
+	// loopback) never had the host's uplink to take, and the tunnel's number there names another
+	// device, or none: binding it to that number and shutting it down would hit an unrelated socket.
+	// Such a socket is left exactly as the sweep left it. The reference is the set of namespaces the
+	// sweep judged isolated (c.isolated), by their inode, not a fresh read of this thread's namespace:
+	// a release that runs on a thread of another namespace must still cut every socket of the host's,
+	// and keying on the running thread's namespace would instead skip them all. Anything not in that
+	// set, the host's included, is cut. A killed command's release (ReleaseStale) carries no such record
+	// and cuts every address-bearing socket, which is the fail-closed side: it may over-touch a
+	// sandbox's socket, never leave a host one leaking.
+	// An inode a dead isolated namespace freed may name a newer namespace by the time of the release, but
+	// never the host's, which lives as long as the host: a host socket is always cut.
+	sealed := map[uint64]bool{}
+	for _, ino := range c.isolated {
+		sealed[ino] = true
+	}
 	socks, _, _ := tableSockets(c.members())
 	for _, r := range socks {
 		dup, err := getfdAt(r.pid, r.tid, r.fd)
@@ -1759,6 +1790,10 @@ func (c *Containment) cutAgentSockets() map[uint64]bool {
 		}
 		var st unix.Stat_t
 		fam, _ := unix.GetsockoptInt(dup, unix.SOL_SOCKET, unix.SO_DOMAIN)
+		if netns, known := socketNetns(dup); keptAtRelease(netns, known, sealed) {
+			unix.Close(dup)
+			continue
+		}
 		if unix.Fstat(dup, &st) == nil && st.Ino == r.ino && (fam == unix.AF_INET || fam == unix.AF_INET6) {
 			if local, _, _ := sockAddrs(dup); local == c.self || local == CLATv4 {
 				if c.route.Index > 0 {
@@ -1775,6 +1810,13 @@ func (c *Containment) cutAgentSockets() map[uint64]bool {
 		unix.Close(dup)
 	}
 	return cut
+}
+
+// keptAtRelease reports whether the release leaves a socket of namespace netns alone: only when its
+// namespace could be read (known) and is one the sweep found isolated (sealed). Anything else, an
+// unreadable namespace, the host's, or any when there is no record of the isolated ones, is cut.
+func keptAtRelease(netns uint64, known bool, sealed map[uint64]bool) bool {
+	return known && sealed[netns]
 }
 
 // ourMarks is this containment's mark and that of every killed containment of the agent it took over.

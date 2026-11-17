@@ -24,6 +24,12 @@ type filteredTUN struct {
 // FilterTUN wraps dev so every packet crosses f.
 func FilterTUN(dev tun.Device, f *Filter) tun.Device { return &filteredTUN{Device: dev, f: f} }
 
+// MTU is the MTU the TUN under the filter is made with (openTUN), which nothing changes. The device's
+// own answer would look its name up in the calling thread's namespace, and WireGuard reads it from an
+// ordinary host thread, where an agent namespace's device is not; the number, not the name, is what
+// means the same in every namespace.
+func (t *filteredTUN) MTU() (int, error) { return minMTU, nil }
+
 func (t *filteredTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 	n, err := t.Device.Read(bufs, sizes, offset)
 	for i := 0; i < n; i++ {

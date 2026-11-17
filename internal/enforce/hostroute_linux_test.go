@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -82,11 +83,15 @@ func withFakeHost(t *testing.T, euid int, mountinfo string) string {
 	if err := os.Mkdir(proc, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	oldProc, oldMI, oldEuid, oldProbe := procRoot, mountinfoPath, geteuid, attributionProbe
+	oldProc, oldMI, oldEuid, oldProbe, oldPlaced := procRoot, mountinfoPath, geteuid, attributionProbe, placedDeviceCheck
 	procRoot, mountinfoPath, geteuid = proc, mi, func() int { return euid }
-	// The attribution probe makes a real cgroup; contain_residue_root_linux_test.go runs it for real.
+	// The attribution probe makes a real cgroup; contain_residue_root_linux_test.go runs it for real. The placed-device
+	// check reads this host's networkd and asks its kernel; networkd_root_linux_test.go runs it for real.
 	attributionProbe = func(string) error { return nil }
-	t.Cleanup(func() { procRoot, mountinfoPath, geteuid, attributionProbe = oldProc, oldMI, oldEuid, oldProbe })
+	placedDeviceCheck = func(int, procStatus) error { return nil }
+	t.Cleanup(func() {
+		procRoot, mountinfoPath, geteuid, attributionProbe, placedDeviceCheck = oldProc, oldMI, oldEuid, oldProbe, oldPlaced
+	})
 	// This process, and init, in this process's own namespaces, which stand in for the host's.
 	fakeNamespaces(t, proc, "thread-self")
 	fakeNamespaces(t, proc, "1")
@@ -274,6 +279,27 @@ func TestPreflightRefusesWhatTheAttributionProbeRefuses(t *testing.T) {
 	refusal(t, Preflight(4242), "does not tell a cgroup's programs")
 	if asked != "/sys/fs/cgroup" {
 		t.Fatalf("the probe was run on %q, not the v2 hierarchy", asked)
+	}
+}
+
+// The placed-device check comes after every refusal about the process itself and before the attribution probe, so a
+// refusal from it touches nothing, and it is asked about the process Preflight read.
+func TestPreflightRefusesWhatThePlacedDeviceCheckRefuses(t *testing.T) {
+	proc := withFakeHost(t, 0, v2mount)
+	fakeProc(t, proc, 4242, 1, plain, 0)
+	asked, probed := "", false
+	placedDeviceCheck = func(pid int, st procStatus) error {
+		asked = fmt.Sprintf("%d %s %v", pid, st.Name, st.Uids)
+		return containErr("pid %d was not contained: it could reach the network past the containment", pid)
+	}
+	attributionProbe = func(string) error { probed = true; return nil }
+	refusal(t, Preflight(4242), "could reach the network past the containment")
+	if !strings.HasPrefix(asked, "4242 ") || probed {
+		t.Fatalf("the check was asked %q, and the attribution probe ran after its refusal: %v", asked, probed)
+	}
+	placedDeviceCheck = func(int, procStatus) error { return nil }
+	if err := Preflight(4242); err != nil || !probed {
+		t.Fatalf("with the check passing, Preflight answered %v and the attribution probe ran: %v", err, probed)
 	}
 }
 

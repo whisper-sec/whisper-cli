@@ -71,9 +71,9 @@ type Spec struct {
 	Seccomp   string // SeccompDefault (also ""), SeccompStrict or SeccompOff
 }
 
-// hiddenDirs are covered by an empty tmpfs inside the agent's mount namespace. Each holds a
-// socket that a library or a command line tool uses to have a host daemon resolve a name or
-// start a process for it, and that daemon lives on the host's network.
+// hiddenDirs are covered by an empty tmpfs inside the agent's mount namespace. Each but the last
+// two holds a socket that a library or a command line tool uses to have a host daemon resolve a
+// name or start a process for it, and that daemon lives on the host's network.
 var hiddenDirs = []string{
 	"/run/systemd/resolve",
 	"/run/nscd",
@@ -87,6 +87,11 @@ var hiddenDirs = []string{
 	"/run/docker",
 	"/run/lxd",
 	"/var/snap/lxd/common/lxd",
+	// Not sockets: where `ip netns` and CNI mount the network namespaces they name. A descriptor of one is a namespace
+	// the agent could put the far end of a veth or netkit pair in, on a kernel without the peer-namespace check
+	// (networkd.go), and it has no use for any of them.
+	"/run/netns",
+	"/var/run/netns",
 }
 
 // hiddenFiles are sockets mounted over with /dev/null.
@@ -449,9 +454,12 @@ func supervise(s Spec) (int, error) {
 }
 
 // Spawn starts init for spec inside the namespace and waits for it, returning the agent's
-// exit status. It runs on a thread inside the namespace for the whole of the agent's life,
-// because the kernel ties PR_SET_PDEATHSIG to the thread that forked: init is killed the
-// moment the CLI is, and with it every process in the agent's PID namespace.
+// exit status. Its body blocks in cmd.Wait for the whole of the agent's life, so the thread run
+// holds it on stays inside the namespace and locked until the agent exits: the kernel ties
+// PR_SET_PDEATHSIG to the thread that forked, and if the CLI process dies that thread dies with it,
+// killing init and every process in the agent's PID namespace. The thread goes home only once the
+// agent has exited (awayAndBack), so its end no longer kills init: any way out of the body before
+// Wait has reported init's end (a Wait error, a callback that ends its goroutine) kills init itself.
 func (n *Namespace) Spawn(spec Spec, started func(pid int)) (int, error) {
 	spec.NetInode = n.Inode
 	spec.HostInode = n.HostInode
@@ -483,12 +491,21 @@ func (n *Namespace) Spawn(spec Spec, started func(pid int)) (int, error) {
 			w.Close()
 			return fmt.Errorf("enforce: cannot start the agent's init: %w", serr)
 		}
+		// Until Wait has reported init's end, leaving the body kills it: the thread no longer ends
+		// here and fires init's parent-death signal, it goes home.
+		ended := false
+		defer func() {
+			if !ended {
+				_ = cmd.Process.Kill()
+			}
+		}()
 		r.Close()
 		_, werr := w.Write(body)
 		w.Close()
 		if werr != nil {
 			_ = cmd.Process.Kill()
 			_ = cmd.Wait()
+			ended = true
 			return errors.New("enforce: cannot hand the agent's init its specification")
 		}
 		if started != nil {
@@ -498,14 +515,17 @@ func (n *Namespace) Spawn(spec Spec, started func(pid int)) (int, error) {
 		var ee *exec.ExitError
 		switch {
 		case werr == nil:
+			ended = true
 			code = 0
 		case errors.As(werr, &ee):
+			ended = true
 			if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 				code = 128 + int(ws.Signal())
 			} else {
 				code = ee.ExitCode()
 			}
 		default:
+			// Not init's exit status, so whether init still runs is unknown: the deferred kill ends it.
 			return werr
 		}
 		return nil

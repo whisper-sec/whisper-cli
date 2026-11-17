@@ -9,7 +9,6 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
-	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -578,38 +577,9 @@ func readLinkViewIn(nsPath string, want unix.Stat_t) (linkView, error) {
 	return v, err
 }
 
-// onThreadIn runs fn on a thread moved into the network namespace netns names (and into nothing else), then moves
-// the thread back to the namespace it came from, and hands it back to the runtime only once it is seen to be there.
-// A thread that cannot be seen to be back stays locked and ends with its goroutine, so nothing else ever runs on a
-// thread inside another namespace. Ending it is not the way every time: an ended thread fires the parent-death
-// signal of any child it started, and the main thread is never ended but parked, inside whatever namespace it was
-// in, where /proc/self/net then shows that namespace.
+// onThreadIn runs fn on a thread moved into the network namespace netns names (and into nothing else), then back to
+// the namespace it came from (awayAndBack, netns_linux.go), which hands the thread to the runtime only once it is
+// seen to be home and otherwise leaves it locked to end with its goroutine.
 func onThreadIn(netns int, fn func() error) error {
-	ch := make(chan error, 1)
-	go func() {
-		runtime.LockOSThread()
-		home, err := unix.Open("/proc/thread-self/ns/net", unix.O_RDONLY|unix.O_CLOEXEC, 0)
-		if err != nil {
-			runtime.UnlockOSThread() // it never left
-			ch <- fmt.Errorf("cannot hold this thread's own namespace: %w", err)
-			return
-		}
-		defer unix.Close(home)
-		var at unix.Stat_t
-		if err := unix.Fstat(home, &at); err != nil {
-			runtime.UnlockOSThread()
-			ch <- fmt.Errorf("cannot hold this thread's own namespace: %w", err)
-			return
-		}
-		if err = unix.Setns(netns, unix.CLONE_NEWNET); err == nil {
-			err = fn()
-		}
-		_ = unix.Setns(home, unix.CLONE_NEWNET)
-		var now unix.Stat_t
-		if unix.Stat("/proc/thread-self/ns/net", &now) == nil && now.Dev == at.Dev && now.Ino == at.Ino {
-			runtime.UnlockOSThread()
-		}
-		ch <- err
-	}()
-	return <-ch
+	return awayAndBack(func() error { return unix.Setns(netns, unix.CLONE_NEWNET) }, fn)
 }

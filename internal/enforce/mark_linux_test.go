@@ -296,3 +296,28 @@ func TestACgroupNameGivesTheAgentBack(t *testing.T) {
 		t.Fatalf("a BPF program name has at most 15 characters, %q has %d", n, len(n))
 	}
 }
+
+// The release leaves a socket alone only when its namespace could be read and is one the sweep found isolated.
+// Every other case is cut, which is the fail-closed side: a namespace that could not be read, the host's, and any
+// namespace at all when the release has no record of the isolated ones (a killed command's).
+func TestTheReleaseKeepsOnlySocketsOfNamespacesTheSweepFoundIsolated(t *testing.T) {
+	sealed := map[uint64]bool{4026532607: true}
+	for _, c := range []struct {
+		name   string
+		netns  uint64
+		known  bool
+		sealed map[uint64]bool
+		kept   bool
+	}{
+		{"isolated", 4026532607, true, sealed, true},
+		{"the host's", 4026531840, true, sealed, false},
+		{"another, not isolated", 4026532999, true, sealed, false},
+		{"unreadable", 4026532607, false, sealed, false},
+		{"no record of the isolated", 4026532607, true, nil, false},
+		{"no record, unreadable", 0, false, nil, false},
+	} {
+		if got := keptAtRelease(c.netns, c.known, c.sealed); got != c.kept {
+			t.Errorf("%s: kept %v, want %v", c.name, got, c.kept)
+		}
+	}
+}

@@ -1,0 +1,11 @@
+[Match]
+PermanentMACAddress=52:54:00:12:34:56
+Name=enp1s0
+
+[Network]
+DHCP=yes
+LinkLocalAddressing=ipv6
+
+[DHCP]
+RouteMetric=100
+UseMTU=true
