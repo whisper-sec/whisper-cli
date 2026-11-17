@@ -19,7 +19,7 @@ import (
 //
 // The panel already had a door: the app takes `--open` and shows itself instead of
 // waiting to be clicked, which is how the installer makes the first thing a person
-// sees be the product working. A comment in the app's main.swift said
+// sees be the product working. A comment in the app's own source said
 // `whisper panel show` came through that same door. It did not, and the comment was
 // corrected rather than left describing a command nobody had written. This is
 // the command.
@@ -54,7 +54,7 @@ import (
 const panelBundleName = "Whisper Panel.app"
 
 // panelBundleExecutable is the path inside the bundle that makes it a real app rather
-// than a directory with the right name. build-pkg.sh asserts the same file before it
+// than a directory with the right name. The pkg build asserts the same file before it
 // will ship the payload, and this asserts it before claiming the panel is installed.
 const panelBundleExecutable = "Contents/MacOS/WhisperPanel"
 

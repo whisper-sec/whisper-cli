@@ -58,7 +58,7 @@ const maxZoneProbes = 8
 // <agent>.<tenant>.agents.whisper.online and its zone is agents.whisper.online, but a BYOD
 // name is <agent>.<domain>, whose zone is the customer's domain itself, and taking the parent
 // of a "tenant label" there dated the TLD (`app snapshot age` from the registry's
-// nameservers, for a fleet under botboss.app). So each distinct parent of an agent name is
+// nameservers, for a fleet under a .app domain). So each distinct parent of an agent name is
 // asked for its SOA, and the owner of the SOA that comes back is the zone it sits in.
 //
 // Every parent asked must name the same zone, and every parent not asked must sit inside it;

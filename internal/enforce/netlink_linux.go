@@ -176,7 +176,16 @@ func (r *rtnl) noLinkLocal(index int) error {
 
 // addAddr assigns a as a host address (/32 or /128) to the interface. IPv6 skips duplicate
 // address detection: the address is ours by allocation and there is no link to probe.
-func (r *rtnl) addAddr(index int, a netip.Addr) error {
+func (r *rtnl) addAddr(index int, a netip.Addr) error { return r.addAddrLft(index, a, false) }
+
+// addAddrDeprecated adds an IPv6 address with a preferred lifetime of 0 and no end to its validity: it
+// is the host's and answers, and a route naming it as its preferred source still gives it, but source
+// selection (RFC 6724 rule 3) prefers any other address of the host's to it.
+func (r *rtnl) addAddrDeprecated(index int, a netip.Addr) error {
+	return r.addAddrLft(index, a, a.Is6())
+}
+
+func (r *rtnl) addAddrLft(index int, a netip.Addr, deprecated bool) error {
 	var m unix.IfAddrmsg
 	m.Index = uint32(index)
 	m.Scope = unix.RT_SCOPE_UNIVERSE
@@ -194,6 +203,11 @@ func (r *rtnl) addAddr(index int, a netip.Addr) error {
 	body = append(body, nlAttr(unix.IFA_ADDRESS, raw)...)
 	if a.Is6() {
 		body = append(body, nlAttr(unix.IFA_FLAGS, u32(unix.IFA_F_NODAD))...)
+	}
+	if deprecated {
+		ci := make([]byte, unix.SizeofIfaCacheinfo) // ifa_prefered 0, ifa_valid forever
+		binary.NativeEndian.PutUint32(ci[4:8], 0xffffffff)
+		body = append(body, nlAttr(unix.IFA_CACHEINFO, ci)...)
 	}
 	return r.do(unix.RTM_NEWADDR, unix.NLM_F_CREATE|unix.NLM_F_EXCL, body)
 }

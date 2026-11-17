@@ -46,6 +46,9 @@ type Namespace struct {
 	// is no namespace to enter, fd is -1, and a socket reaches the device only by carrying the
 	// route's mark.
 	host *HostRoute
+	// keeper puts a host device's rules back while the handle is open (rulekeep_linux.go); seal stops
+	// it before it removes them.
+	keeper *ruleKeeper
 
 	// mu orders every way in against Close. A thread entering the namespace takes a descriptor of
 	// its own under it, and Close marks the handle closed and releases fd under it, so nothing ever
@@ -334,6 +337,9 @@ func (n *Namespace) sealLocked() {
 		return
 	}
 	n.closed = true
+	if n.keeper != nil {
+		n.keeper.stop() // first: from here nothing puts back what removeRules takes
+	}
 	if n.host != nil {
 		n.host.removeRules()
 	}

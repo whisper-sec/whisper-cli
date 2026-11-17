@@ -648,6 +648,7 @@ func withoutDestroy(t *testing.T) {
 // ended there earlier.
 func plantRefusal(t *testing.T, self netip.Addr, slot uint32) {
 	t.Helper()
+	touchLock(t, self) // a containment of self ran here, so it has its lock file
 	r, err := openRTNL()
 	if err != nil {
 		t.Fatal(err)
@@ -1048,6 +1049,7 @@ func TestAGuardLeftByAKilledCommandIsPruned(t *testing.T) {
 		}
 	}
 	ns.Close()
+	touchLock(t, tSelf4) // the killed command had made it, as every one does before its device
 	addGuard(tSelf4)
 	t.Cleanup(func() { removeGuard(tSelf4) })
 	pruneAgentRefusals(netip.Addr{}, 0)
@@ -1127,12 +1129,16 @@ func TestNewSocketsThroughTheEndNeverSpeakAsTheAgentOutsideTheTunnel(t *testing.
 	}
 }
 
-// killDevice does to a device what a killed command does: the kernel lets its record's lock go and
-// closes its TUN; nothing is detached and no rule is removed.
+// killDevice does to a device what a killed command does: the kernel lets its record's lock go, closes
+// its TUN and the link that holds its address check; nothing else is detached and no rule is removed.
 func killDevice(ns *Namespace) {
 	hr := ns.HostRoute()
 	hr.gate.rec.drop()
 	hr.gate.rec = nil
+	if hr.gate.src != nil {
+		hr.gate.src.Close()
+		hr.gate.src = nil
+	}
 	ns.Dev.Close()
 }
 

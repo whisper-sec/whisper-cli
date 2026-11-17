@@ -60,10 +60,20 @@ const (
 	// hostGuardPrio is the guard's, just above every slot: while a device swaps its agent's rules from an
 	// earlier containment's to its own, "from <the /128> prohibit" there keeps the address refused.
 	hostGuardPrio = hostRulePrio - 1
-	// hostRuleProto is the protocol every rule a containment installs carries (FRA_PROTOCOL, an rtnetlink
-	// route protocol number nothing else registers), so a prune can tell its own rules from a host's: a
-	// rule added without a priority lands at a slot's priority, and in the shape of an address rule.
-	hostRuleProto = 0x57
+	// hostRuleProto is the protocol every rule a containment installs carries (FRA_PROTOCOL): kernel.
+	// systemd-networkd, at its default ManageForeignRoutingPolicyRules=yes, deletes every policy rule it
+	// did not configure except those with protocol kernel, whenever it configures a link it manages (its
+	// start, `networkctl reconfigure`, `netplan apply`, a reload after a .network change). Deleting the
+	// address rules of a live containment lets an unmarked packet from the /128 leave by the host's own
+	// uplink (measured on Ubuntu 24.04), so the rules carry the one protocol networkd leaves alone. The
+	// kernel gives it only to its own default rules, which name no source and sit at 0, 32766 and 32767,
+	// and `ip rule add` writes none (unspec), so a rule in a containment's exact shape, at a slot's or the
+	// guard's priority, carrying it, is a containment's: that is how a prune tells its own rules from a
+	// host's, since a rule added without a priority lands just above the lowest slot's.
+	hostRuleProto = unix.RTPROT_KERNEL
+	// legacyRuleProto is what releases from before tagged their rules with: a refusal or a guard one of
+	// them left is still a containment's, and goes the same way.
+	legacyRuleProto = 0x57
 	// legacyMarkBase | slot is the mark an earlier release gave every containment on a slot. It
 	// is only ever deleted again, for a killed containment whose record predates the counter.
 	legacyMarkBase = 0x77630000
@@ -342,7 +352,7 @@ func CreateHostDevice(self netip.Addr) (*Namespace, error) {
 		dev.Close()
 		return nil, err
 	}
-	if hr.gate, err = attachRootGate(hr.Mark, idx, gen); err != nil {
+	if hr.gate, err = attachRootGate(hr.Mark, idx, gen, self); err != nil {
 		_ = removeGuard(self)
 		dev.Close()
 		releaseDeviceRecord(rec)
@@ -372,9 +382,13 @@ func CreateHostDevice(self netip.Addr) (*Namespace, error) {
 		hr.removeRules()
 		dev.Close()
 		hr.gate.detach()
+		hint := fmt.Sprintf("`ip -6 rule del from %s prohibit pref %d` removes it", self, hostGuardPrio)
+		if errors.Is(err, errGuardShadowed) {
+			hint = fmt.Sprintf("`ip -6 -d rule show pref %d` shows both; the containment's guard is the one that "+
+				"selects on nothing else, and it goes once the other rule is moved or removed", hostGuardPrio)
+		}
 		return nil, fmt.Errorf("enforce: could not take away the guard that kept the agent's address refused while its "+
-			"rules were replaced (%v), and it would refuse the containment's own traffic: `ip -6 rule del from %s prohibit "+
-			"pref %d` removes it", err, self, hostGuardPrio)
+			"rules were replaced (%v), and it would refuse the containment's own traffic: %s", err, hint)
 	}
 	// Other agents' refusals that nothing needs any more go now (refusals_linux.go), so a host that
 	// contains many agents does not gather one per agent per boot. This one's agent is live, and kept.
@@ -388,23 +402,56 @@ func addGuard(self netip.Addr) error {
 	return addRuleBody(tagged(ruleBodyProhibit(unix.AF_INET6, hostGuardPrio, self)))
 }
 
-// removeGuard takes the guard away again, and reports whether one is still there.
+// removeGuard takes the guard away again, and reports whether one is still there. A guard an earlier
+// release left carries that release's protocol, and goes too.
 func removeGuard(self netip.Addr) error {
 	r, err := openRTNL()
 	if err != nil {
 		return err
 	}
 	defer r.close()
-	body := tagged(ruleBodyProhibit(unix.AF_INET6, hostGuardPrio, self))
+	return removeGuardOn(r, self)
+}
+
+// removeGuardOn takes every guard for self away over r, each only when the delete takes that very rule
+// (deletesFirst): a delete names the priority, the action, the address and the protocol, and the kernel
+// would take any rule matching those that selects on more, if it came first.
+func removeGuardOn(r *rtnl, self netip.Addr) error {
 	for i := 0; i < 64; i++ {
-		if err := r.do(unix.RTM_DELRULE, 0, body); err != nil {
-			if errors.Is(err, unix.ENOENT) {
-				return nil
+		list, err := dumpRulesErr(unix.AF_INET6)
+		if err != nil {
+			return err
+		}
+		var g *ruleInfo
+		for j := range list {
+			if isGuard(list[j], self) {
+				g = &list[j]
+				break
 			}
+		}
+		if g == nil {
+			return nil
+		}
+		if !deletesFirst(list, *g) {
+			return fmt.Errorf("%w: another rule at priority %d names %s the same way ahead of it", errGuardShadowed,
+				hostGuardPrio, self)
+		}
+		if err := r.do(unix.RTM_DELRULE, 0, withProto(ruleBodyProhibit(unix.AF_INET6, hostGuardPrio, self), g.proto)); err != nil &&
+			!errors.Is(err, unix.ENOENT) {
 			return err
 		}
 	}
 	return errors.New("the guard would not go")
+}
+
+// errGuardShadowed is a guard no delete can take without taking a host's own rule first.
+var errGuardShadowed = errors.New("the guard cannot be deleted on its own")
+
+// isGuard reports whether a rule is the guard for self: exactly "from self prohibit" at hostGuardPrio,
+// carrying a containment's protocol.
+func isGuard(r ruleInfo, self netip.Addr) bool {
+	return r.fam == unix.AF_INET6 && r.prio == hostGuardPrio && r.action == frActProhibit && r.table == 0 &&
+		r.src == self && r.mark == 0 && r.mask == 0 && !r.extra && (r.proto == hostRuleProto || r.proto == legacyRuleProto)
 }
 
 // addRuleBody adds one rule; an identical rule already there is not an error.
@@ -616,11 +663,15 @@ func cgroupRoot() string {
 // the containment fails closed; `whisper contain --release` finds it by its name.
 type rootGate struct {
 	prog *ebpf.Program
-	tags *ebpf.Map // sockets the containment adopted
-	cfg  *ebpf.Map // [0]: the containment's cgroup id, 0 until Contain sets it
-	root string    // the v2 hierarchy's mount point
-	gen  uint32
-	rec  *heldRecord // the device's record, held for the gate's life
+	// src keeps the agent's address in (sourceGateSpec), attached by a link this command holds: it goes
+	// when the command does, with the device, however the command ends, while the gate itself stays.
+	src     link.Link
+	srcProg *ebpf.Program
+	tags    *ebpf.Map // sockets the containment adopted
+	cfg     *ebpf.Map // [0]: the containment's cgroup id, 0 until Contain sets it
+	root    string    // the v2 hierarchy's mount point
+	gen     uint32
+	rec     *heldRecord // the device's record, held for the gate's life
 }
 
 // bpfFNoPrealloc and bpfFClone are BPF_F_NO_PREALLOC and BPF_F_CLONE from linux/bpf.h: socket storage
@@ -693,7 +744,7 @@ func detachRootGatesOf(root string, gen uint32) bool {
 	return looked && !left
 }
 
-func attachRootGate(mark uint32, tunIdx int, gen uint32) (*rootGate, error) {
+func attachRootGate(mark uint32, tunIdx int, gen uint32, self netip.Addr) (*rootGate, error) {
 	mi, err := os.ReadFile(mountinfoPath)
 	if err != nil {
 		return nil, fmt.Errorf("enforce: cannot read %s: %w", mountinfoPath, err)
@@ -725,13 +776,31 @@ func attachRootGate(mark uint32, tunIdx int, gen uint32) (*rootGate, error) {
 		return nil, fmt.Errorf("enforce: could not open the cgroup hierarchy's root: %w", err)
 	}
 	defer unix.Close(fd)
+	// The address check first: if the gate cannot go on after it, closing its link takes it off again.
+	if self.IsValid() {
+		if g.srcProg, err = ebpf.NewProgram(sourceGateSpec(self, tunIdx, loIndex(), gen)); err != nil {
+			return nil, fmt.Errorf("enforce: this kernel refused the check that keeps the agent's address in (cgroup_skb): %w", err)
+		}
+		l, err := link.AttachRawLink(link.RawLinkOptions{Target: fd, Program: g.srcProg, Attach: ebpf.AttachCGroupInetEgress})
+		if err != nil {
+			switch {
+			case errors.Is(err, unix.E2BIG):
+				return nil, fmt.Errorf("enforce: could not attach the check that keeps the agent's address in to the root "+
+					"cgroup (%v): %s", err, rootFull(root))
+			case errors.Is(err, unix.EPERM), errors.Is(err, unix.EEXIST):
+				return nil, fmt.Errorf("enforce: could not attach the check that keeps the agent's address in to the root "+
+					"cgroup (%v): something else holds that attachment point alone", err)
+			}
+			return nil, fmt.Errorf("enforce: this kernel cannot tie the check that keeps the agent's address in to this "+
+				"command (a cgroup link, Linux 5.7+): %w", err)
+		}
+		g.src = l // only once it is one: a failed attach returns a nil link, which the cleanup must not close
+	}
 	if err := link.RawAttachProgram(link.RawAttachProgramOptions{Target: fd, Program: g.prog,
 		Attach: ebpf.AttachCGroupInetEgress, Flags: unix.BPF_F_ALLOW_MULTI}); err != nil {
 		why := "something else holds that attachment point alone"
 		if errors.Is(err, unix.E2BIG) {
-			why = fmt.Sprintf("it already carries as many egress programs as the kernel allows (64); "+
-				"`bpftool cgroup show %s` lists them, and `sudo whisper contain --release <pid>` removes a killed "+
-				"containment's", root)
+			why = rootFull(root)
 		}
 		return nil, fmt.Errorf("enforce: could not attach the containment's gate to the root cgroup (%v): %s", err, why)
 	}
@@ -802,7 +871,7 @@ func (g *rootGate) detach() {
 }
 
 func (g *rootGate) close() {
-	for _, c := range []interface{ Close() error }{g.prog, g.tags, g.cfg} {
+	for _, c := range []interface{ Close() error }{g.src, g.srcProg, g.prog, g.tags, g.cfg} {
 		if c != nil && !isNilCloser(c) {
 			c.Close()
 		}
@@ -815,87 +884,166 @@ func isNilCloser(c interface{ Close() error }) bool {
 		return v == nil
 	case *ebpf.Map:
 		return v == nil
+	case *link.RawLink:
+		return v == nil
 	}
 	return false
+}
+
+// rootFull says why the root cgroup takes no more egress programs, and what to do about it.
+func rootFull(root string) string {
+	return fmt.Sprintf("it already carries as many egress programs as the kernel allows (64; each containment "+
+		"puts two there); `bpftool cgroup show %s` lists them, and `sudo whisper contain --release <pid>` removes a "+
+		"killed containment's", root)
+}
+
+// sourceGateSpec keeps the agent's address in: an IPv6 packet whose source is self leaves only through the
+// tunnel or loopback, whatever socket sent it. The kernel picks an unbound socket's source after it has
+// routed the packet, so the rule "from <the /128> lookup" never sees it: while the host has no other
+// usable global IPv6 address (systemd-networkd re-adding its SLAAC address, tentative until DAD ends;
+// measured for about 2.4 s), its own sockets take the /128 and would leave by its uplink with it. The
+// rules keep what knows its source before routing (a reply, a bound socket); this keeps what is given
+// one after. It is a program of its own, attached by a link the command holds, because it must end with
+// the device: once the TUN has closed the /128 is no longer the host's to give, and a check left behind
+// with a killed command's gate would refuse the agent's next containment, or its connect.
+func sourceGateSpec(self netip.Addr, tunIdx, loIdx int, gen uint32) *ebpf.ProgramSpec {
+	ipv6 := binary.NativeEndian.Uint16([]byte{0x86, 0xdd}) // __sk_buff.protocol holds ETH_P_IPV6 in network order
+	insns := asm.Instructions{
+		asm.Mov.Reg(asm.R6, asm.R1),
+		asm.LoadMem(asm.R2, asm.R6, skbProtocolOff, asm.Word),
+		asm.JNE.Imm(asm.R2, int32(ipv6), "allow"), // IPv4 never reaches the helper
+	}
+	insns = append(insns, gateSourceCheck(self, tunIdx, loIdx)...)
+	insns = append(insns,
+		asm.Mov.Imm(asm.R0, 0).WithSymbol("drop"),
+		asm.Return(),
+		asm.Mov.Imm(asm.R0, 1).WithSymbol("allow"),
+		asm.Return(),
+	)
+	return &ebpf.ProgramSpec{
+		Name: fmt.Sprintf("wsc_src_%04x", gen),
+		Type: ebpf.CGroupSKB, AttachType: ebpf.AttachCGroupInetEgress, License: "MIT",
+		Instructions: insns,
+	}
+}
+
+// gateSourceCheck is sourceGateSpec's body, the context in R6 (symbol "speaks"): an IPv6 packet from self
+// leaving by neither the tunnel nor loopback is dropped, anything else passes. The tunnel's and
+// loopback's indexes are the host namespace's; a packet of another namespace that leaves by a device of
+// the same number passes, and meets the rules if it is forwarded into the host. The
+// source compares as four words read off the packet in host order, each against the same bytes of self
+// read the same way, with 32-bit jumps (an immediate with its top bit set would otherwise be
+// sign-extended). Without an address to compare there is no check: an unspecified one would refuse
+// every packet sent from ::.
+func gateSourceCheck(self netip.Addr, tunIdx, loIdx int) asm.Instructions {
+	if !self.Is6() || self.Is4In6() || self.IsUnspecified() {
+		return asm.Instructions{asm.Ja.Label("allow").WithSymbol("speaks")}
+	}
+	a := self.As16()
+	out := asm.Instructions{
+		asm.LoadMem(asm.R2, asm.R6, skbIfindexOff, asm.Word).WithSymbol("speaks"),
+		asm.JEq.Imm(asm.R2, int32(loIdx), "allow"),
+		asm.JEq.Imm(asm.R2, int32(tunIdx), "allow"),
+		asm.Mov.Reg(asm.R1, asm.R6),
+		asm.Mov.Imm(asm.R2, 0),
+		asm.Mov.Reg(asm.R3, asm.RFP),
+		asm.Add.Imm(asm.R3, -32),
+		asm.Mov.Imm(asm.R4, 24), // the IPv6 header up to the end of its source
+		asm.FnSkbLoadBytes.Call(),
+		asm.JNE.Imm(asm.R0, 0, "allow"), // shorter than that: not an IPv6 packet with a source
+		asm.LoadMem(asm.R2, asm.RFP, -32, asm.Byte),
+		asm.RSh.Imm(asm.R2, 4),
+		asm.JNE.Imm(asm.R2, 6, "allow"),
+	}
+	for i := 0; i < 4; i++ {
+		out = append(out,
+			asm.LoadMem(asm.R2, asm.RFP, int16(-24+4*i), asm.Word),
+			asm.JNE.Imm32(asm.R2, int32(binary.NativeEndian.Uint32(a[4*i:])), "allow"))
+	}
+	return append(out, asm.Ja.Label("drop"))
 }
 
 // rootGateSpec judges a packet that is the containment's: one that carries mark (under
 // hostMarkMask), or whose socket is adopted (tagged in tags; a request socket by its listener; a tag
 // the sweep gave counts only while cfg names the containment's cgroup, dialTag always). Such a
 // packet passes through loopback; through the tunnel only if it is adopted or comes from the cgroup
-// cfg names; anywhere else never. Every other packet passes. Being adopted is checked whatever the
-// mark: a connection a pinned listener completes after the sweep takes its binding and mark from the
-// request, made before the pin, so it carries neither, but the kernel copies the listener's tag to it.
+// cfg names; anywhere else never. Being adopted is checked whatever the mark: a connection a pinned
+// listener completes after the sweep takes its binding and mark from the request, made before the
+// pin, so it carries neither, but the kernel copies the listener's tag to it. Every other packet passes; keeping the agent's address in is sourceGateSpec's.
 func rootGateSpec(mark uint32, tunIdx, loIdx int, gen uint32, tags, cfg *ebpf.Map) *ebpf.ProgramSpec {
+	insns := asm.Instructions{
+		asm.Mov.Reg(asm.R6, asm.R1),
+		// R7 = 1 when the packet's socket (or a request's listener) is adopted.
+		asm.Mov.Imm(asm.R7, 0),
+		asm.LoadMem(asm.R1, asm.R6, skbSkOff, asm.DWord),
+		asm.JEq.Imm(asm.R1, 0, "checked"),
+		asm.FnSkFullsock.Call(),
+		asm.JNE.Imm(asm.R0, 0, "lookup"),
+		asm.LoadMem(asm.R1, asm.R6, skbSkOff, asm.DWord),
+		asm.JEq.Imm(asm.R1, 0, "checked"),
+		asm.FnGetListenerSock.Call(),
+		asm.JEq.Imm(asm.R0, 0, "checked"),
+		asm.Mov.Reg(asm.R2, asm.R0).WithSymbol("lookup"),
+		asm.LoadMapPtr(asm.R1, tags.FD()),
+		asm.Mov.Imm(asm.R3, 0),
+		asm.Mov.Imm(asm.R4, 0),
+		asm.FnSkStorageGet.Call(),
+		asm.JEq.Imm(asm.R0, 0, "checked"),
+		// The command's own dial is adopted for the device's life; a socket the sweep adopted only
+		// while the containment's cgroup is named to the gate, which the release undoes.
+		asm.LoadMem(asm.R2, asm.R0, 0, asm.Word),
+		asm.JEq.Imm(asm.R2, dialTag, "adopted"),
+		asm.Mov.Imm(asm.R2, 0),
+		asm.StoreMem(asm.RFP, -4, asm.R2, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -4),
+		asm.LoadMapPtr(asm.R1, cfg.FD()),
+		asm.FnMapLookupElem.Call(),
+		asm.JEq.Imm(asm.R0, 0, "checked"),
+		asm.LoadMem(asm.R2, asm.R0, 0, asm.DWord),
+		asm.JEq.Imm(asm.R2, 0, "checked"),
+		asm.Mov.Imm(asm.R7, 1).WithSymbol("adopted"),
+		// Neither marked nor adopted: not the containment's.
+		asm.LoadMem(asm.R2, asm.R6, skbMarkOff, asm.Word).WithSymbol("checked"),
+		asm.And.Imm32(asm.R2, hostMarkMask),
+		asm.JEq.Imm(asm.R2, int32(mark), "ours"),
+		asm.JEq.Imm(asm.R7, 0, "allow"),
+		asm.LoadMem(asm.R2, asm.R6, skbIfindexOff, asm.Word).WithSymbol("ours"),
+		asm.JEq.Imm(asm.R2, int32(loIdx), "allow"),
+		asm.JNE.Imm(asm.R2, int32(tunIdx), "drop"),
+		asm.JEq.Imm(asm.R7, 1, "allow"),
+		// Into the tunnel unadopted: only from the containment's cgroup, once Contain has named it.
+		asm.Mov.Imm(asm.R2, 0),
+		asm.StoreMem(asm.RFP, -4, asm.R2, asm.Word),
+		asm.Mov.Reg(asm.R2, asm.RFP),
+		asm.Add.Imm(asm.R2, -4),
+		asm.LoadMapPtr(asm.R1, cfg.FD()),
+		asm.FnMapLookupElem.Call(),
+		asm.JEq.Imm(asm.R0, 0, "drop"),
+		asm.LoadMem(asm.R8, asm.R0, 0, asm.DWord),
+		asm.JEq.Imm(asm.R8, 0, "drop"),
+		asm.Mov.Reg(asm.R1, asm.R6),
+		asm.FnSkbCgroupId.Call(),
+		asm.JEq.Reg(asm.R0, asm.R8, "allow"),
+	}
+	insns = append(insns,
+		asm.Mov.Imm(asm.R0, 0).WithSymbol("drop"),
+		asm.Return(),
+		asm.Mov.Imm(asm.R0, 1).WithSymbol("allow"),
+		asm.Return(),
+	)
 	return &ebpf.ProgramSpec{
 		Name: rootGateName(gen),
 		Type: ebpf.CGroupSKB, AttachType: ebpf.AttachCGroupInetEgress, License: "MIT",
-		Instructions: asm.Instructions{
-			asm.Mov.Reg(asm.R6, asm.R1),
-			// R7 = 1 when the packet's socket (or a request's listener) is adopted.
-			asm.Mov.Imm(asm.R7, 0),
-			asm.LoadMem(asm.R1, asm.R6, skbSkOff, asm.DWord),
-			asm.JEq.Imm(asm.R1, 0, "checked"),
-			asm.FnSkFullsock.Call(),
-			asm.JNE.Imm(asm.R0, 0, "lookup"),
-			asm.LoadMem(asm.R1, asm.R6, skbSkOff, asm.DWord),
-			asm.JEq.Imm(asm.R1, 0, "checked"),
-			asm.FnGetListenerSock.Call(),
-			asm.JEq.Imm(asm.R0, 0, "checked"),
-			asm.Mov.Reg(asm.R2, asm.R0).WithSymbol("lookup"),
-			asm.LoadMapPtr(asm.R1, tags.FD()),
-			asm.Mov.Imm(asm.R3, 0),
-			asm.Mov.Imm(asm.R4, 0),
-			asm.FnSkStorageGet.Call(),
-			asm.JEq.Imm(asm.R0, 0, "checked"),
-			// The command's own dial is adopted for the device's life; a socket the sweep adopted only
-			// while the containment's cgroup is named to the gate, which the release undoes.
-			asm.LoadMem(asm.R2, asm.R0, 0, asm.Word),
-			asm.JEq.Imm(asm.R2, dialTag, "adopted"),
-			asm.Mov.Imm(asm.R2, 0),
-			asm.StoreMem(asm.RFP, -4, asm.R2, asm.Word),
-			asm.Mov.Reg(asm.R2, asm.RFP),
-			asm.Add.Imm(asm.R2, -4),
-			asm.LoadMapPtr(asm.R1, cfg.FD()),
-			asm.FnMapLookupElem.Call(),
-			asm.JEq.Imm(asm.R0, 0, "checked"),
-			asm.LoadMem(asm.R2, asm.R0, 0, asm.DWord),
-			asm.JEq.Imm(asm.R2, 0, "checked"),
-			asm.Mov.Imm(asm.R7, 1).WithSymbol("adopted"),
-			// Neither marked nor adopted: not the containment's.
-			asm.LoadMem(asm.R2, asm.R6, skbMarkOff, asm.Word).WithSymbol("checked"),
-			asm.And.Imm32(asm.R2, hostMarkMask),
-			asm.JEq.Imm(asm.R2, int32(mark), "ours"),
-			asm.JEq.Imm(asm.R7, 0, "allow"),
-			asm.LoadMem(asm.R2, asm.R6, skbIfindexOff, asm.Word).WithSymbol("ours"),
-			asm.JEq.Imm(asm.R2, int32(loIdx), "allow"),
-			asm.JNE.Imm(asm.R2, int32(tunIdx), "drop"),
-			asm.JEq.Imm(asm.R7, 1, "allow"),
-			// Into the tunnel unadopted: only from the containment's cgroup, once Contain has named it.
-			asm.Mov.Imm(asm.R2, 0),
-			asm.StoreMem(asm.RFP, -4, asm.R2, asm.Word),
-			asm.Mov.Reg(asm.R2, asm.RFP),
-			asm.Add.Imm(asm.R2, -4),
-			asm.LoadMapPtr(asm.R1, cfg.FD()),
-			asm.FnMapLookupElem.Call(),
-			asm.JEq.Imm(asm.R0, 0, "drop"),
-			asm.LoadMem(asm.R8, asm.R0, 0, asm.DWord),
-			asm.JEq.Imm(asm.R8, 0, "drop"),
-			asm.Mov.Reg(asm.R1, asm.R6),
-			asm.FnSkbCgroupId.Call(),
-			asm.JEq.Reg(asm.R0, asm.R8, "allow"),
-			asm.Mov.Imm(asm.R0, 0).WithSymbol("drop"),
-			asm.Return(),
-			asm.Mov.Imm(asm.R0, 1).WithSymbol("allow"),
-			asm.Return(),
-		},
+		Instructions: insns,
 	}
 }
 
 // __sk_buff.len and __sk_buff.mark, from include/uapi/linux/bpf.h.
 const (
-	skbLenOff  = 0
-	skbMarkOff = 8
+	skbLenOff      = 0
+	skbMarkOff     = 8
+	skbProtocolOff = 16 // __sk_buff.protocol
 )
 
 // admitSpec passes a packet into the device whole when it carries mark (under hostMarkMask), and
@@ -942,7 +1090,10 @@ func (hr *HostRoute) install(self netip.Addr) error {
 	}
 	steps := []step{
 		{"turn off link-local addressing", func() error { return r.noLinkLocal(hr.Index) }},
-		{"assign the agent address", func() error { return r.addAddr(hr.Index, self) }},
+		// Deprecated (preferred lifetime 0), so the host's own sockets never prefer it as their source
+		// over an address of the host's that is itself only deprecated; the table's routes still give
+		// it to the containment's sockets as their preferred source.
+		{"assign the agent address", func() error { return r.addAddrDeprecated(hr.Index, self) }},
 	}
 	if hr.CarryV4 {
 		steps = append(steps, step{"assign the IPv4 translator address", func() error { return r.addAddr(hr.Index, CLATv4) }})
@@ -950,26 +1101,20 @@ func (hr *HostRoute) install(self netip.Addr) error {
 	steps = append(steps,
 		step{"bring the tunnel interface up", func() error { return r.setUp(hr.Index) }},
 		step{"route IPv6 into the tunnel", func() error { return r.addTableDefault(hr.Index, hr.Table, self, minMTU) }},
-		step{"select the tunnel's table by socket mark (IPv6)", func() error {
-			return r.rule(unix.RTM_NEWRULE, unix.AF_INET6, hr.Prio, hr.Mark, hr.Table)
-		}},
-		step{"select the tunnel's table for the agent's address", func() error {
-			return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, tagged(ruleBodyFrom(unix.AF_INET6, hr.Prio, self, hr.Table)))
-		}},
-		step{"refuse the agent's address any other way", func() error {
-			return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, tagged(ruleBodyProhibit(unix.AF_INET6, hr.Prio, self)))
-		}},
 	)
+	rules := hr.rules(self)
+	addRules := func(fam uint8) {
+		for _, s := range rules {
+			if s.fam == fam {
+				body := tagged(s.body())
+				steps = append(steps, step{s.what, func() error { return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, body) }})
+			}
+		}
+	}
+	addRules(unix.AF_INET6)
 	if hr.CarryV4 {
-		steps = append(steps,
-			step{"route IPv4 into the translator", func() error { return r.addTableDefault(hr.Index, hr.Table, CLATv4, v4MTU) }},
-			step{"select the tunnel's table by socket mark (IPv4)", func() error {
-				return r.rule(unix.RTM_NEWRULE, unix.AF_INET, hr.Prio, hr.Mark, hr.Table)
-			}},
-			step{"select the tunnel's table for the translator's address", func() error {
-				return r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, tagged(ruleBodyFrom(unix.AF_INET, hr.Prio, CLATv4, hr.Table)))
-			}},
-		)
+		steps = append(steps, step{"route IPv4 into the translator", func() error { return r.addTableDefault(hr.Index, hr.Table, CLATv4, v4MTU) }})
+		addRules(unix.AF_INET)
 	}
 	for _, s := range steps {
 		if err := s.do(); err != nil {
@@ -989,6 +1134,11 @@ func (hr *HostRoute) install(self netip.Addr) error {
 // not an error.
 func (hr *HostRoute) removeRules() {
 	deleteRules(hr.Prio, hr.Table, hr.Mark, hostMarkMask)
+	if hr.self.Is6() {
+		// The prohibit is there before the lookup goes: something may have deleted it after the keeper
+		// stopped.
+		_ = addRuleBody(tagged(ruleBodyProhibit(unix.AF_INET6, hr.Prio, hr.self)))
+	}
 	// The lookup for the agent's address goes; its prohibit stays for now: a connection of the
 	// containment still ending (FIN_WAIT1, LAST_ACK, TIME_WAIT) after the tunnel is gone would
 	// otherwise retransmit from the /128 by the host's main table. afterStop removes it once no socket
@@ -1201,57 +1351,118 @@ func slotRuleMarks() []uint32 {
 // ruleInfo is what a dump says about one policy rule.
 type ruleInfo struct {
 	prio, table, mark, mask uint32
-	action, proto           uint8
+	fam, action, proto      uint8
 	src                     netip.Addr // the full-length source a rule names, or invalid
+	// extra is set when the rule also selects on something no containment's rule does (a destination,
+	// a TOS, "not", an interface, a uid or port range, an IP protocol, a suppressor, a goto, a tunnel
+	// id, a realm, l3mdev), and unknown when it carries an attribute this code does not know. Either
+	// makes it a rule in a containment's shape that is not a containment's.
+	extra, unknown bool
 }
 
-// dumpRules reads every policy rule of one family.
+// dumpRules reads every policy rule of one family, or as many as a dump that fails returned.
 func dumpRules(fam uint8) []ruleInfo {
+	out, _ := dumpRulesErr(fam)
+	return out
+}
+
+// dumpRulesErr reads every policy rule of one family, in the kernel's order (by priority, and at one
+// priority in the order they were added), and says whether the dump was complete.
+func dumpRulesErr(fam uint8) ([]ruleInfo, error) {
 	r, err := openRTNL()
 	if err != nil {
-		return nil
+		return nil, err
 	}
 	defer r.close()
 	var out []ruleInfo
 	h := fibRuleHdr{Family: fam}
 	body := append([]byte(nil), (*[unsafe.Sizeof(fibRuleHdr{})]byte)(unsafe.Pointer(&h))[:]...)
-	_ = r.dump(unix.RTM_GETRULE, body, func(data []byte) {
-		const hdr = int(unsafe.Sizeof(fibRuleHdr{}))
-		if len(data) < hdr {
-			return
+	err = r.dump(unix.RTM_GETRULE, body, func(data []byte) {
+		if ri, ok := parseRule(data); ok {
+			out = append(out, ri)
 		}
-		var ri ruleInfo
-		srcLen, action := data[2], data[7]
-		ri.action = action
-		ri.table = uint32(data[4])
-		for off := hdr; off+4 <= len(data); {
-			l := int(binary.NativeEndian.Uint16(data[off:]))
-			if l < 4 || off+l > len(data) {
-				break
-			}
-			typ := binary.NativeEndian.Uint16(data[off+2:]) &^ unix.NLA_F_NESTED
-			val := data[off+4 : off+l]
-			switch {
-			case typ == fraPriority && len(val) >= 4:
-				ri.prio = binary.NativeEndian.Uint32(val)
-			case typ == fraFwmark && len(val) >= 4:
-				ri.mark = binary.NativeEndian.Uint32(val)
-			case typ == fraFwmask && len(val) >= 4:
-				ri.mask = binary.NativeEndian.Uint32(val)
-			case typ == fraTable && len(val) >= 4:
-				ri.table = binary.NativeEndian.Uint32(val)
-			case typ == fraProtocol && len(val) >= 1:
-				ri.proto = val[0]
-			case typ == fraSrc:
-				if a, ok := netip.AddrFromSlice(val); ok && int(srcLen) == a.BitLen() {
-					ri.src = a
-				}
-			}
-			off += (l + 3) &^ 3
-		}
-		out = append(out, ri)
 	})
-	return out
+	return out, err
+}
+
+// parseRule reads one rule message's payload (struct fib_rule_hdr and its attributes), from a dump or
+// from a notification.
+func parseRule(data []byte) (ruleInfo, bool) {
+	const hdr = int(unsafe.Sizeof(fibRuleHdr{}))
+	if len(data) < hdr {
+		return ruleInfo{}, false
+	}
+	var ri ruleInfo
+	srcLen, action := data[2], data[7]
+	ri.fam = data[0]
+	ri.action = action
+	ri.table = uint32(data[4])
+	ri.extra = data[1] != 0 || data[3] != 0 || binary.NativeEndian.Uint32(data[8:12]) != 0 // dst_len, tos, flags
+	off := hdr
+	for off+4 <= len(data) {
+		l := int(binary.NativeEndian.Uint16(data[off:]))
+		if l < 4 || off+l > len(data) {
+			ri.unknown = true // a broken attribute: whatever follows cannot be read
+			break
+		}
+		raw := binary.NativeEndian.Uint16(data[off+2:])
+		typ := raw &^ (unix.NLA_F_NESTED | unix.NLA_F_NET_BYTEORDER)
+		if raw != typ {
+			ri.unknown = true // no rule attribute the kernel lists is nested
+		}
+		val := data[off+4 : off+l]
+		switch {
+		case typ == fraPriority && len(val) >= 4:
+			ri.prio = binary.NativeEndian.Uint32(val)
+		case typ == fraFwmark && len(val) >= 4:
+			ri.mark = binary.NativeEndian.Uint32(val)
+		case typ == fraFwmask && len(val) >= 4:
+			ri.mask = binary.NativeEndian.Uint32(val)
+		case typ == fraTable && len(val) >= 4:
+			ri.table = binary.NativeEndian.Uint32(val)
+		case typ == fraProtocol && len(val) >= 1:
+			ri.proto = val[0]
+		case typ == fraSrc:
+			if a, ok := netip.AddrFromSlice(val); ok && int(srcLen) == a.BitLen() {
+				ri.src = a
+			} else {
+				ri.extra = true // a source shorter than an address
+			}
+		case typ == unix.FRA_SUPPRESS_PREFIXLEN || typ == unix.FRA_SUPPRESS_IFGROUP:
+			// The kernel always lists the prefix length; -1 is "not set".
+			if len(val) < 4 || binary.NativeEndian.Uint32(val) != 0xffffffff {
+				ri.extra = true
+			}
+		case typ == unix.FRA_PAD:
+		case typ == unix.FRA_DST, typ == unix.FRA_IIFNAME, typ == unix.FRA_GOTO, typ == unix.FRA_FLOW,
+			typ == unix.FRA_TUN_ID, typ == unix.FRA_OIFNAME, typ == unix.FRA_L3MDEV, typ == unix.FRA_UID_RANGE,
+			typ == unix.FRA_IP_PROTO, typ == unix.FRA_SPORT_RANGE, typ == unix.FRA_DPORT_RANGE,
+			typ >= fraDSCP && typ <= fraDSCPMask:
+			ri.extra = true
+		default:
+			ri.unknown = true
+		}
+		off += (l + 3) &^ 3
+	}
+	if off < len(data) {
+		ri.unknown = true // bytes no attribute accounts for
+	}
+	return ri, true
+}
+
+// deletesFirst says whether a delete of rule c, named by its priority, action, table (for a lookup),
+// protocol and full-length source, takes c itself. The kernel deletes the first rule, in its order,
+// that matches every field a delete names, and takes any value for every field it leaves out (a
+// destination, an interface, a mark, "not"), so a rule of anybody else's that matches those fields and
+// selects on something more, sitting ahead of c, would go instead.
+func deletesFirst(list []ruleInfo, c ruleInfo) bool {
+	for _, r := range list {
+		if r.prio == c.prio && r.action == c.action && (c.action != frActToTbl || r.table == c.table) &&
+			r.proto == c.proto && r.src == c.src {
+			return r == c
+		}
+	}
+	return false
 }
 
 // dial opens a connection the way a contained socket's leaves: with the route's mark, which
@@ -1341,14 +1552,18 @@ type fibRuleHdr struct {
 }
 
 const (
-	fraSrc        = 2  // FRA_SRC
-	fraPriority   = 6  // FRA_PRIORITY
-	fraFwmark     = 10 // FRA_FWMARK
-	fraTable      = 15 // FRA_TABLE
-	fraFwmask     = 16 // FRA_FWMASK
-	fraProtocol   = 21 // FRA_PROTOCOL (Linux 4.17)
-	frActToTbl    = 1  // FR_ACT_TO_TBL
-	frActProhibit = 8  // FR_ACT_PROHIBIT
+	fraSrc      = 2  // FRA_SRC
+	fraPriority = 6  // FRA_PRIORITY
+	fraFwmark   = 10 // FRA_FWMARK
+	fraTable    = 15 // FRA_TABLE
+	fraFwmask   = 16 // FRA_FWMASK
+	fraProtocol = 21 // FRA_PROTOCOL (Linux 4.17)
+	// FRA_DSCP, FRA_FLOWLABEL, FRA_FLOWLABEL_MASK, FRA_SPORT_MASK, FRA_DPORT_MASK and FRA_DSCP_MASK (Linux
+	// 6.13 to 6.15): selectors, listed only when set, which a delete that does not name them ignores.
+	fraDSCP       = 25
+	fraDSCPMask   = 30
+	frActToTbl    = 1 // FR_ACT_TO_TBL
+	frActProhibit = 8 // FR_ACT_PROHIBIT
 )
 
 // ruleBody encodes "priority prio fwmark mark/mask lookup table" for one family.
@@ -1397,13 +1612,19 @@ func (r *rtnl) rule(typ uint16, fam uint8, prio, mark, table uint32) error {
 }
 
 // tagged adds hostRuleProto to a rule body. A rule a containment installs carries it, and a delete
-// that names it matches only such a rule: that is how a prune deletes. The other deletes name the
+// that names it matches only a rule carrying it; a prune and a guard's removal also check, from a dump,
+// that the delete takes the very rule they mean (deletesFirst). The other deletes name the
 // exact shapes a containment installs (a containment's mark, a lookup of the slot's own table from a
 // single address, the agent's own address under its lock), so they also take the rules of a release
-// that did not tag them, which last until the next boot at most; a host's own rule in such a shape
-// (table 4300+n at priority 4300+n, or the agent's own /128) is the only one they could take.
-func tagged(body []byte) []byte {
-	return append(body, nlAttr(fraProtocol, []byte{hostRuleProto})...)
+// that tagged them otherwise or not at all, which last until the next boot at most; a host's own rule
+// in such a shape (table 4300+n at priority 4300+n, or the agent's own /128) is the only one they
+// could take.
+func tagged(body []byte) []byte { return withProto(body, hostRuleProto) }
+
+// withProto adds a protocol to a rule body: a rule added with it carries it, and a delete that names
+// it matches only a rule carrying it.
+func withProto(body []byte, proto uint8) []byte {
+	return append(body, nlAttr(fraProtocol, []byte{proto})...)
 }
 
 // hostAddrs lists every address on every interface of the calling thread's namespace.

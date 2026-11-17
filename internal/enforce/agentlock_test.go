@@ -405,6 +405,20 @@ func TestReleaseRemovesTheHolder(t *testing.T) {
 // milliseconds; an enforced run that starts meanwhile waits it out instead of refusing.
 func TestAPrunesShortHoldIsWaitedOut(t *testing.T) {
 	useTempLockDir(t)
+	// An agent this host never served has no lock file, and the prune neither holds it nor makes one:
+	// whatever rule names its address is somebody else's.
+	if hold := lockSharedQuiet(lockAgent); hold != nil {
+		hold.Release()
+		t.Fatal("the prune held an agent this host never served")
+	}
+	if _, err := os.Lstat(filepath.Join(LockDir, lockName(lockAgent))); err == nil {
+		t.Fatal("the prune made a lock file for an agent this host never served")
+	}
+	first, err := LockExclusive(lockAgent) // as the agent's first enforced run does
+	if err != nil {
+		t.Fatal(err)
+	}
+	first.Release()
 	hold := lockSharedQuiet(lockAgent)
 	if hold == nil {
 		t.Fatal("the prune's shared hold could not be taken on a free agent")

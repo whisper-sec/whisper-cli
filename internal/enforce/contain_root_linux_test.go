@@ -385,6 +385,7 @@ func (d *tapTUN) Read(bufs [][]byte, sizes []int, offset int) (int, error) {
 // is what the kernel let in, before the tunnel's own filter.
 func hostTUNRaw(t *testing.T, self netip.Addr) (*Namespace, chan []byte, chan []byte) {
 	t.Helper()
+	touchLock(t, self) // as every command that makes a device does first, so a prune may take its leftovers
 	ns, err := CreateHostDevice(self)
 	if err != nil {
 		t.Fatalf("CreateHostDevice: %v", err)
@@ -631,7 +632,7 @@ func TestHostDialBindsTheIndexNotTheName(t *testing.T) {
 		t.Skip("no loopback interface here")
 	}
 	open := func(fn func() error) error { return fn() }
-	gate, err := attachRootGate(markFor(1), lo.Index, 1)
+	gate, err := attachRootGate(markFor(1), lo.Index, 1, netip.Addr{})
 	if err != nil {
 		t.Skipf("no gate on the root cgroup here: %v", err)
 	}

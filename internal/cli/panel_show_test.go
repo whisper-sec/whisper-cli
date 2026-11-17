@@ -72,7 +72,7 @@ func hasString(s []string, v string) bool {
 }
 
 // stageBundle writes a bundle that looks installed: a directory with the executable
-// build-pkg.sh insists on inside it.
+// the pkg build insists on inside it.
 func stageBundle(t *testing.T, root string) string {
 	t.Helper()
 	app := filepath.Join(root, panelBundleName)

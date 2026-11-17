@@ -120,6 +120,9 @@ func startTunnel(cfg wgtun.Config, pol Policy, opts Options, place func(netip.Ad
 	if err != nil {
 		return nil, err
 	}
+	// A host device's rules are put back if anything else on the host deletes them, for as long as
+	// the tunnel lives; seal stops the keeper before it removes them.
+	ns.keepRules(logf)
 	f := NewFilter(pol)
 	dev := device.NewDevice(FilterTUN(ns.Dev, f), conn.NewDefaultBind(), device.NewLogger(device.LogLevelSilent, ""))
 	fail := func(e error) (*Tunnel, error) {

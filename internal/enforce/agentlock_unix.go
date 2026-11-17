@@ -142,7 +142,7 @@ func checkLockFile(f *os.File) error {
 }
 
 func openLock(dfd int, a netip.Addr, flags int) (*os.File, error) {
-	fd, err := unix.Openat(dfd, lockName(a), flags|unix.O_CREAT|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
+	fd, err := unix.Openat(dfd, lockName(a), flags|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the agent lock for %s: %w", a, err)
 	}
@@ -162,7 +162,7 @@ func LockExclusive(a netip.Addr) (*AgentLock, error) {
 		return nil, err
 	}
 	defer unix.Close(dfd)
-	f, err := openLock(dfd, a, unix.O_RDWR)
+	f, err := openLock(dfd, a, unix.O_RDWR|unix.O_CREAT)
 	if err != nil {
 		return nil, err
 	}
@@ -201,11 +201,16 @@ var sharedHoldWait = 500 * time.Millisecond
 // the hold of a prune of the agent's leftover rules, which only keeps the agent's next containment
 // from starting while they are deleted. It returns nil when the lock is held exclusively or cannot be
 // taken at all (not root, an untrusted lock directory), and the agent is then left alone.
+//
+// It never makes the lock file. Every command that makes a device or connects as root makes it first,
+// and nothing removes one, so an address with no lock file was never served on this host since it
+// booted (under this /run): a rule naming it is somebody else's, however much it looks like a
+// containment's, and is left alone.
 func lockSharedQuiet(a netip.Addr) *AgentLock {
 	if !isPrivileged() {
 		return nil
 	}
-	dfd, err := openLockDir(true)
+	dfd, err := openLockDir(false)
 	if err != nil {
 		return nil
 	}
@@ -237,7 +242,7 @@ func LockShared(a netip.Addr) (*AgentLock, error) {
 		return nil, err
 	}
 	defer unix.Close(dfd)
-	f, err := openLock(dfd, a, unix.O_RDONLY)
+	f, err := openLock(dfd, a, unix.O_RDONLY|unix.O_CREAT)
 	if err != nil {
 		return nil, err
 	}

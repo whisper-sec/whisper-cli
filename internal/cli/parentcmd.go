@@ -27,8 +27,9 @@ import (
 // the guard, and it can never run. Attaching a RunE is what makes it reachable.
 //
 // This is the same shape as the `whisper <anything> --help` exit-0 trap that made a naive
-// verb-presence check in build-pkg.sh pass for every string. cobra is liberal about what it accepts
-// by default, and Postel's second half does not extend to reporting that we did something we did not.
+// verb-presence check in the macOS installer build pass for every string. cobra is liberal about
+// what it accepts by default, and Postel's second half does not extend to reporting that we did
+// something we did not.
 
 // parentRunE is the RunE every command that only groups subcommands should carry.
 //

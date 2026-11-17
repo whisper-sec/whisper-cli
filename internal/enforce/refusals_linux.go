@@ -35,9 +35,10 @@ import (
 // it could still send from the /128 for, other than one bound to a device that is gone, and no SCTP
 // association with the /128 among its local addresses.
 //
-// A prune only ever deletes a rule a containment made: one carrying hostRuleProto, in one of the exact
-// shapes it installs. A rule written without a priority lands just above the lowest slot's (the kernel
-// picks "the first rule's priority minus one"), so a priority alone proves nothing.
+// A prune only ever deletes a rule a containment made: one carrying a containment's protocol (kernel, or
+// 87 from a release before), in one of the exact shapes it installs. A rule written without a priority
+// lands just above the lowest slot's (the kernel picks "the first rule's priority minus one"), so a
+// priority alone proves nothing.
 
 // prunePerPass bounds how many agents one prune takes up: their locks are held for its length, and a
 // containment of one of them waits that out (LockExclusive). The rest go with the next prune.
@@ -50,24 +51,42 @@ var pruneHeld = func() {}
 type agentRule struct {
 	prio, table uint32
 	prohibit    bool
+	proto       uint8    // the protocol it carries, which the delete names
+	ri          ruleInfo // as the dump read it
 }
 
-// agentRulesOnHost reads, from one dump, every rule a containment made for an agent's address: a
-// "from <the /128> lookup <table>" at a slot's priority whose table is that slot's, and a
-// "from <the /128> prohibit" at a slot's priority or at the guard's (CreateHostDevice), each carrying
-// hostRuleProto. A dump that fails reads none, and so prunes nothing.
+// agentRuleOf says whether one IPv6 rule is one a containment made for an agent's address: exactly a
+// "from <the /128> lookup <table>" at a slot's priority whose table is that slot's, or a
+// "from <the /128> prohibit" at a slot's priority or at the guard's (CreateHostDevice), carrying a
+// containment's protocol (hostRuleProto, or legacyRuleProto from a release before) and selecting on
+// nothing else. The protocol alone proves little: kernel is also what a host's own rule carries when
+// it is written to survive systemd-networkd, so the shape has to be exact too.
+func agentRuleOf(r ruleInfo) (agentRule, bool) {
+	if r.proto != hostRuleProto && r.proto != legacyRuleProto || r.mark != 0 || r.mask != 0 || r.extra || r.unknown ||
+		!r.src.Is6() || r.src.Is4In6() {
+		return agentRule{}, false
+	}
+	slot := r.prio >= hostRulePrio && r.prio < hostRulePrio+maxHostSlots
+	switch {
+	case r.action == frActProhibit && r.table == 0 && (slot || r.prio == hostGuardPrio):
+		return agentRule{prio: r.prio, prohibit: true, proto: r.proto, ri: r}, true
+	case r.action == frActToTbl && slot && r.table == hostTableBase+(r.prio-hostRulePrio):
+		return agentRule{prio: r.prio, table: r.table, proto: r.proto, ri: r}, true
+	}
+	return agentRule{}, false
+}
+
+// agentRulesOnHost reads, from one dump, every rule a containment made for an agent's address
+// (agentRuleOf). A dump that fails reads none, and so prunes nothing.
 func agentRulesOnHost() map[netip.Addr][]agentRule {
 	out := map[netip.Addr][]agentRule{}
-	for _, r := range dumpRules(unix.AF_INET6) {
-		if r.proto != hostRuleProto || r.mark != 0 || !r.src.Is6() || r.src.Is4In6() {
-			continue
-		}
-		slot := r.prio >= hostRulePrio && r.prio < hostRulePrio+maxHostSlots
-		switch {
-		case r.action == frActProhibit && (slot || r.prio == hostGuardPrio):
-			out[r.src] = append(out[r.src], agentRule{prio: r.prio, prohibit: true})
-		case r.action == frActToTbl && slot && r.table == hostTableBase+(r.prio-hostRulePrio):
-			out[r.src] = append(out[r.src], agentRule{prio: r.prio, table: r.table})
+	rules, err := dumpRulesErr(unix.AF_INET6)
+	if err != nil {
+		return out
+	}
+	for _, r := range rules {
+		if ar, ok := agentRuleOf(r); ok {
+			out[r.src] = append(out[r.src], ar)
 		}
 	}
 	return out
@@ -236,6 +255,13 @@ func pruneAgentRefusals(held netip.Addr, hostNS uint64) []netip.Addr {
 			busy[s.src] = true
 		}
 	}
+	// Read again, now, for what each delete would take: a host's rule that names the same address at the
+	// same priority, with the same protocol, and selects on something more, would go first if it sits
+	// ahead of the containment's (deletesFirst), so then the containment's is left where it is.
+	now, err := dumpRulesErr(unix.AF_INET6)
+	if err != nil {
+		return nil
+	}
 	r, err := openRTNL()
 	if err != nil {
 		return nil
@@ -247,11 +273,14 @@ func pruneAgentRefusals(held netip.Addr, hostNS uint64) []netip.Addr {
 			continue
 		}
 		for _, ar := range rules[a] {
+			if !deletesFirst(now, ar.ri) {
+				continue
+			}
 			body := ruleBodyFrom(unix.AF_INET6, ar.prio, a, ar.table)
 			if ar.prohibit {
 				body = ruleBodyProhibit(unix.AF_INET6, ar.prio, a)
 			}
-			_ = r.do(unix.RTM_DELRULE, 0, tagged(body))
+			_ = r.do(unix.RTM_DELRULE, 0, withProto(body, ar.proto))
 		}
 		pruned = append(pruned, a)
 	}
