@@ -43,6 +43,9 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == sealProbeArg {
 		sealProbe()
 	}
+	if len(os.Args) > 2 && os.Args[1] == deviceHelperArg {
+		deviceHelper()
+	}
 	if len(os.Args) > 1 && os.Args[1] == ProbeArg {
 		RunProbe()
 	}

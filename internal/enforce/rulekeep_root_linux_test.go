@@ -47,6 +47,7 @@ func touchLock(t *testing.T, a netip.Addr) {
 type uplink6 struct {
 	dst       netip.Addr
 	hostIf    string // the host's end of the veth pair, holding fd00:2620::1/64
+	ns        string // the uplink namespace's name, under /run/netns
 	datagrams atomic.Int32
 }
 
@@ -71,7 +72,7 @@ func startUplink6(t *testing.T) *uplink6 {
 	run("link", "set", hostIf, "up")
 	run("-n", name, "-6", "addr", "add", "fd00:2620::2/64", "dev", peerIf, "nodad")
 	run("-n", name, "link", "set", peerIf, "up")
-	u := &uplink6{dst: netip.MustParseAddr("fd00:2620::2"), hostIf: hostIf}
+	u := &uplink6{dst: netip.MustParseAddr("fd00:2620::2"), hostIf: hostIf, ns: name}
 	pcCh := make(chan net.PacketConn, 1)
 	go func() {
 		runtime.LockOSThread() // never unlocked: the thread dies inside the namespace

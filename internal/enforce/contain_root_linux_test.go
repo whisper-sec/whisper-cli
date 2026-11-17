@@ -632,7 +632,7 @@ func TestHostDialBindsTheIndexNotTheName(t *testing.T) {
 		t.Skip("no loopback interface here")
 	}
 	open := func(fn func() error) error { return fn() }
-	gate, err := attachRootGate(markFor(1), lo.Index, 1, netip.Addr{})
+	gate, err := attachRootGate(markFor(1), lo.Index, 1, netip.Addr{}, 0, 0)
 	if err != nil {
 		t.Skipf("no gate on the root cgroup here: %v", err)
 	}

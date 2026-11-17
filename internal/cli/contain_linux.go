@@ -99,6 +99,10 @@ func runContain(pid int, agent, agentFile string) error {
 	logf("Contained pid %d (%d process%s) as %s - %s ✓ egress verified through the containment's route; %s",
 		pid, len(c.Members), pluralES(len(c.Members)), up.label, ce.address, v4)
 	logf("whisper: %s", c.Sockets)
+	// A kernel that cannot hold a kernel tunnel's own packets to the address still contains; it says what stays open.
+	if note := hr.OuterNote(); note != "" {
+		logf("whisper: %s", note)
+	}
 	if note := resolverNote(readResolvConf(), up.resolvers); note != "" {
 		logf("whisper: %s", note)
 	}
@@ -112,6 +116,15 @@ func runContain(pid int, agent, agentFile string) error {
 		return perr == nil && sameIP(ip, ce.address)
 	}
 
+	// What the netfilter check held from the agent's address of what the host sent or forwarded: said when it
+	// first happens, then at most once a minute, and whatever is left unsaid once the process is released (what
+	// the tunnel's own stop holds after that goes unsaid: the command is ending).
+	var held enforce.HeldReport
+	sayHeld := func(force bool) {
+		if d := held.Due(hr.OuterHeld(), time.Now(), force); d > 0 {
+			logf("whisper: %s", enforce.HeldNote(d, hr.OuterHeldBy()))
+		}
+	}
 	tick := time.NewTicker(time.Second)
 	defer tick.Stop()
 	why := ""
@@ -120,12 +133,14 @@ func runContain(pid int, agent, agentFile string) error {
 		case sig := <-sigs:
 			why = "released on " + sig.String()
 		case <-tick.C:
+			sayHeld(false)
 			if !c.Populated() {
 				why = fmt.Sprintf("pid %d and its children have exited", pid)
 			}
 		}
 	}
 	release()
+	sayHeld(true)
 	st := &tun.Filter.Stats
 	logf("whisper: containment ended (%s): %d packets passed, %d translated, %d refused, %d dropped",
 		why, st.Passed.Load(), st.Translated.Load(), st.Refused.Load(), st.Dropped.Load())

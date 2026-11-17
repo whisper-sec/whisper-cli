@@ -63,7 +63,7 @@ Most clients take that URL and nothing else. Claude Code, for one:
 
 Streamable HTTP. `initialize` and `tools/list` answer with no credential, so a client that takes
 a bare URL needs nothing else. The HTTP transport is a different server from the stdio one above
-and it lists a different set: 17 tools with no key, every one of which works with no key, and 41
+and it lists a different set: 17 tools with no key, every one of which works with no key, and 42
 once you send your key as the `X-API-Key` header (the stdio server's keyed set is the 45 above).
 
 The keyless 17 are the identity checks and the graph: `whisper_verify`, `whisper_rdap`,
@@ -71,8 +71,8 @@ The keyless 17 are the identity checks and the graph: `whisper_verify`, `whisper
 `whisper_variants`, `whisper_origins`, `whisper_history`, `whisper_asset`, `whisper_psl`,
 `whisper_threatintel`, `whisper_lookupTlsFingerprint`, `whisper_lookupTorRelay`,
 `whisper_topAsnsByPrefixCount`, and `whisper_signup`, which issues you an API key from an email
-address alone. The 24 a key adds over HTTP are the provisioning and governance set, 23 of them
-`whisper_agents_*` and the 24th `whisper_submit`, which writes a claim into the graph and so
+address alone. The 25 a key adds over HTTP are the provisioning and governance set, 24 of them
+`whisper_agents_*` and the 25th `whisper_submit`, which writes a claim into the graph and so
 needs to be attributable.
 
 `whisper_verify` and `whisper_rdap` check somebody else's agent. `whisper_agents_verify` in the

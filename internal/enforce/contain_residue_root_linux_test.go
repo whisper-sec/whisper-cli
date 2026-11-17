@@ -898,12 +898,12 @@ func TestAnInertSocketDoesNotHoldARefusal(t *testing.T) {
 			t.Fatalf("ip %v: %v %s", args, err, out)
 		}
 	}
-	run("link", "add", "w362d", "type", "dummy")
-	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", "w362d").Run() })
-	run("-6", "addr", "add", tSelf3.String()+"/128", "dev", "w362d", "nodad")
-	run("link", "set", "w362d", "up")
-	run("-6", "route", "add", "2001:db8:99::/64", "dev", "w362d")
-	idx, err := ifIndex("w362d")
+	run("link", "add", "resdummy", "type", "dummy")
+	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", "resdummy").Run() })
+	run("-6", "addr", "add", tSelf3.String()+"/128", "dev", "resdummy", "nodad")
+	run("link", "set", "resdummy", "up")
+	run("-6", "route", "add", "2001:db8:99::/64", "dev", "resdummy")
+	idx, err := ifIndex("resdummy")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -926,7 +926,7 @@ func TestAnInertSocketDoesNotHoldARefusal(t *testing.T) {
 	if !hasAddrRules(tSelf3) {
 		t.Fatal("control: a connection bound to a live device from the agent's address must hold its refusal")
 	}
-	run("link", "del", "w362d")
+	run("link", "del", "resdummy")
 	pruneAgentRefusals(netip.Addr{}, 0)
 	if hasAddrRules(tSelf3) {
 		t.Fatalf("a connection bound to a device that is gone held the refusal:\n%s%s", ipRules(t), pruneWhy(tSelf3))
@@ -1130,7 +1130,7 @@ func TestNewSocketsThroughTheEndNeverSpeakAsTheAgentOutsideTheTunnel(t *testing.
 }
 
 // killDevice does to a device what a killed command does: the kernel lets its record's lock go, closes
-// its TUN and the link that holds its address check; nothing else is detached and no rule is removed.
+// its TUN and the links that hold its address checks; nothing else is detached and no rule is removed.
 func killDevice(ns *Namespace) {
 	hr := ns.HostRoute()
 	hr.gate.rec.drop()
@@ -1138,6 +1138,10 @@ func killDevice(ns *Namespace) {
 	if hr.gate.src != nil {
 		hr.gate.src.Close()
 		hr.gate.src = nil
+	}
+	if hr.gate.nf != nil {
+		hr.gate.nf.close()
+		hr.gate.nf = nil
 	}
 	ns.Dev.Close()
 }
@@ -1691,10 +1695,10 @@ func TestAnSCTPAssociationFromTheAgentHoldsItsRefusal(t *testing.T) {
 			t.Fatalf("ip %v: %v %s", args, err, out)
 		}
 	}
-	run("link", "add", "w362s", "type", "dummy")
-	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", "w362s").Run() })
-	run("-6", "addr", "add", tSelf3.String()+"/128", "dev", "w362s", "nodad")
-	run("link", "set", "w362s", "up")
+	run("link", "add", "ressctp", "type", "dummy")
+	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", "ressctp").Run() })
+	run("-6", "addr", "add", tSelf3.String()+"/128", "dev", "ressctp", "nodad")
+	run("link", "set", "ressctp", "up")
 	sock := func() int {
 		fd, err := unix.Socket(unix.AF_INET6, unix.SOCK_STREAM|unix.SOCK_CLOEXEC, unix.IPPROTO_SCTP)
 		if err != nil {

@@ -352,7 +352,7 @@ func CreateHostDevice(self netip.Addr) (*Namespace, error) {
 		dev.Close()
 		return nil, err
 	}
-	if hr.gate, err = attachRootGate(hr.Mark, idx, gen, self); err != nil {
+	if hr.gate, err = attachRootGate(hr.Mark, idx, gen, self, n, host); err != nil {
 		_ = removeGuard(self)
 		dev.Close()
 		releaseDeviceRecord(rec)
@@ -667,11 +667,16 @@ type rootGate struct {
 	// when the command does, with the device, however the command ends, while the gate itself stays.
 	src     link.Link
 	srcProg *ebpf.Program
-	tags    *ebpf.Map // sockets the containment adopted
-	cfg     *ebpf.Map // [0]: the containment's cgroup id, 0 until Contain sets it
-	root    string    // the v2 hierarchy's mount point
-	gen     uint32
-	rec     *heldRecord // the device's record, held for the gate's life
+	// nf keeps it in for the packets that belong to no socket (nfsource_linux.go), linked at netfilter's IPv6
+	// postrouting for the command's life like src, and closed with the gate, after the device and its address
+	// are gone; nil, with nfWhy saying why, on a kernel that cannot.
+	nf    *nfCheck
+	nfWhy *nfUnavailable
+	tags  *ebpf.Map // sockets the containment adopted
+	cfg   *ebpf.Map // [0]: the containment's cgroup id, 0 until Contain sets it
+	root  string    // the v2 hierarchy's mount point
+	gen   uint32
+	rec   *heldRecord // the device's record, held for the gate's life
 }
 
 // bpfFNoPrealloc and bpfFClone are BPF_F_NO_PREALLOC and BPF_F_CLONE from linux/bpf.h: socket storage
@@ -744,7 +749,7 @@ func detachRootGatesOf(root string, gen uint32) bool {
 	return looked && !left
 }
 
-func attachRootGate(mark uint32, tunIdx int, gen uint32, self netip.Addr) (*rootGate, error) {
+func attachRootGate(mark uint32, tunIdx int, gen uint32, self netip.Addr, slot int, host uint64) (*rootGate, error) {
 	mi, err := os.ReadFile(mountinfoPath)
 	if err != nil {
 		return nil, fmt.Errorf("enforce: cannot read %s: %w", mountinfoPath, err)
@@ -795,6 +800,14 @@ func attachRootGate(mark uint32, tunIdx int, gen uint32, self netip.Addr) (*root
 				"command (a cgroup link, Linux 5.7+): %w", err)
 		}
 		g.src = l // only once it is one: a failed attach returns a nil link, which the cleanup must not close
+		// A kernel that cannot hold the packets that belong to no socket still contains: the check is linked
+		// when it can be, and its absence is said (HostRoute.OuterNote), never a refusal.
+		if g.nf, err = attachNF(nfFor{self: self, tun: tunIdx, gen: gen, slot: slot, host: host}); err != nil || g.nf == nil {
+			if err == nil {
+				err = errors.New("the check came back empty")
+			}
+			g.nf, g.nfWhy = nil, unavailable(err)
+		}
 	}
 	if err := link.RawAttachProgram(link.RawAttachProgramOptions{Target: fd, Program: g.prog,
 		Attach: ebpf.AttachCGroupInetEgress, Flags: unix.BPF_F_ALLOW_MULTI}); err != nil {
@@ -871,6 +884,7 @@ func (g *rootGate) detach() {
 }
 
 func (g *rootGate) close() {
+	g.nf.close()
 	for _, c := range []interface{ Close() error }{g.src, g.srcProg, g.prog, g.tags, g.cfg} {
 		if c != nil && !isNilCloser(c) {
 			c.Close()
