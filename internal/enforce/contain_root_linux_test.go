@@ -348,6 +348,40 @@ func needCgroup2(t *testing.T) string {
 	return root
 }
 
+// needSlotZero readies a test that needs its device on slot 0 (wsc0), and says whether the suite runs in a network
+// namespace of its own. The kernel names a new device with the lowest free wsc%d, and the device of the test before
+// leaves a moment after its descriptor closes, so a wsc0 still there is waited for. In the suite's own namespace
+// (unshare -n) nothing else makes wsc devices: a wsc0 there five seconds on is a device an earlier test leaked, and
+// the test fails naming it. Only in the host's own namespace, where a real agent may hold slot 0, does it skip.
+func needSlotZero(t *testing.T) (own bool) {
+	t.Helper()
+	init1, err := os.Stat("/proc/1/ns/net")
+	self, err2 := os.Stat("/proc/self/ns/net")
+	own = err == nil && err2 == nil && !os.SameFile(init1, self)
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if _, err := ifIndex("wsc0"); err != nil {
+			return own
+		}
+		if !own {
+			t.Skip("this host already holds slot 0 (wsc0): run the suite in a network namespace of its own (unshare -n)")
+		}
+		if time.Now().After(deadline) {
+			out, _ := exec.Command("ip", "-d", "link", "show", "dev", "wsc0").CombinedOutput()
+			t.Fatalf("wsc0 is still in the suite's own namespace five seconds on, left by an earlier test:\n%s", out)
+		}
+	}
+}
+
+// slotZeroTaken ends a test whose device did not get slot 0 although needSlotZero found it free: a skip in the host's
+// own namespace, where a real agent may have taken it meanwhile, and a failure in the suite's own, where nothing can.
+func slotZeroTaken(t *testing.T, own bool, slot int) {
+	t.Helper()
+	if !own {
+		t.Skipf("the device took slot %d; this host already holds slot 0", slot)
+	}
+	t.Fatalf("the device took slot %d in the suite's own namespace, where slot 0 was free a moment before", slot)
+}
+
 // hostTUN brings up the containment's device and reads what passes its filter.
 func hostTUN(t *testing.T) (*Namespace, chan []byte) {
 	t.Helper()

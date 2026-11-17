@@ -1011,9 +1011,10 @@ func TestANewDeviceClearsItsSlotsLeftovers(t *testing.T) {
 	if err := r.do(unix.RTM_NEWRULE, unix.NLM_F_CREATE|unix.NLM_F_EXCL, ruleBodyProhibit(unix.AF_INET6, hostRulePrio+far, tSelf)); err != nil {
 		t.Fatalf("plant a prohibit leftover: %v", err)
 	}
+	own := needSlotZero(t)
 	ns, _ := hostTUN(t)
 	if ns.HostRoute().Slot != 0 {
-		t.Skipf("the device took slot %d; this host already holds slot 0", ns.HostRoute().Slot)
+		slotZeroTaken(t, own, ns.HostRoute().Slot)
 	}
 	rules := ipRules(t)
 	if strings.Contains(rules, fmt.Sprintf("fwmark %#x", dead)) {
@@ -1262,6 +1263,7 @@ func TestALateReapNeverTakesALiveContainmentsAddressRules(t *testing.T) {
 	if err := secureDir(containState); err != nil {
 		t.Fatal(err)
 	}
+	own := needSlotZero(t)
 	// The record a device of this agent left when its command was killed, on slot 0, held for now by
 	// another command that is reaping it.
 	path := devRecordPath(1)
@@ -1281,7 +1283,7 @@ func TestALateReapNeverTakesALiveContainmentsAddressRules(t *testing.T) {
 	hr := ns.HostRoute()
 	if hr.Slot != 0 {
 		other.Close()
-		t.Skipf("the device took slot %d; this host already holds slot 0", hr.Slot)
+		slotZeroTaken(t, own, hr.Slot)
 	}
 	other.Close() // the other reaper gives way, and this one reaps late
 	reapDeadDevices()

@@ -1577,9 +1577,10 @@ func TestANewDeviceLeavesTheHostsOwnRulesAtItsSlot(t *testing.T) {
 			})
 		}
 	})
+	own := needSlotZero(t)
 	ns, _ := hostTUNAs(t, tSelf3)
 	if ns.HostRoute().Slot != 0 {
-		t.Skipf("the device took slot %d; this host already holds slot 0", ns.HostRoute().Slot)
+		slotZeroTaken(t, own, ns.HostRoute().Slot)
 	}
 	v4, _ := exec.Command("ip", "-4", "rule", "show").CombinedOutput()
 	v6 := ipRules(t)

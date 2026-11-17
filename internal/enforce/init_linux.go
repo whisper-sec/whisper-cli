@@ -11,14 +11,12 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net"
 	"net/netip"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +30,9 @@ import (
 // agent exists:
 //
 //   - prove it is where it should be: pid 1, in the agent's network namespace and not the
-//     host's, with exactly loopback and the tunnel interface. If not, it refuses (exit 125).
+//     host's, with loopback, the tunnel interface and nothing else but the idle fallback
+//     devices a host's tunnel modules put in every namespace (links_linux.go). If not, it
+//     refuses (exit 125), naming each interface and why.
 //   - make every mount private, so nothing below propagates back to the host.
 //   - a fresh /proc for the new PID namespace, so no host process is visible to signal,
 //     ptrace or borrow a network from.
@@ -137,28 +137,39 @@ func runInit() (int, error) {
 }
 
 // checkPlace refuses to go on anywhere but the agent's network namespace.
-func checkPlace(s Spec) error {
-	if os.Getpid() != 1 {
+func checkPlace(s Spec) error { return checkPlaceWith(s, livePlace) }
+
+// placeProbe is how checkPlace reads where it is: its pid, its network namespace's inode and that
+// namespace's links. Tests hand it a fake, so the rule it applies is held to without root.
+type placeProbe struct {
+	pid   func() int
+	inode func() (uint64, error)
+	links func() (linkView, error)
+}
+
+var livePlace = placeProbe{
+	pid:   os.Getpid,
+	inode: nsInode,
+	links: func() (linkView, error) { return readLinkView("lo", IfName) },
+}
+
+func checkPlaceWith(s Spec, p placeProbe) error {
+	if p.pid() != 1 {
 		return errors.New("init is not pid 1 of its own PID namespace")
 	}
-	ino, err := nsInode()
+	ino, err := p.inode()
 	if err != nil {
 		return errors.New("cannot read this process's network namespace")
 	}
 	if ino != s.NetInode || ino == s.HostInode {
 		return errors.New("not inside the agent's network namespace")
 	}
-	ifs, err := net.Interfaces()
+	v, err := p.links()
 	if err != nil {
-		return errors.New("cannot list the namespace's interfaces")
+		return fmt.Errorf("cannot read the namespace's interfaces: %w", err)
 	}
-	var names []string
-	for _, i := range ifs {
-		names = append(names, i.Name)
-	}
-	sort.Strings(names)
-	if strings.Join(names, ",") != "lo,"+IfName {
-		return fmt.Errorf("the namespace holds unexpected interfaces (%s)", strings.Join(names, ", "))
+	if err := agentPlaceError(v); err != nil {
+		return err
 	}
 	if s.UID == 0 {
 		return errors.New("the agent would run as root, which could leave the namespace")

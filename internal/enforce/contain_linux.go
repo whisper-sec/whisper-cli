@@ -68,8 +68,8 @@ type Containment struct {
 	origin    map[int]string
 	gate      *ebpf.Program
 	mark      *ebpf.Program
-	adopted   []uint32     // generations of killed containments of this agent whose gates it took over
-	isolated  map[int]bool // members in a loopback-only network namespace: nothing of theirs leaves the host
+	adopted   []uint32       // generations of killed containments of this agent whose gates it took over
+	isolated  map[int]uint64 // members in a loopback-only network namespace, by the namespace's inode as judged: nothing of theirs leaves the host
 	touched   []touchedSock
 	route     HostRoute
 	statePath string
@@ -321,7 +321,7 @@ func Contain(pid int, self netip.Addr, route HostRoute, logf func(string, ...any
 	}
 	mi, _ := os.ReadFile(mountinfoPath)
 	root, _ := cgroup2Mount(string(mi))
-	c := &Containment{Pid: pid, self: self, root: root, route: route, origin: map[int]string{}, isolated: map[int]bool{},
+	c := &Containment{Pid: pid, self: self, root: root, route: route, origin: map[int]string{}, isolated: map[int]uint64{},
 		dir: filepath.Join(root, ContainParent, containCgroupName(self))}
 	c.statePath = filepath.Join(containState, containCgroupName(self)+".json")
 	if err := c.makeCgroup(); err != nil {
@@ -703,8 +703,8 @@ func (c *Containment) checkMembers() error {
 		if !sameNamespace(strconv.Itoa(p), "thread-self", "net") {
 			// A sandboxed child (a browser's renderer) in a namespace that holds only loopback has no
 			// way off the host at all, and nothing of it needs containing.
-			if loopbackOnly(p) {
-				c.isolated[p] = true
+			if ino, ok := loopbackOnlyNS(p); ok {
+				c.isolated[p] = ino
 				continue
 			}
 			return containErr("pid %d (%s), in pid %d's tree, is in another network namespace that reaches past loopback, "+
@@ -714,28 +714,76 @@ func (c *Containment) checkMembers() error {
 	return nil
 }
 
-// loopbackOnly reports whether pid's network namespace has no interface but loopback.
+// loopbackOnly reports whether pid's network namespace reaches nothing past loopback: it holds the loopback
+// device and nothing else but the idle fallback devices a host's tunnel modules put in every namespace
+// (links_linux.go). /proc/<pid>/net/dev can only refuse, for any name but lo and a fallback device's; the answer
+// comes from the namespace itself, entered and read over rtnetlink, and only when it lists the same links. A
+// namespace that cannot be entered or read is not counted.
+//
+// The rule's conditions hold at the moment of the check. A sandbox that owns its namespace through its own user
+// namespace can bring a fallback device up, address it or rename it afterwards, but that device still reaches nothing
+// off the host: it cannot be moved out of the namespace, and what it encapsulates over is the namespace it was made
+// in, which holds loopback and these devices only. That rests on what the device is, which no later change alters,
+// not on the state the check saw.
 func loopbackOnly(pid int) bool {
-	b, err := os.ReadFile(filepath.Join(procRoot, strconv.Itoa(pid), "net", "dev"))
+	_, ok := loopbackOnlyNS(pid)
+	return ok
+}
+
+// loopbackOnlyNS is loopbackOnly that also gives the inode of the namespace it judged.
+func loopbackOnlyNS(pid int) (uint64, bool) {
+	dir := filepath.Join(procRoot, strconv.Itoa(pid))
+	nsPath := filepath.Join(dir, "ns", "net")
+	var ns unix.Stat_t
+	if unix.Stat(nsPath, &ns) != nil {
+		return 0, false
+	}
+	b, err := os.ReadFile(filepath.Join(dir, "net", "dev"))
 	if err != nil {
-		return false
+		return 0, false
 	}
-	ifs := 0
-	for _, line := range strings.Split(string(b), "\n") {
+	names, ok := devNames(string(b))
+	if !ok {
+		return 0, false
+	}
+	for _, name := range names {
+		if name != "lo" && !isFallbackName(name) {
+			return 0, false
+		}
+	}
+	v, err := readNamespaceLinks(nsPath, ns)
+	if err != nil || !v.loopbackOnlyView() || len(v.links) != len(names) {
+		return 0, false
+	}
+	for _, name := range names {
+		if _, ok := v.byName(name); !ok {
+			return 0, false
+		}
+	}
+	return ns.Ino, true
+}
+
+// readNamespaceLinks reads another namespace's links; tests that fake /proc fake it too.
+var readNamespaceLinks = readLinkViewIn
+
+// devNames lists the interface names of a /proc/<pid>/net/dev: every line after the two header lines, up to its
+// first colon, which no interface name can hold. It is false when the file is not that shape. A name may hold a
+// '|' (only '/', ':' and whitespace are refused), so the header lines are told apart by where they are.
+func devNames(dev string) ([]string, bool) {
+	lines := strings.Split(strings.TrimRight(dev, "\n"), "\n")
+	if len(lines) < 2 || !strings.Contains(lines[0], "|") || !strings.Contains(lines[1], "|") {
+		return nil, false
+	}
+	var names []string
+	for _, line := range lines[2:] {
 		name, _, ok := strings.Cut(line, ":")
-		if !ok {
-			continue
+		if name = strings.TrimSpace(name); !ok || name == "" {
+			return nil, false
 		}
-		name = strings.TrimSpace(name)
-		if strings.Contains(name, "|") || name == "" {
-			continue // the two header lines
-		}
-		if name != "lo" {
-			return false
-		}
-		ifs++
+		names = append(names, name)
 	}
-	return ifs > 0
+	sort.Strings(names)
+	return names, true
 }
 
 // sockRef is one descriptor in a member's descriptor table: tid names the table (the process's
@@ -979,12 +1027,11 @@ func (c *Containment) sockets() error {
 	// The namespaces of members that hold nothing but loopback: a socket made in one of them has no
 	// way off the host. A socket made in any other namespace (a container's, with its own route out)
 	// is refused.
+	// Each by the inode its check judged, never a fresh look at the pid, which a member killed from outside and
+	// its pid reused would point at a newcomer's namespace.
 	sealedNets := map[uint64]bool{}
-	for p := range c.isolated {
-		var st unix.Stat_t
-		if unix.Stat(filepath.Join(procRoot, strconv.Itoa(p), "ns", "net"), &st) == nil {
-			sealedNets[st.Ino] = true
-		}
+	for _, ino := range c.isolated {
+		sealedNets[ino] = true
 	}
 	socks, rings, ringless := tableSockets(swept)
 	hostOwn := map[netip.Addr]bool{}

@@ -1258,9 +1258,12 @@ func TestAFloodCannotProveACheckThatHoldsNothing(t *testing.T) {
 	}
 }
 
-// The verifier refusing the program (here, a read past the end of struct net_device, as a misread layout would
-// give) is said as a fault of this release, though the kernel answers EACCES, which a security module's refusal
-// gives too.
+// The verifier refusing the program (here, a read at a negative offset from struct net_device, as a misread layout
+// could give) is said as a fault of this release, though the kernel answers EACCES, which a security module's
+// refusal gives too. The control is a read BEFORE the struct because every kernel refuses that one ("invalid
+// negative access"). A read past its end is no refusal on a newer kernel: struct net_device ends in a flexible
+// u8 priv[] array, and once the verifier lets a program read a flexible array of integers (7.0 does) a read at
+// any offset past the struct is read from priv as a scalar. Measured: offset 30000 refused on 6.8 and loaded on 7.0.
 func TestAVerifierRefusalIsAFaultOfThisRelease(t *testing.T) {
 	needRoot(t)
 	if features.HaveProgramType(ebpf.Netfilter) != nil {
@@ -1275,11 +1278,11 @@ func TestAVerifierRefusalIsAFaultOfThisRelease(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer m.Close()
-	o.ifindex = 30000
+	o.ifindex = -8
 	p, err := ebpf.NewProgram(nfSourceSpec(tSelf5, 7, 1, 0, o, m.FD()))
 	if err == nil {
 		p.Close()
-		t.Fatal("control: the kernel took a read past the end of struct net_device")
+		t.Fatal("control: the kernel took a read at a negative offset from struct net_device")
 	}
 	if u := refusedLoad(err); !strings.Contains(u.why, "a fault of this release") || u.remedy != "a report of it, please" {
 		t.Fatalf("the verifier's refusal (%v) said as %+v", firstLine(err), u)

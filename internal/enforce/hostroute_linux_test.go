@@ -221,16 +221,25 @@ func TestPreflightRefusesAProcessWhoseMainThreadExited(t *testing.T) {
 	refusal(t, Preflight(4242), "main thread has exited")
 }
 
-// A namespace holding only loopback (a browser's sandboxed child) has no way off the host.
+// A namespace holding only loopback (a browser's sandboxed child) has no way off the host. The answer is the
+// namespace's own (links_linux_test.go holds loopbackOnly to it); here /proc refuses what it can on its own.
 func TestLoopbackOnlyNamespacesAreToldApart(t *testing.T) {
 	proc := withFakeHost(t, 0, v2mount)
+	fakeNamespaceLinks(t, func(string) (linkView, error) {
+		return viewOf(t, linkIn(binary.NativeEndian, 1, "lo", "", unix.IFF_UP|unix.IFF_LOOPBACK, false)), nil
+	})
 	head := "Inter-|   Receive                                                |  Transmit\n face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed\n"
 	write := func(pid, body string) {
-		d := filepath.Join(proc, pid, "net")
-		if err := os.MkdirAll(d, 0o700); err != nil {
+		d := filepath.Join(proc, pid)
+		for _, sub := range []string{"net", "ns"} {
+			if err := os.MkdirAll(filepath.Join(d, sub), 0o700); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.WriteFile(filepath.Join(d, "net", "dev"), []byte(head+body), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(d, "dev"), []byte(head+body), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(d, "ns", "net"), nil, 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}

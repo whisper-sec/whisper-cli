@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -506,8 +507,17 @@ func (k *ruleKeeper) lookLocked(told bool) (msgs []string) {
 	return msgs
 }
 
-// keepDump is how the keeper reads the rules; a test stands in a dump the kernel did not finish.
-var keepDump = dumpRulesErr
+// keepDumpHook is how the keeper reads the rules when it is set: a test stands in a dump the kernel did not
+// finish. The test sets it while a keeper is already running, so it is read and set atomically.
+var keepDumpHook atomic.Pointer[func(fam uint8) ([]ruleInfo, error)]
+
+// keepDump is how the keeper reads the rules: dumpRulesErr, or a test's stand-in.
+func keepDump(fam uint8) ([]ruleInfo, error) {
+	if f := keepDumpHook.Load(); f != nil {
+		return (*f)(fam)
+	}
+	return dumpRulesErr(fam)
+}
 
 // read dumps both families and compares them with the containment's rules.
 func (k *ruleKeeper) read() (keepWork, []ruleInfo, error) {

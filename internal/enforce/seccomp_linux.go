@@ -32,8 +32,10 @@ import (
 //
 // With mode "strict" it also refuses new user namespaces: unshare or clone with CLONE_NEWUSER -> EPERM,
 // and clone3 -> ENOSYS (its flags live behind a pointer BPF cannot read; glibc and Go then fall back to
-// clone, whose flags it can). A nested user namespace is not a way out today, since its only network
-// is loopback, so this only narrows the kernel surface the agent can reach.
+// clone, whose flags it can). A nested user namespace is not a way out today: a namespace the agent
+// makes in it holds loopback and, on a host with tunnel modules loaded, their fallback devices,
+// which are tied to that namespace (links_linux.go), so this only narrows the kernel surface the
+// agent can reach.
 const (
 	SeccompDefault = "default"
 	SeccompStrict  = "strict"

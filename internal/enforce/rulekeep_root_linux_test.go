@@ -776,14 +776,14 @@ func TestADeletionTheKeeperCannotReadIsRefusedAndRetried(t *testing.T) {
 	waitWhole(t, hr, tSelf5, 2*time.Second)
 	var fails atomic.Int32
 	fails.Store(4) // the next looks' dumps fail, four of them
-	old := keepDump
-	keepDump = func(fam uint8) ([]ruleInfo, error) {
+	standIn := func(fam uint8) ([]ruleInfo, error) {
 		if fails.Add(-1) >= 0 {
 			return nil, errors.New("dump interrupted")
 		}
-		return old(fam)
+		return dumpRulesErr(fam)
 	}
-	t.Cleanup(func() { keepDump = old })
+	keepDumpHook.Store(&standIn)
+	t.Cleanup(func() { keepDumpHook.Store(nil) })
 	var quit atomic.Bool
 	churned := make(chan struct{})
 	go func() { // somebody else's rule, added and deleted every 50 ms
@@ -897,14 +897,14 @@ func TestTheKeepersPeriodIsADeadlineThatChurnNeverPutsOff(t *testing.T) {
 	}
 	var fails atomic.Int32
 	fails.Store(1) // its first look's dump fails, so it knows nothing yet
-	old := keepDump
-	keepDump = func(fam uint8) ([]ruleInfo, error) {
+	standIn := func(fam uint8) ([]ruleInfo, error) {
 		if fails.Add(-1) >= 0 {
 			return nil, errors.New("dump interrupted")
 		}
-		return old(fam)
+		return dumpRulesErr(fam)
 	}
-	t.Cleanup(func() { keepDump = old })
+	keepDumpHook.Store(&standIn)
+	t.Cleanup(func() { keepDumpHook.Store(nil) })
 	var quit atomic.Bool
 	churned := make(chan struct{})
 	go func() { // somebody else's rule, added and deleted every 50 ms

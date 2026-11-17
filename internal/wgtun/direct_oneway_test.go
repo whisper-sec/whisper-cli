@@ -333,6 +333,119 @@ func countersOf(tun *Tunnel, peerHex string) (tx, rx uint64) {
 	return tx, rx
 }
 
+// silence is a stretch with nothing heard, as these tests simulate it: each end's device read once, and the
+// instant of the pass the stretch starts from. A pass at a future instant made from a read of its own would
+// count everything that reached the device since the end's last pass (the keepalive the far end sends as it
+// promotes, a crossed handshake that completes late, both slow under -race) as heard at that instant, and keep
+// the path the test meant to be silent. So the reads are taken once, every end first, and every pass of the
+// stretch is made from them.
+type silence struct {
+	last    time.Time
+	tuns    []*Tunnel
+	reads   []deviceRead
+	early   []string // the direct paths the catch-up pass itself withdrew, for withdrewEarly
+	settled []bool   // per end: its catch-up pass withdrew a path, so its read is older than its own write
+}
+
+// silenceFrom starts a silence at last, the instant of these ends' last pass. It reads every end's device,
+// then passes each at last from its read, which takes in whatever arrived since that pass as heard just after
+// it, as the monitor's next pass would have. The instant is the test's, so how long the test took to get here
+// never moves a decision. It fails only when a device cannot be read, and never ends the test, so a helper
+// goroutine may use it.
+func silenceFrom(last time.Time, tuns ...*Tunnel) (*silence, error) {
+	s := &silence{last: last, tuns: tuns}
+	for _, tun := range tuns {
+		read, ok := tun.readPeers()
+		if !ok {
+			return nil, errors.New("could not read a device")
+		}
+		s.reads = append(s.reads, read)
+	}
+	s.settled = make([]bool, len(tuns))
+	for i, tun := range tuns {
+		before := promotedPeers(tun)
+		tun.directPass(last, s.reads[i])
+		after := promotedPeers(tun)
+		for key, addr := range before {
+			if _, still := after[key]; !still {
+				s.early = append(s.early, addr.String())
+				s.settled[i] = true
+			}
+		}
+	}
+	return s, nil
+}
+
+// withdrewEarly is an error when the catch-up pass at last already withdrew a path an end routed directly:
+// the stretch of silence is then not what withdrew it, and an instant measured from its end is wrong.
+func (s *silence) withdrewEarly() error {
+	if len(s.early) > 0 {
+		return fmt.Errorf("the pass at the start of the silence already withdrew %v", s.early)
+	}
+	return nil
+}
+
+// after is the pass gap after last on every end, from the same reads, which hold nothing the first pass did
+// not see: the end of gap with nothing heard. An end whose catch-up pass already withdrew a path is left as it
+// is: its read predates that withdrawal's write, and the monitor never decides from a read older than its own
+// last write. It returns last+gap.
+func (s *silence) after(gap time.Duration) time.Time {
+	at := s.last.Add(gap)
+	for i, tun := range s.tuns {
+		if !s.settled[i] {
+			tun.directPass(at, s.reads[i])
+		}
+	}
+	return at
+}
+
+// afterSilence is a silence of gap from last on the given ends, every one of them still direct when it
+// starts. It returns last+gap.
+func afterSilence(last time.Time, gap time.Duration, tuns ...*Tunnel) (time.Time, error) {
+	s, err := silenceFrom(last, tuns...)
+	if err != nil {
+		return time.Time{}, err
+	}
+	if err := s.withdrewEarly(); err != nil {
+		return time.Time{}, err
+	}
+	return s.after(gap), nil
+}
+
+// promotedPeers is the far address of every peer tun routes directly, by key.
+func promotedPeers(tun *Tunnel) map[string]netip.Addr {
+	tun.mu.Lock()
+	defer tun.mu.Unlock()
+	out := map[string]netip.Addr{}
+	for key, d := range tun.direct {
+		if d.promoted {
+			out[key] = d.peer.Address
+		}
+	}
+	return out
+}
+
+// heardAfterLastPass sends one datagram from from's tunnel at to's /128, over the direct path both ends
+// route, and waits until to's device has counted more bytes from from than before: bytes that reach an end
+// after its last pass, which is what a keepalive sent at a promotion does when it is slow to arrive. Nothing
+// listens on the port; the device counts the datagram all the same, and the far netstack's answer that the
+// port is closed comes back the same way.
+func heardAfterLastPass(t *testing.T, from, to *natNode) {
+	t.Helper()
+	_, before := countersOf(to.tun, from.pubHex)
+	c, err := from.tun.tnet.DialUDPAddrPort(netip.AddrPortFrom(from.addr, 0), netip.AddrPortFrom(to.addr, 9))
+	if err != nil {
+		t.Fatalf("dial %s from %s: %v", to.addr, from.addr, err)
+	}
+	defer c.Close()
+	if _, err := c.Write([]byte{0}); err != nil {
+		t.Fatalf("send at %s: %v", to.addr, err)
+	}
+	if !waitFor(exchangeWithin, func() bool { _, rx := countersOf(to.tun, from.pubHex); return rx > before }) {
+		t.Fatalf("%s never counted the datagram from %s", to.addr, from.addr)
+	}
+}
+
 // heavyPairs bounds how many of this file's running pairs run at once. Each is two tunnels and a box under
 // the race detector, which slows the netstack about a thousandfold; eight at once, beside the other
 // packages' test binaries that go test ./... runs alongside, starved exchanges past thirty seconds on an
@@ -984,9 +1097,15 @@ func TestOneWay_AHandshakeInsideTheHoldPromotesAtOnce(t *testing.T) {
 	b.tun.directDead = time.Hour
 	b.tun.mu.Unlock()
 	a.nat.cutFrom(b.endpoint(t)) // a stops hearing b
-	pump(time.Now())             // whatever arrived before the cut is counted here, not as evidence after it
+	// Whatever arrived before the cut is counted at the first pass, not as evidence after it: both passes are
+	// made from one read, so a packet b sent just before the cut and counted between two reads cannot read as
+	// heard at the second.
+	quiet, err := silenceFrom(time.Now(), a.tun)
+	if err != nil {
+		t.Fatal(err)
+	}
 	time.Sleep(1500 * time.Millisecond)
-	pump(time.Now())
+	quiet.after(1500 * time.Millisecond)
 	if a.tun.PathTo(b.addr) != "relayed" {
 		t.Fatalf("a did not withdraw a path it stopped hearing: %+v", a.tun.DirectPeers())
 	}
@@ -1038,7 +1157,9 @@ func TestOneWay_AfterACutBothWaysTheOpenerRestartsFirst(t *testing.T) {
 		return o
 	}
 	p := startSharedPairDelayed(t, idle, 300*time.Millisecond)
+	var lastPass time.Time
 	pass := func(now time.Time) {
+		lastPass = now
 		for _, n := range []*natNode{p.a, p.b} {
 			read, ok := n.tun.readPeers()
 			if !ok {
@@ -1058,13 +1179,29 @@ func TestOneWay_AfterACutBothWaysTheOpenerRestartsFirst(t *testing.T) {
 		t.Fatalf("the pair never went direct: %s", p.devices(t))
 	}
 
-	// Cut both ways; one pass on each end an hour on, with nothing heard: both withdraw in that instant.
+	// Each end hears the other after its last pass. Cut both ways; then an hour of silence on both ends from
+	// that pass: both withdraw in that instant.
+	heardAfterLastPass(t, p.a, p.b)
+	heardAfterLastPass(t, p.b, p.a)
+	p.notesMu.Lock()
+	before := len(p.notes)
+	p.notesMu.Unlock()
 	p.a.nat.cutFrom(p.b.endpoint(t))
 	p.b.nat.cutFrom(p.a.endpoint(t))
-	withdrawn := time.Now().Add(time.Hour)
-	pass(withdrawn)
+	if _, err := afterSilence(lastPass, time.Hour, p.a.tun, p.b.tun); err != nil {
+		t.Fatal(err)
+	}
 	if !waitFor(2*time.Second, func() bool { return p.relayedEverywhere(t) }) {
 		t.Fatalf("the two ends did not both withdraw: %s", p.devices(t))
+	}
+	// On the silence, not on the backstop: a pass an hour on that still counted the bytes heard before the cut
+	// would read the path as live and withdraw it only because no handshake completed in that hour.
+	p.notesMu.Lock()
+	said := strings.Join(p.notes[before:], "\n")
+	p.notesMu.Unlock()
+	if strings.Contains(said, "completed no handshake") ||
+		strings.Count(said, "stopped answering - falling back to the relay") != 2 {
+		t.Fatalf("the two ends did not withdraw on the silence:\n%s", said)
 	}
 	p.a.nat.healFrom(p.b.endpoint(t))
 	p.b.nat.healFrom(p.a.endpoint(t))
@@ -1108,7 +1245,9 @@ func TestOneWay_AShortLivedPathWaitsForItsWindowItDoesNotGiveUp(t *testing.T) {
 		return o
 	}
 	p := startSharedPairWith(t, idle)
+	var lastPass time.Time
 	pass := func(now time.Time) {
+		lastPass = now
 		for _, n := range []*natNode{p.a, p.b} {
 			read, ok := n.tun.readPeers()
 			if !ok {
@@ -1129,11 +1268,18 @@ func TestOneWay_AShortLivedPathWaitsForItsWindowItDoesNotGiveUp(t *testing.T) {
 		t.Fatalf("the pair never went direct: %s", p.devices(t))
 	}
 
-	// Cut both ways; one pass on each end thirty seconds on: past the dead-path window, well inside a rekey
-	// of the promotion and inside directRearmAfter of the untimed train, so both rows go back to the window.
+	// Each end hears the other after its last pass, as when the keepalive the far end sent at its promotion
+	// is still on its way at that pass. Cut both ways; then thirty seconds of silence on each end from that
+	// pass: past the dead-path window, well inside a rekey of the promotion and inside directRearmAfter of the
+	// untimed train, so both rows go back to the window. What was heard before the cut is heard before the
+	// silence, and the silence runs on the test's clock, so a slow run cannot stretch it.
+	heardAfterLastPass(t, p.a, p.b)
+	heardAfterLastPass(t, p.b, p.a)
 	p.a.nat.cutFrom(p.b.endpoint(t))
 	p.b.nat.cutFrom(p.a.endpoint(t))
-	pass(time.Now().Add(30 * time.Second))
+	if _, err := afterSilence(lastPass, 30*time.Second, p.a.tun, p.b.tun); err != nil {
+		t.Fatal(err)
+	}
 	if !waitFor(2*time.Second, func() bool { return p.relayedEverywhere(t) }) {
 		t.Fatalf("the two ends did not both withdraw: %s", p.devices(t))
 	}
@@ -1448,8 +1594,10 @@ func TestOneWay_TheQuietHoldSurvivesAReArmAndAReinstall(t *testing.T) {
 	}
 
 	// An hour with nothing from b: a withdraws, and its hold runs from that pass's clock.
-	withdrawnAt := time.Now().Add(time.Hour)
-	pump(withdrawnAt)
+	withdrawnAt, err := afterSilence(time.Now(), time.Hour, a.tun)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if a.tun.PathTo(b.addr) != "relayed" {
 		t.Fatalf("a did not withdraw: %+v", a.tun.DirectPeers())
 	}

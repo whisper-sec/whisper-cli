@@ -757,24 +757,8 @@ func hostTunnels() ([]string, error) {
 // linkInfo reads a link's name (IFLA_IFNAME), kind (IFLA_LINKINFO > IFLA_INFO_KIND) and whether it is up from one
 // RTM_NEWLINK payload; what it cannot read comes back empty.
 func linkInfo(data []byte) (name, kind string, up bool) {
-	const hdr = unix.SizeofIfInfomsg
-	if len(data) < hdr {
-		return "", "", false
-	}
-	up = (*unix.IfInfomsg)(unsafe.Pointer(&data[0])).Flags&unix.IFF_UP != 0
-	eachAttr(data[hdr:], func(typ uint16, val []byte) {
-		switch typ {
-		case unix.IFLA_IFNAME:
-			name = cString(val)
-		case unix.IFLA_LINKINFO:
-			eachAttr(val, func(t uint16, v []byte) {
-				if t == unix.IFLA_INFO_KIND {
-					kind = cString(v)
-				}
-			})
-		}
-	})
-	return name, kind, up
+	l, _ := parseLink(data, binary.NativeEndian)
+	return l.name, l.kind, l.up
 }
 
 // hostHasOwnGlobalV6 reports whether the host holds a global IPv6 address of its own, on a device that is not a
@@ -812,19 +796,6 @@ func hostHasOwnGlobalV6() (bool, error) {
 		}
 	})
 	return found, err
-}
-
-// eachAttr calls fn for each well-formed netlink attribute in b, its type without the nested and byte-order
-// flags, and stops at the first one that runs past the end.
-func eachAttr(b []byte, fn func(typ uint16, val []byte)) {
-	for off := 0; off+unix.SizeofRtAttr <= len(b); {
-		l := int(binary.NativeEndian.Uint16(b[off:]))
-		if l < unix.SizeofRtAttr || off+l > len(b) {
-			return
-		}
-		fn(binary.NativeEndian.Uint16(b[off+2:])&^(unix.NLA_F_NESTED|unix.NLA_F_NET_BYTEORDER), b[off+unix.SizeofRtAttr:off+l])
-		off += (l + unix.RTA_ALIGNTO - 1) &^ (unix.RTA_ALIGNTO - 1)
-	}
 }
 
 func cString(b []byte) string {

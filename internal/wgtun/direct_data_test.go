@@ -537,6 +537,17 @@ func TestDirectData_TheRecordLeadsTheDeviceWhenARouteIsTakenAway(t *testing.T) {
 				t.Fatalf("never went direct: %+v", a.tun.DirectPeers())
 			}
 
+			// The demotion is an hour with nothing from the peer, from one read taken before the publisher is held:
+			// a pass at the hour from a read of its own would count what arrived since the last pump (a keepalive,
+			// a crossed handshake completing late) as heard then and keep the path. The catch-up pass publishes at
+			// its end, so it is made now, and only the pass at the hour runs with the publisher held.
+			quiet, err := silenceFrom(time.Now(), a.tun)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := quiet.withdrewEarly(); err != nil {
+				t.Fatal(err)
+			}
 			a.tun.pubMu.Lock()
 			released := false
 			release := func() {
@@ -550,7 +561,7 @@ func TestDirectData_TheRecordLeadsTheDeviceWhenARouteIsTakenAway(t *testing.T) {
 			go func() {
 				defer close(done)
 				if how == "a demotion" {
-					pump(time.Now().Add(time.Hour)) // an hour with nothing from the peer: dead
+					quiet.after(time.Hour) // an hour with nothing from the peer: dead
 				} else {
 					_ = a.tun.SetDirectPeers(nil)
 				}

@@ -34,6 +34,11 @@ var nlSeq atomic.Uint32
 
 type rtnl struct{ fd int }
 
+// openRTNL opens a routing socket in the calling thread's namespace, connected to the kernel. A
+// connected netlink socket takes unicast from its peer alone, so a process that holds CAP_NET_ADMIN
+// over the namespace (the owner of a sandbox's user namespace, when this socket was opened inside
+// it) cannot queue answers of its own in front of the kernel's; and every answer read is checked
+// to come from the kernel all the same.
 func openRTNL() (*rtnl, error) {
 	fd, err := unix.Socket(unix.AF_NETLINK, unix.SOCK_RAW|unix.SOCK_CLOEXEC, unix.NETLINK_ROUTE)
 	if err != nil {
@@ -43,7 +48,17 @@ func openRTNL() (*rtnl, error) {
 		unix.Close(fd)
 		return nil, fmt.Errorf("netlink bind: %w", err)
 	}
+	if err := unix.Connect(fd, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
+		unix.Close(fd)
+		return nil, fmt.Errorf("netlink connect: %w", err)
+	}
 	return &rtnl{fd: fd}, nil
+}
+
+// fromKernel reports whether a datagram came from the kernel (netlink port 0).
+func fromKernel(from unix.Sockaddr) bool {
+	sa, ok := from.(*unix.SockaddrNetlink)
+	return ok && sa.Pid == 0
 }
 
 func (r *rtnl) close() { unix.Close(r.fd) }
@@ -62,12 +77,15 @@ func (r *rtnl) do(typ, flags uint16, body []byte) error {
 	}
 	buf := make([]byte, 8192)
 	for {
-		n, _, err := unix.Recvfrom(r.fd, buf, 0)
+		n, from, err := unix.Recvfrom(r.fd, buf, 0)
 		if err != nil {
 			if errors.Is(err, unix.EINTR) {
 				continue
 			}
 			return err
+		}
+		if !fromKernel(from) {
+			continue
 		}
 		msgs, err := syscall.ParseNetlinkMessage(buf[:n])
 		if err != nil {
@@ -93,6 +111,15 @@ func (r *rtnl) do(typ, flags uint16, body []byte) error {
 // dump sends one NLM_F_DUMP request and hands each answer's payload to each, until the kernel says
 // it is done.
 func (r *rtnl) dump(typ uint16, body []byte, each func(data []byte)) error {
+	_, err := r.dumpAll(typ, body, func(data []byte) error { each(data); return nil })
+	return err
+}
+
+// dumpAll is dump that also says whether the kernel marked any answer NLM_F_DUMP_INTR: the table
+// changed while it was being dumped, so the answers may not be one consistent view of it. A dump
+// that ends with an error, in an NLMSG_ERROR or in its NLMSG_DONE, answers that error, and so does
+// each: an error from it stops the read at once, and closing the socket drops the rest.
+func (r *rtnl) dumpAll(typ uint16, body []byte, each func(data []byte) error) (interrupted bool, err error) {
 	seq := nlSeq.Add(1)
 	msg := make([]byte, unix.SizeofNlMsghdr+len(body))
 	binary.NativeEndian.PutUint32(msg[0:4], uint32(len(msg)))
@@ -101,39 +128,98 @@ func (r *rtnl) dump(typ uint16, body []byte, each func(data []byte)) error {
 	binary.NativeEndian.PutUint32(msg[8:12], seq)
 	copy(msg[unix.SizeofNlMsghdr:], body)
 	if err := unix.Sendto(r.fd, msg, 0, &unix.SockaddrNetlink{Family: unix.AF_NETLINK}); err != nil {
-		return err
+		return false, err
 	}
 	buf := make([]byte, 1<<16)
 	for {
-		n, _, err := unix.Recvfrom(r.fd, buf, 0)
+		n, from, err := unix.Recvfrom(r.fd, buf, 0)
 		if err != nil {
 			if errors.Is(err, unix.EINTR) {
 				continue
 			}
-			return err
+			return interrupted, err
 		}
-		msgs, err := syscall.ParseNetlinkMessage(buf[:n])
-		if err != nil {
-			return err
+		if !fromKernel(from) {
+			continue
 		}
-		for _, m := range msgs {
-			if m.Header.Seq != seq {
-				continue
-			}
-			switch m.Header.Type {
-			case syscall.NLMSG_DONE:
-				return nil
-			case syscall.NLMSG_ERROR:
-				if len(m.Data) >= 4 {
-					if code := int32(binary.NativeEndian.Uint32(m.Data[0:4])); code != 0 {
-						return unix.Errno(-code)
-					}
-				}
-				return nil
-			}
-			each(m.Data)
+		done, intr, err := dumpDatagram(buf[:n], seq, typ&^3, each)
+		interrupted = interrupted || intr
+		if err != nil || done {
+			return interrupted, err
 		}
 	}
+}
+
+// dumpDatagram reads one datagram of the answers to the dump request seq, whose answers are of type
+// want (the request's RTM_NEW* type). It hands each answer's payload to each and says whether the
+// dump is done and whether the kernel marked any answer NLM_F_DUMP_INTR. A message for another
+// request is skipped. An error the kernel ends the dump with, in an NLMSG_ERROR or in its NLMSG_DONE,
+// is answered as that error; an NLMSG_ERROR too short to say which, an acknowledgement where the end
+// should be, an overrun, a message of any other type, and a datagram that is not whole netlink
+// messages are errors too, so a dump is never taken as complete when it is not. An error from each
+// ends the read with it.
+func dumpDatagram(buf []byte, seq uint32, want uint16, each func(data []byte) error) (done, interrupted bool, err error) {
+	msgs, err := syscall.ParseNetlinkMessage(buf)
+	if err != nil {
+		return false, false, fmt.Errorf("an answer that is not whole netlink messages: %w", err)
+	}
+	for _, m := range msgs {
+		if m.Header.Seq != seq {
+			continue
+		}
+		if m.Header.Flags&unix.NLM_F_DUMP_INTR != 0 {
+			interrupted = true
+		}
+		switch m.Header.Type {
+		case syscall.NLMSG_DONE, syscall.NLMSG_ERROR:
+			if len(m.Data) < 4 {
+				if m.Header.Type == syscall.NLMSG_DONE && len(m.Data) == 0 {
+					return true, interrupted, nil // an end with no status, as kernels before 4.x sent it
+				}
+				return false, interrupted, errors.New("a netlink status too short to read")
+			}
+			if code := int32(binary.NativeEndian.Uint32(m.Data[0:4])); code != 0 {
+				return false, interrupted, unix.Errno(-code)
+			}
+			if m.Header.Type == syscall.NLMSG_ERROR {
+				return false, interrupted, errors.New("the kernel acknowledged a dump instead of ending it")
+			}
+			return true, interrupted, nil
+		case syscall.NLMSG_OVERRUN:
+			return false, interrupted, errors.New("the kernel overran the dump")
+		case syscall.NLMSG_NOOP:
+			continue
+		case want:
+			if err := each(m.Data); err != nil {
+				return false, interrupted, err
+			}
+		default:
+			return false, interrupted, fmt.Errorf("an answer of type %d in a dump of type %d", m.Header.Type, want)
+		}
+	}
+	return false, interrupted, nil
+}
+
+// nlaTypeMask is an attribute's type without the nested and byte-order flags.
+const nlaTypeMask = ^uint16(unix.NLA_F_NESTED | unix.NLA_F_NET_BYTEORDER)
+
+// eachAttr calls fn for each well-formed netlink attribute in b, its type without the nested and byte-order
+// flags, and stops at the first one that runs past the end.
+func eachAttr(b []byte, fn func(typ uint16, val []byte)) { eachAttrIn(b, binary.NativeEndian, fn) }
+
+// eachAttrIn is eachAttr in byte order bo, which also says whether b was attributes and nothing else: false
+// when one runs past the end or is shorter than its own header, or bytes are left over that cannot be one.
+func eachAttrIn(b []byte, bo binary.ByteOrder, fn func(typ uint16, val []byte)) bool {
+	off := 0
+	for off+unix.SizeofRtAttr <= len(b) {
+		l := int(bo.Uint16(b[off:]))
+		if l < unix.SizeofRtAttr || off+l > len(b) {
+			return false
+		}
+		fn(bo.Uint16(b[off+2:])&nlaTypeMask, b[off+unix.SizeofRtAttr:off+l])
+		off += (l + unix.RTA_ALIGNTO - 1) &^ (unix.RTA_ALIGNTO - 1)
+	}
+	return off >= len(b)
 }
 
 func nlAttr(typ uint16, data []byte) []byte {

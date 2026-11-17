@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -49,6 +50,12 @@ func TestMain(m *testing.M) {
 	if len(os.Args) > 1 && os.Args[1] == ProbeArg {
 		RunProbe()
 	}
+	if len(os.Args) > 1 && os.Args[1] == fallbackProbeArg {
+		fallbackProbe()
+	}
+	if len(os.Args) > 1 && os.Args[1] == sandboxHelperArg {
+		sandboxHelper()
+	}
 	// As root, one run of this package at a time on a host: each test may run in a network namespace
 	// of its own, but the cgroup hierarchy, /run/whisper and the agents' locks are the host's, and two
 	// runs containing the same test agents would see each other's containments. Only the run itself
@@ -56,15 +63,25 @@ func TestMain(m *testing.M) {
 	// the environment, and must not wait for the lock its own parent holds.
 	if os.Geteuid() == 0 && os.Getenv(testsLockedEnv) == "" {
 		if f, err := os.OpenFile("/run/whisper-enforce-tests.lock", os.O_RDWR|os.O_CREATE|syscall.O_CLOEXEC, 0o600); err == nil {
-			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX) // held until the run exits
+			_ = syscall.Flock(int(f.Fd()), syscall.LOCK_EX)
+			// Held until the run exits, which takes a reference that lives as long: an *os.File nothing refers
+			// to is closed by its finalizer at the next collection, and the lock goes with its descriptor (two
+			// runs overlapped that way, and one unloaded the tunnel modules under the other's test).
+			testsLock = f
 			_ = os.Setenv(testsLockedEnv, "1")
+			unloadLeftModules() // what a run killed before its end left loaded
 		}
 	}
-	os.Exit(m.Run())
+	code := m.Run()
+	unloadTestModules() // under the lock still: what this run loaded, and nothing else
+	os.Exit(code)
 }
 
 // testsLockedEnv tells a helper this binary starts that the run already holds the host-wide lock.
 const testsLockedEnv = "WHISPER_ENFORCE_TESTS_LOCKED"
+
+// testsLock is the host-wide lock's file, kept referenced for the whole run.
+var testsLock *os.File
 
 func needRoot(t *testing.T) {
 	t.Helper()
@@ -150,15 +167,28 @@ func dialAsync(t *testing.T, l *liveNS, addr string) chan error {
 	return ch
 }
 
+// The namespace holds loopback, the tunnel interface and whatever a new namespace starts with on this host (on a
+// host with tunnel modules loaded, their idle fallback devices; elsewhere nothing): it adds nothing the kernel did
+// not, and passes the rule init holds it to.
 func TestNamespaceHoldsOnlyLoopbackAndTheTunnel(t *testing.T) {
 	needRoot(t)
 	l := startNS(t)
-	names, err := l.ns.Interfaces()
-	if err != nil {
+	var v linkView
+	if err := l.ns.run(func() (err error) { v, err = readLinkView("lo", IfName); return }); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Join(names, ",") != "lo,"+IfName && strings.Join(names, ",") != IfName+",lo" {
-		t.Fatalf("interfaces %v", names)
+	if err := agentPlaceError(v); err != nil {
+		t.Fatalf("the agent's namespace: %v", err)
+	}
+	var names []string
+	for _, k := range v.links {
+		if k.name != IfName {
+			names = append(names, k.name)
+		}
+	}
+	sort.Strings(names)
+	if fresh := freshNames(t); strings.Join(names, ",") != strings.Join(fresh, ",") {
+		t.Fatalf("the agent's namespace holds %v besides %s; a new namespace here starts with %v", names, IfName, fresh)
 	}
 	if l.ns.Inode == l.ns.HostInode {
 		t.Fatal("the agent's namespace must not be the host's")
