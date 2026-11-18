@@ -92,6 +92,9 @@ func (f dialerFunc) Dial(ctx context.Context, target string) (net.Conn, error) {
 func TestArmSessionAccessGivesOwnClientsTheCredentialOnlyWhenNeeded(t *testing.T) {
 	resetHolderShare(t)
 	p := proxyOver(t)
+	// an ORDINARY holder, whoever runs the suite: run as root, the real self is privileged and
+	// its children carry the credential, which the test below pins on its own
+	stubSelf(t, "u:1000")
 	sess := &egressSession{endpoint: p.Endpoint(), local: p}
 	armSessionAccess(sess)
 	if sess.clientEndpoint != "" || sess.useEndpoint() != p.Endpoint() {

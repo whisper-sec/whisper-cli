@@ -43,10 +43,10 @@ func touchLock(t *testing.T, a netip.Addr) {
 }
 
 // uplink6 is the outside world over IPv6: a namespace on a veth pair, counting the datagrams that reach
-// [fd00:2620::2]:9.
+// [fd00:b::2]:9.
 type uplink6 struct {
 	dst       netip.Addr
-	hostIf    string // the host's end of the veth pair, holding fd00:2620::1/64
+	hostIf    string // the host's end of the veth pair, holding fd00:b::1/64
 	ns        string // the uplink namespace's name, under /run/netns
 	datagrams atomic.Int32
 }
@@ -68,11 +68,11 @@ func startUplink6(t *testing.T) *uplink6 {
 	run("link", "add", hostIf, "type", "veth", "peer", "name", peerIf)
 	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", hostIf).Run() })
 	run("link", "set", peerIf, "netns", name)
-	run("-6", "addr", "add", "fd00:2620::1/64", "dev", hostIf, "nodad")
+	run("-6", "addr", "add", "fd00:b::1/64", "dev", hostIf, "nodad")
 	run("link", "set", hostIf, "up")
-	run("-n", name, "-6", "addr", "add", "fd00:2620::2/64", "dev", peerIf, "nodad")
+	run("-n", name, "-6", "addr", "add", "fd00:b::2/64", "dev", peerIf, "nodad")
 	run("-n", name, "link", "set", peerIf, "up")
-	u := &uplink6{dst: netip.MustParseAddr("fd00:2620::2"), hostIf: hostIf, ns: name}
+	u := &uplink6{dst: netip.MustParseAddr("fd00:b::2"), hostIf: hostIf, ns: name}
 	pcCh := make(chan net.PacketConn, 1)
 	go func() {
 		runtime.LockOSThread() // never unlocked: the thread dies inside the namespace
@@ -87,7 +87,7 @@ func startUplink6(t *testing.T) *uplink6 {
 			pcCh <- nil
 			return
 		}
-		pc, err := net.ListenPacket("udp6", "[fd00:2620::2]:9")
+		pc, err := net.ListenPacket("udp6", "[fd00:b::2]:9")
 		if err != nil {
 			pc = nil
 		}
@@ -111,7 +111,7 @@ func startUplink6(t *testing.T) *uplink6 {
 	}()
 	t.Cleanup(func() { pc.Close(); reader.Wait() })
 	// Control: the host's own address reaches it.
-	c, err := net.Dial("udp6", "[fd00:2620::2]:9")
+	c, err := net.Dial("udp6", "[fd00:b::2]:9")
 	if err != nil {
 		t.Fatalf("control: dial the uplink: %v", err)
 	}
@@ -306,7 +306,7 @@ func TestNetworkdsSweepLeavesALiveContainmentsRules(t *testing.T) {
 	up := startUplink6(t)
 	ns, _ := hostTUNAs(t, tSelf5) // no keeper: the protocol alone has to hold
 	hr := ns.HostRoute()
-	hostsOwn := ruleBodyProhibit(unix.AF_INET6, 4250, netip.MustParseAddr("2001:db8:2620::7"))
+	hostsOwn := ruleBodyProhibit(unix.AF_INET6, 4250, netip.MustParseAddr("2001:db8:b::7"))
 	addRaw(t, hostsOwn)
 	t.Cleanup(func() { _ = delRaw(hostsOwn) })
 	earlier := withProto(ruleBodyProhibit(unix.AF_INET6, hostRulePrio+11, tSelf6), legacyRuleProto)
@@ -629,7 +629,7 @@ func TestAPruneLeavesTheHostsOwnRulesThatLookLikeAContainments(t *testing.T) {
 	needRoot(t)
 	useTempLockDir(t) // this host's real lock directory may name anything an earlier run made
 	ns, _ := hostTUNAs(t, tSelf5)
-	x := netip.MustParseAddr("2001:db8:2620::9")
+	x := netip.MustParseAddr("2001:db8:b::9")
 	ip := func(args ...string) {
 		t.Helper()
 		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
@@ -788,7 +788,7 @@ func TestADeletionTheKeeperCannotReadIsRefusedAndRetried(t *testing.T) {
 	churned := make(chan struct{})
 	go func() { // somebody else's rule, added and deleted every 50 ms
 		defer close(churned)
-		other := ruleBodyProhibit(unix.AF_INET6, 4250, netip.MustParseAddr("2001:db8:2620::5"))
+		other := ruleBodyProhibit(unix.AF_INET6, 4250, netip.MustParseAddr("2001:db8:b::5"))
 		for !quit.Load() {
 			addRaw(t, other)
 			_ = delRaw(other)
@@ -909,7 +909,7 @@ func TestTheKeepersPeriodIsADeadlineThatChurnNeverPutsOff(t *testing.T) {
 	churned := make(chan struct{})
 	go func() { // somebody else's rule, added and deleted every 50 ms
 		defer close(churned)
-		other := ruleBodyProhibit(unix.AF_INET6, 4250, netip.MustParseAddr("2001:db8:2620::5"))
+		other := ruleBodyProhibit(unix.AF_INET6, 4250, netip.MustParseAddr("2001:db8:b::5"))
 		for !quit.Load() {
 			addRaw(t, other)
 			_ = delRaw(other)
@@ -928,7 +928,7 @@ func TestTheKeepersPeriodIsADeadlineThatChurnNeverPutsOff(t *testing.T) {
 // it in: nothing from the agent's address leaves by anything but the tunnel or loopback.
 func TestAHostSocketGivenTheAgentsAddressNeverLeavesByTheUplink(t *testing.T) {
 	needRoot(t)
-	up := startUplink6(t) // reachable from the host's own fd00:2620::1, proved inside
+	up := startUplink6(t) // reachable from the host's own fd00:b::1, proved inside
 	hostTUNAs(t, tSelf5)
 	// The host's own address goes, its route stays: as on a host whose SLAAC address is being re-added.
 	ip := func(args ...string) {
@@ -937,9 +937,9 @@ func TestAHostSocketGivenTheAgentsAddressNeverLeavesByTheUplink(t *testing.T) {
 			t.Fatalf("ip %v: %v %s", args, err, out)
 		}
 	}
-	ip("-6", "addr", "del", "fd00:2620::1/64", "dev", up.hostIf)
-	ip("-6", "route", "replace", "fd00:2620::/64", "dev", up.hostIf)
-	c, err := net.Dial("udp6", "[fd00:2620::2]:9")
+	ip("-6", "addr", "del", "fd00:b::1/64", "dev", up.hostIf)
+	ip("-6", "route", "replace", "fd00:b::/64", "dev", up.hostIf)
+	c, err := net.Dial("udp6", "[fd00:b::2]:9")
 	if err != nil {
 		t.Fatalf("dial: %v", err)
 	}
@@ -1018,16 +1018,16 @@ func TestTheHostPrefersItsOwnDeprecatedAddressToTheAgents(t *testing.T) {
 	if err != nil || !strings.Contains(string(out), tSelf5.String()) || !strings.Contains(string(out), "deprecated") {
 		t.Fatalf("the agent's address on the device is not deprecated (%v):\n%s", err, out)
 	}
-	if out, err := exec.Command("ip", "-6", "addr", "change", "fd00:2620::1/64", "dev", up.hostIf, "preferred_lft", "0",
+	if out, err := exec.Command("ip", "-6", "addr", "change", "fd00:b::1/64", "dev", up.hostIf, "preferred_lft", "0",
 		"nodad").CombinedOutput(); err != nil {
 		t.Fatalf("deprecate the host's own address: %v %s", err, out)
 	}
-	c, err := net.Dial("udp6", "[fd00:2620::2]:9")
+	c, err := net.Dial("udp6", "[fd00:b::2]:9")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer c.Close()
-	if src := c.LocalAddr().(*net.UDPAddr).IP; !src.Equal(net.ParseIP("fd00:2620::1")) {
+	if src := c.LocalAddr().(*net.UDPAddr).IP; !src.Equal(net.ParseIP("fd00:b::1")) {
 		t.Fatalf("with both addresses deprecated the host's socket was given %s, not its own address", src)
 	}
 	if _, err := c.Write([]byte("host")); err != nil {

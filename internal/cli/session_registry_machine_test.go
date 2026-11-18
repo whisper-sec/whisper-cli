@@ -88,10 +88,13 @@ func TestTheUsersOwnRegistryIsStillPreferred(t *testing.T) {
 	user := filepath.Join(t.TempDir(), "user", "sessions")
 	machine := filepath.Join(t.TempDir(), "run", "whisper", "sessions")
 
-	prevUser, prevMachine := sessionsDirFn, machineSessionsDirFn
+	prevUser, prevMachine, prevEuid := sessionsDirFn, machineSessionsDirFn, geteuidFn
 	sessionsDirFn = func() string { return user }
 	machineSessionsDirFn = func() string { return machine }
-	defer func() { sessionsDirFn, machineSessionsDirFn = prevUser, prevMachine }()
+	// a LOGIN's connect, whoever runs the suite: a root holder files host-wide first by design, which
+	// TestARootHolderFilesHostWideFirst pins; run as root this case would test that one instead
+	geteuidFn = func() int { return 1000 }
+	defer func() { sessionsDirFn, machineSessionsDirFn, geteuidFn = prevUser, prevMachine, prevEuid }()
 
 	sess := &egressSession{
 		endpoint: "socks5h://127.0.0.1:1080",
@@ -104,6 +107,32 @@ func TestTheUsersOwnRegistryIsStillPreferred(t *testing.T) {
 	}
 	if _, err := os.Stat(machine); !os.IsNotExist(err) {
 		t.Errorf("the host-scoped registry was created for a session that had no need of it")
+	}
+}
+
+// A root holder files its record host-wide first: the users on its share list can only reuse a
+// session whose record they can read, and root's own registry is closed to them.
+func TestARootHolderFilesHostWideFirst(t *testing.T) {
+	user := filepath.Join(t.TempDir(), "user", "sessions")
+	machine := filepath.Join(t.TempDir(), "run", "whisper", "sessions")
+
+	prevUser, prevMachine, prevEuid := sessionsDirFn, machineSessionsDirFn, geteuidFn
+	sessionsDirFn = func() string { return user }
+	machineSessionsDirFn = func() string { return machine }
+	geteuidFn = func() int { return 0 }
+	defer func() { sessionsDirFn, machineSessionsDirFn, geteuidFn = prevUser, prevMachine, prevEuid }()
+
+	sess := &egressSession{
+		endpoint: "socks5h://127.0.0.1:1080",
+		addr:     "2a04:2a01::a",
+		local:    stubLocalEndpoint{},
+	}
+	writeSessionRecord(sess)
+	if got := filepath.Dir(sess.recordPath); got != machine {
+		t.Fatalf("a root holder recorded in %q, want the host registry %q", got, machine)
+	}
+	if _, err := os.Stat(user); !os.IsNotExist(err) {
+		t.Errorf("a root holder's record also went to its own registry: %v", err)
 	}
 }
 

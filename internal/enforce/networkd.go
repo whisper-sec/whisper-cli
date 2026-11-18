@@ -909,11 +909,35 @@ func readNetworkdConf(r networkdReader) (networkdConf, error) {
 
 // placeKind is a kind of device whose far end a creation request can put in another namespace, with the type and
 // driver networkd reads for it. vxcan takes the same path in the kernel but carries CAN frames, not IP.
-type placeKind struct{ kind, typ, driver string }
+//
+// nsresourced marks the veth systemd-nsresourced makes for a caller (nsresourcedKind): its host end's name starts
+// "ns-" and the rest is not the caller's to pick freely, its address is the kernel's random one, and its .link file
+// gives it ID_NET_MANAGED_BY=io.systemd.Network.
+type placeKind struct {
+	kind, typ, driver string
+	nsresourced       bool
+}
 
 // placeKinds: a veth (measured), and netkit, which takes the same path and is an Ethernet device on Linux 6.8 in
 // either of its modes; a later kernel may give its L3 mode no link layer, so that is tried too.
-var placeKinds = []placeKind{{"veth", "ether", "veth"}, {"netkit", "ether", "netkit"}, {"netkit", "none", "netkit"}}
+var placeKinds = []placeKind{
+	{kind: "veth", typ: "ether", driver: "veth"},
+	{kind: "netkit", typ: "ether", driver: "netkit"},
+	{kind: "netkit", typ: "none", driver: "netkit"},
+}
+
+// nsresourcedKind is the device systemd-nsresourced (systemd 256 and later) puts in its own network namespace, the
+// host's, when an unprivileged caller asks it, over varlink (io.systemd.NamespaceResource.AddNetworkToUserNamespace),
+// for a veth into a network namespace of a user namespace it registered there: no kernel fault is involved, so a
+// kernel with the peer-namespace check does not stop it. Measured on systemd 257 (Debian 13, kernel 6.12): the host
+// end is "ns-" and twelve hex digits, with the alternative name "ns-<uid>-<gid>-<name>-<ifname>" whose last two
+// parts the caller chooses, and networkd matches Name= against either. The name search takes every name of up to 15
+// bytes that starts "ns-", which holds the kernel name and every alternative name that short, and some names the
+// device cannot have, in the direction that refuses.
+var nsresourcedKind = placeKind{kind: "veth", typ: "ether", driver: "veth", nsresourced: true}
+
+// nsresourcedPrefix is what every name of an nsresourced device starts with.
+const nsresourcedPrefix = "ns-"
 
 // placedDevice is a device a process could put in the host's namespace from a user namespace of its own, as
 // networkd sees it once udev has initialized it.
@@ -932,13 +956,17 @@ var nameProps = map[string]string{
 }
 
 func constProps(k placeKind) map[string]string {
-	return map[string]string{
+	p := map[string]string{
 		"SUBSYSTEM":       "net",
 		"ID_NET_DRIVER":   k.driver,
 		"ID_MM_CANDIDATE": "1",
 		"TAGS":            ":systemd:",
 		"CURRENT_TAGS":    ":systemd:",
 	}
+	if k.nsresourced {
+		p["ID_NET_MANAGED_BY"] = "io.systemd.Network" // 80-namespace-ns.link
+	}
+	return p
 }
 
 // absentProps are udev properties a virtual device never has: udev's path_id and net_id builtins set them from the
@@ -1260,7 +1288,12 @@ func firstMatches(files []networkFile, taken map[string]bool, h hostFacts, kinds
 		}
 	kinds:
 		for _, k := range kinds {
-			for _, m := range macs {
+			kmacs, prefix := macs, ""
+			if k.nsresourced {
+				// the kernel's random address, which no file's list can be counted on to hold
+				kmacs, prefix = macs[len(macs)-1:], nsresourcedPrefix
+			}
+			for _, m := range kmacs {
 				if files[b].constMatch(k, m, h) == triFalse {
 					continue
 				}
@@ -1270,7 +1303,7 @@ func firstMatches(files []networkFile, taken map[string]bool, h hostFacts, kinds
 						avoid = append(avoid, &files[e])
 					}
 				}
-				name, ok, capped := nameWitness(&files[b], avoid, taken)
+				name, ok, capped := nameWitness(&files[b], avoid, taken, prefix)
 				if capped {
 					// Too many patterns to search: taken to have a name it takes, in the direction that refuses.
 					out = append(out, placedPath{file: files[b], device: placedDevice{placeKind: k, mac: m}, how: how})
@@ -1341,8 +1374,8 @@ func unicastMAC(a string) bool {
 // nameWitness finds the shortest name the kernel would take for a new device that b's name tests admit, that no
 // file in avoid admits, and that no device in the host's namespace has, or reports there is none. It walks every
 // pattern involved at once over the names of up to maxIfName bytes, one representative byte for each set of bytes
-// no pattern tells apart, so the answer is exact.
-func nameWitness(b *networkFile, avoid []*networkFile, taken map[string]bool) (name string, found, capped bool) {
+// no pattern tells apart, so the answer is exact. Every name searched starts with prefix ("" for any name).
+func nameWitness(b *networkFile, avoid []*networkFile, taken map[string]bool, prefix string) (name string, found, capped bool) {
 	var s nameSearch
 	want := s.cond(b)
 	var not []nameCond
@@ -1357,12 +1390,12 @@ func nameWitness(b *networkFile, avoid []*networkFile, taken map[string]bool) (n
 		states [][]uint64
 		name   string
 	}
-	start := node{states: make([][]uint64, len(s.globs))}
+	start := node{states: make([][]uint64, len(s.globs)), name: prefix}
 	for i, g := range s.globs {
-		start.states[i] = g.advance(g.start(), s.prefix[i])
+		start.states[i] = g.advance(g.start(), s.prefix[i]+prefix)
 	}
 	alphabet := s.alphabet()
-	seen := map[string]bool{s.key(start.states, ""): true}
+	seen := map[string]bool{s.key(start.states, prefix): true}
 	queue := []node{start}
 	for len(queue) > 0 {
 		n := queue[0]
@@ -1784,6 +1817,12 @@ type placedFinding struct {
 	foreign   []string            // host: routing policy rules networkd would delete at a restart, by priority
 	keeps     bool                // host: networkd.conf turns off both of networkd's deletions of what it did not make
 	unread    bool                // host: the fix file is there, but networkd's own user cannot read it
+	// nsresourced says why systemd-nsresourced would make a device in this networkd's namespace ("" when it is not
+	// counted); kernelToo whether the kernel places one there as well. With nsresourced alone the fix is to mask, or
+	// change, the files that would take its device (nsrMasks, nsrEdits), not to leave every veth unmanaged.
+	nsresourced        string
+	kernelToo          bool
+	nsrMasks, nsrEdits []string
 }
 
 // unmanagedFixFile is the file the refusal asks for on the host: it sorts before every stock file and keeps every
@@ -1817,14 +1856,51 @@ func withUnmanagedFirst(files []networkFile) []networkFile {
 // /etc rather than an edit.
 func vendorDir(path string) bool { return !strings.HasPrefix(path, "/etc/") }
 
+// nsresourcedFix is what closes the way out through systemd-nsresourced's device on a kernel that places nothing
+// itself: every file that would take such a device and let it out, masked when a package owns it and changed by hand
+// when it is the site's, followed until no file takes one, since masking one file hands the device to the next.
+func nsresourcedFix(files []networkFile, taken map[string]bool, h hostFacts, fwd hostForwarding) (masks, edits []string) {
+	cur := slices.Clone(files)
+	for range files {
+		paths := findPlacedPaths(cur, taken, h, fwd, true, []placeKind{nsresourcedKind})
+		if len(paths) == 0 {
+			break
+		}
+		gone := map[string]bool{}
+		for _, p := range paths {
+			if vendorDir(p.file.path) && pasteable(p.file.path) {
+				masks = append(masks, p.file.path)
+			} else {
+				edits = append(edits, quoteText(p.file.path))
+			}
+			gone[p.file.path] = true
+		}
+		cur = slices.DeleteFunc(cur, func(f networkFile) bool { return gone[f.path] })
+	}
+	return masks, edits
+}
+
 // placedRefusal is the refusal for a containment of pid (named name) on a host where findings say a placed device
-// would be let out. probe says what the kernel test found. Each command to paste is on a line of its own.
+// would be let out. probe says what the kernel test found, "" when the kernel places nothing and only
+// systemd-nsresourced does. Each command to paste is on a line of its own.
 func placedRefusal(pid int, name string, findings []placedFinding, probe string) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "pid %d (%s) was not contained: it could reach the network past the containment. Any unprivileged "+
-		"process can make a user namespace of its own and from there put the far end of a veth or netkit pair in another "+
-		"network namespace, with a name and MAC address of its choosing (%s), and systemd-networkd would take such a "+
-		"device", pid, name, probe)
+	nsr := ""
+	for _, f := range findings {
+		if f.nsresourced != "" {
+			nsr = f.nsresourced
+		}
+	}
+	fmt.Fprintf(&b, "pid %d (%s) was not contained: it could reach the network past the containment.", pid, name)
+	if probe != "" {
+		fmt.Fprintf(&b, " Any unprivileged process can make a user namespace of its own and from there put the far end "+
+			"of a veth or netkit pair in another network namespace, with a name and MAC address of its choosing (%s).", probe)
+	}
+	if nsr != "" {
+		fmt.Fprintf(&b, " systemd-nsresourced makes a veth for any unprivileged process that asks it for one into a user "+
+			"namespace of its own, the host end named \"ns-\" and more, with no kernel fault at all (%s).", nsr)
+	}
+	b.WriteString(" systemd-networkd would take such a device")
 	containers := false
 	for i, f := range findings {
 		if i > 0 {
@@ -1860,8 +1936,16 @@ func placedRefusal(pid int, name string, findings []placedFinding, probe string)
 		b.WriteString("\n")
 		b.WriteString(placedFix(f))
 	}
-	fmt.Fprintf(&b, "\nA kernel that checks the far end's namespace (upstream commit 7b735ef81286) closes all of it. "+
-		"Then run `sudo whisper contain %d` again.", pid)
+	if probe != "" {
+		b.WriteString("\nA kernel that checks the far end's namespace (upstream commit 7b735ef81286) closes the kernel's " +
+			"part of it.")
+	}
+	if nsr != "" {
+		b.WriteString("\nMasking systemd-nsresourced closes its part as well, at the cost of every unprivileged " +
+			"container it serves and the user ranges it has handed out:" +
+			cmdLine("sudo systemctl mask --now systemd-nsresourced.socket systemd-nsresourced.service"))
+	}
+	fmt.Fprintf(&b, "\nThen run `sudo whisper contain %d` again.", pid)
 	return b.String()
 }
 
@@ -1920,6 +2004,33 @@ func placedFix(f placedFinding) string {
 	}
 	restart := "sudo systemctl restart systemd-networkd"
 	var out string
+	if f.nsresourced != "" && !f.kernelToo && !f.staleOnly && !f.unknown {
+		// The kernel places nothing here, so only nsresourced's device has to be kept in: masking the files that take
+		// it leaves every other veth (systemd-nspawn's, netplan's) as it is.
+		out = "To close it on this host, keep networkd from taking systemd-nsresourced's device"
+		if len(f.nsrMasks) > 0 {
+			out += ": mask " + quoteList(f.nsrMasks)
+		}
+		if len(f.nsrEdits) > 0 {
+			out += map[bool]string{true: ", and", false: ":"}[len(f.nsrMasks) > 0] + " change " +
+				strings.Join(f.nsrEdits, " and ") + " so that no device named ns-* matches (" + narrowHint + ")"
+		}
+		if f.running {
+			out += ", then restart networkd"
+		}
+		out += ":"
+		for _, m := range f.nsrMasks {
+			out += cmdLine("sudo ln -s /dev/null " + shellWord("/etc/systemd/network/"+slashpath.Base(m)))
+		}
+		if f.running {
+			out += cmdLine(restart)
+		}
+		out += "\nUnprivileged containers that systemd-nsresourced serves then get no network from networkd."
+		if f.running && !f.keeps {
+			out += foreignNote(f)
+		}
+		return out
+	}
 	if f.staleOnly || f.unknown {
 		if !f.running {
 			return "On this host, networkd reads its files when it starts, so nothing more is needed there."
@@ -1963,18 +2074,91 @@ func placedFix(f placedFinding) string {
 			"networkd ignores it; the command above writes it readable."
 	}
 	if f.running && !f.keeps {
-		out += " The restart makes networkd delete the routing policy rules and routes it did not make itself " +
-			"(ManageForeignRoutingPolicyRules= and ManageForeignRoutes=, on unless networkd.conf turns them off)"
-		if len(f.foreign) > 0 {
-			out += ", which here are the rules at priority " + strings.Join(f.foreign, ", ")
+		if strings.HasSuffix(out, restart) {
+			out += "\n" + strings.TrimPrefix(foreignNote(f), " ") // never on the command's own line, which is pasted
+		} else {
+			out += foreignNote(f)
 		}
-		out += ": a WireGuard or Tailscale client or a CNI puts its own back only when it restarts, so run it from a console " +
-			"if this host's own access rides on one."
 	}
 	return out
+}
+
+// foreignNote warns what a restart of a host's networkd deletes.
+func foreignNote(f placedFinding) string {
+	out := " The restart makes networkd delete the routing policy rules and routes it did not make itself " +
+		"(ManageForeignRoutingPolicyRules= and ManageForeignRoutes=, on unless networkd.conf turns them off)"
+	if len(f.foreign) > 0 {
+		out += ", which here are the rules at priority " + strings.Join(f.foreign, ", ")
+	}
+	return out + ": a WireGuard or Tailscale client or a CNI puts its own back only when it restarts, so run it from a " +
+		"console if this host's own access rides on one."
 }
 
 // narrowHint says how to narrow a site file's [Match] so that no placed device satisfies it.
 const narrowHint = "a [Match] with a PermanentMACAddress= or Path= that names a real device, or, on networkd 251 and " +
 	"later, Kind=!* as systemd's own 89-ethernet example has; never Name= or MACAddress= alone, which the placing request " +
 	"chooses"
+
+// capNetAdmin is CAP_NET_ADMIN's number, which a veth's creation needs.
+const capNetAdmin = 12
+
+// boundingHasNetAdmin reads CapabilityBoundingSet= from a service's unit file and its drop-ins, in the order systemd
+// applies them (units), the way systemd's config_parse_capability_set does: with no assignment the set is every
+// capability; an assignment that names no capability replaces the set, with none for an empty value and every one
+// for a lone "~"; otherwise the first assignment sets the set, and a later one is ORed in, or, starting with "~",
+// which inverts its list, ANDed in. It reports whether CAP_NET_ADMIN is left in the set, and known false when a file
+// or a word cannot be read, which the caller counts in the direction that refuses.
+func boundingHasNetAdmin(units []string) (has, known bool) {
+	has, set := true, false
+	known = true
+	for _, u := range units {
+		err := parseUnit(u, func(section, key, value string) {
+			if section != "Service" || key != "CapabilityBoundingSet" {
+				return
+			}
+			words, invert := strings.CutPrefix(value, "~")
+			bit, any := false, false
+			for _, w := range strings.Fields(words) {
+				lw := strings.ToLower(w)
+				switch {
+				case lw == "cap_net_admin":
+					bit, any = true, true
+				case strings.HasPrefix(lw, "cap_"):
+					any = true
+				case isDigits(lw):
+					n, err := strconv.Atoi(lw)
+					bit, any = bit || (err == nil && n == capNetAdmin), true
+				default:
+					known = false // a specifier or something systemd may read otherwise
+				}
+			}
+			switch {
+			case !any:
+				has = invert
+			case !set:
+				has = bit != invert
+			case invert:
+				has = has && !bit
+			default:
+				has = has || bit
+			}
+			set = true
+		})
+		if err != nil {
+			known = false
+		}
+	}
+	return has, known
+}
+
+func isDigits(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}

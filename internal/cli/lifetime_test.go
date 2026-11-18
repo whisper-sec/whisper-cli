@@ -220,6 +220,10 @@ func stubLiveProxyTail(t *testing.T, egressAddr, verifiedAddr string) (sessions 
 			return nil, err
 		}
 		s := &egressSession{endpoint: p.Endpoint(), addr: verifiedAddr, name: name, verified: true, local: p}
+		// armed as connect_core arms every session it holds: who the forwarder admits, and for a
+		// privileged holder the credential its children carry (unarmed, a root run's child was
+		// refused by a forwarder no production session ever runs as)
+		armSessionAccess(s)
 		mu.Lock()
 		got = append(got, s)
 		mu.Unlock()
@@ -262,10 +266,18 @@ func TestRun_ProxyLiveForChild(t *testing.T) {
 	// No python3 in the child env ⇒ inconclusive (the child can't probe). The core run.go
 	// lifetime is covered without a child by TestRun_ProxyLiveAfterControlCtxCancel, so skip
 	// rather than fail - a missing test dependency is never a product regression.
-	if strings.Contains(stdout, "SKIP") {
+	// Judged on the child's LAST lines, never a substring anywhere: a traceback can quote the probe's
+	// own source, "LIVE" and "DEAD" both. A pass is LIVE followed by the probe's exit status 0.
+	var lines []string
+	for _, l := range strings.Split(stdout, "\n") {
+		if l = strings.TrimSpace(l); l != "" {
+			lines = append(lines, l)
+		}
+	}
+	if len(lines) > 0 && lines[len(lines)-1] == "SKIP" {
 		t.Skip("python3 unavailable in the child env; core run.go lifetime covered by TestRun_ProxyLiveAfterControlCtxCancel")
 	}
-	if !strings.Contains(stdout, "LIVE") {
+	if len(lines) < 2 || lines[len(lines)-2] != "LIVE" || lines[len(lines)-1] != "probe exit 0" {
 		t.Fatalf("child could not stream through its injected ALL_PROXY - the proxy died with the control ctx (the ctx-cancellation bug); child stdout=%q", stdout)
 	}
 
@@ -278,21 +290,34 @@ func TestRun_ProxyLiveForChild(t *testing.T) {
 	}
 }
 
-// childSocksProbeScript builds a POSIX sh + (python3|nc) snippet that dials $ALL_PROXY and
+// childSocksProbeScript builds a POSIX sh + python3 snippet that dials $ALL_PROXY and
 // proves the tunnel streams. We keep it dependency-light: python3 if present (a self-
 // contained SOCKS5 handshake), else a graceful skip marker the test treats as inconclusive.
 func childSocksProbeScript(target, probe string) string {
 	// The shell uses Go's egress proxy via $ALL_PROXY. Implement a minimal SOCKS5 client in
 	// python3 (commonly available on CI/dev). If python3 is missing, print SKIP so the test
 	// can fall back; the run.go lifetime is ALSO covered directly below without a child.
+	//
+	// Only a MISSING python3 is a skip. The script used to end in `|| echo SKIP`, so a probe that
+	// failed (a refused handshake, a dead proxy) read as "python3 unavailable" and the test skipped
+	// instead of failing. That is how it hid the credential case: a root holder hands its
+	// children a proxy URL carrying the session credential, which the probe neither parsed nor sent,
+	// so under a root run it failed every time and was reported as a skip. It now speaks RFC 1929
+	// username/password auth when the URL carries one, and its own errors reach the test's output.
 	py := `
 import os,socket,sys,struct
-u=os.environ.get("ALL_PROXY","")
-hostport=u.replace("socks5h://","").replace("socks5://","")
-h,p=hostport.rsplit(":",1)
-s=socket.create_connection((h,int(p)),5)
-s.sendall(b"\x05\x01\x00")
-if s.recv(2)!=b"\x05\x00": sys.exit("neg")
+from urllib.parse import urlsplit,unquote
+u=urlsplit(os.environ.get("ALL_PROXY",""))
+s=socket.create_connection((u.hostname,u.port),5)
+if u.username is not None:
+    un=unquote(u.username).encode(); pw=unquote(u.password or "").encode()
+    s.sendall(b"\x05\x01\x02")
+    if s.recv(2)!=b"\x05\x02": sys.exit("neg")
+    s.sendall(b"\x01"+bytes([len(un)])+un+bytes([len(pw)])+pw)
+    if s.recv(2)!=b"\x01\x00": sys.exit("auth")
+else:
+    s.sendall(b"\x05\x01\x00")
+    if s.recv(2)!=b"\x05\x00": sys.exit("neg")
 th="` + strings.Split(target, ":")[0] + `"; tp=` + strings.Split(target, ":")[1] + `
 req=b"\x05\x01\x00\x03"+bytes([len(th)])+th.encode()+struct.pack(">H",tp)
 s.sendall(req)
@@ -311,7 +336,10 @@ while len(got)<len(probe):
     got+=d
 print("LIVE" if got==probe else "DEAD")
 `
-	return "command -v python3 >/dev/null 2>&1 && python3 -c '" + py + "' || echo SKIP"
+	// The shell always exits 0, whatever the probe did: runWithEgress hands the child's exit status to
+	// the process, so a failing probe would end the test binary instead of failing this test. What the
+	// probe said, and its own exit status, are in stdout for the test to judge.
+	return "command -v python3 >/dev/null 2>&1 || { echo SKIP; exit 0; }; python3 -c '" + py + "' 2>&1; echo \"probe exit $?\""
 }
 
 // TestRun_ProxyLiveAfterControlCtxCancel is the child-independent core of the run.go fix:

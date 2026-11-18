@@ -24,13 +24,29 @@ import (
 
 // stubSessionsDir points the registry at a temp dir and isolates $HOME (so the persisted
 // default agent file on a dev box can never leak into a test). Returns a restore func.
+//
+// The machine-wide registry gets a fresh empty directory of its own as well: a root holder
+// writes there before its own registry, so under a root run a test that stubbed only this one read
+// every record the tests before it had left in the shared machine directory.
 func stubSessionsDir(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	saved := sessionsDirFn
 	sessionsDirFn = func() string { return dir }
 	t.Cleanup(func() { sessionsDirFn = saved })
+	stubMachineSessionsDir(t)
 	testenv.HermeticHome(t) // ReadAgentFile("") must see a clean home, not the dev box's
+	return dir
+}
+
+// stubMachineSessionsDir points the machine-wide registry at a fresh empty directory for one test.
+// A test that wants records there sets machineSessionsDirFn itself afterwards; its cleanup runs first.
+func stubMachineSessionsDir(t *testing.T) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "sessions")
+	saved := machineSessionsDirFn
+	machineSessionsDirFn = func() string { return dir }
+	t.Cleanup(func() { machineSessionsDirFn = saved })
 	return dir
 }
 

@@ -642,7 +642,7 @@ func TestTheRefusalNamesEveryWayOutAndItsFix(t *testing.T) {
 		host: true, running: true, pid: 848, unknown: true, staleOnly: true,
 		stale: []string{"/etc/systemd/network/80-container-ve.network", "/etc/systemd/network"}}}, "p")
 	if !strings.Contains(stale, "changed, so what it holds may not be what is on disk") ||
-		!strings.Contains(stale, "\n    sudo systemctl restart systemd-networkd") || strings.Contains(stale, unmanagedFixFile) {
+		!strings.Contains(stale, "\n    sudo systemctl restart systemd-networkd\n") || strings.Contains(stale, unmanagedFixFile) {
 		t.Errorf("a refusal for what networkd may still hold:\n%s", stale)
 	}
 	// A file name read from a root a container tenant or the process controls is one word in every command, and

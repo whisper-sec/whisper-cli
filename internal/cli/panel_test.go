@@ -47,6 +47,7 @@ func panelIsolation(t *testing.T) string {
 	t.Setenv("WHISPER_BEARER", "")
 	prevSessions := sessionsDirFn
 	sessionsDirFn = func() string { return filepath.Join(dir, "sessions") }
+	stubMachineSessionsDir(t)
 	prevG := g
 	// The system-proxy seams are reset here rather than per-test so no test can reach the real
 	// network settings of the machine running the suite, and - the one that matters - so the

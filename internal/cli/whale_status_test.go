@@ -25,6 +25,7 @@ func whaleTestIsolation(t *testing.T) {
 	dir := t.TempDir()
 	prevSessions := sessionsDirFn
 	sessionsDirFn = func() string { return dir + "/sessions" }
+	stubMachineSessionsDir(t)
 	prevG := g
 	g = globalFlags{keyFile: dir + "/no-such-key", timeout: 2 * time.Second}
 	t.Cleanup(func() {

@@ -737,7 +737,7 @@ func TestACutMessageNeverReadsAsHarmless(t *testing.T) {
 func TestReorderingTheAnswersChangesNothing(t *testing.T) {
 	want := strayMap(fixtureView(t, "refused", nil).strays("lo", IfName))
 	msgs := fixtureMsgs(t, "refused")
-	r := rand.New(rand.NewSource(2655))
+	r := rand.New(rand.NewSource(7))
 	for round := 0; round < 20; round++ {
 		v := newLinkView()
 		for _, d := range linkDumps {

@@ -119,7 +119,7 @@ func ipOK(t *testing.T, args ...string) {
 func kernelVXLAN(t *testing.T, remote netip.Addr) func(n int, every time.Duration) {
 	t.Helper()
 	dev := fmt.Sprintf("wcx%d", os.Getpid()%10000)
-	ipOK(t, "link", "add", dev, "type", "vxlan", "id", "2651", "remote", remote.String(), "dstport", "4789")
+	ipOK(t, "link", "add", dev, "type", "vxlan", "id", "100", "remote", remote.String(), "dstport", "4789")
 	t.Cleanup(func() { _ = exec.Command("ip", "link", "del", dev).Run() })
 	if err := os.WriteFile("/proc/sys/net/ipv6/conf/"+dev+"/disable_ipv6", []byte("1"), 0o644); err != nil {
 		t.Fatalf("turn IPv6 off on %s: %v", dev, err)
@@ -146,8 +146,8 @@ func kernelVXLAN(t *testing.T, remote netip.Addr) func(n int, every time.Duratio
 // would now give a packet to the uplink's far end.
 func dropHostAddress(t *testing.T, up *uplink6) netip.Addr {
 	t.Helper()
-	ipOK(t, "-6", "addr", "del", "fd00:2620::1/64", "dev", up.hostIf)
-	ipOK(t, "-6", "route", "replace", "fd00:2620::/64", "dev", up.hostIf)
+	ipOK(t, "-6", "addr", "del", "fd00:b::1/64", "dev", up.hostIf)
+	ipOK(t, "-6", "route", "replace", "fd00:b::/64", "dev", up.hostIf)
 	out, err := exec.Command("ip", "-6", "route", "get", up.dst.String()).CombinedOutput()
 	if err != nil {
 		t.Fatalf("ip -6 route get %s: %v %s", up.dst, err, out)
@@ -234,7 +234,7 @@ func kernelWireGuard(t *testing.T, u *uplink6) (peerDev string, send func()) {
 			c.Close()
 		}
 	}
-	for deadline := time.Now().Add(5 * time.Second); !strings.HasPrefix(peerEndpoint(u, b), "[fd00:2620::1]:"); {
+	for deadline := time.Now().Add(5 * time.Second); !strings.HasPrefix(peerEndpoint(u, b), "[fd00:b::1]:"); {
 		if time.Now().After(deadline) {
 			t.Fatalf("control: the peer never took the host's own address as its endpoint (it has %q)", peerEndpoint(u, b))
 		}
@@ -262,14 +262,14 @@ func watchEndpoint(u *uplink6, peerDev string, send func(), d time.Duration) []s
 // Nothing about it can invalidate a tunnel's cached route but the address coming back itself.
 func readd(t *testing.T, up *uplink6, nodad bool) {
 	t.Helper()
-	args := []string{"-6", "addr", "add", "fd00:2620::1/64", "dev", up.hostIf, "noprefixroute"}
+	args := []string{"-6", "addr", "add", "fd00:b::1/64", "dev", up.hostIf, "noprefixroute"}
 	if nodad {
 		args = append(args, "nodad")
 	}
 	ipOK(t, args...)
 }
 
-var hostAddr = netip.MustParseAddr("fd00:2620::1")
+var hostAddr = netip.MustParseAddr("fd00:b::1")
 
 // needNFCheck returns the device's gate with its netfilter check, or skips on a kernel that cannot have one. A
 // kernel that has netfilter BPF programs and BTF, and is not locked down for confidentiality, must have it: a
@@ -417,7 +417,7 @@ func TestAKernelWireGuardNeverReachesItsPeerFromTheAgentsAddress(t *testing.T) {
 		}
 		send()
 	}
-	if e := peerEndpoint(up, peerDev); !strings.HasPrefix(e, "[fd00:2620::1]:") {
+	if e := peerEndpoint(up, peerDev); !strings.HasPrefix(e, "[fd00:b::1]:") {
 		t.Fatalf("with the host's address back the peer has %q as the host's endpoint", e)
 	}
 
@@ -470,7 +470,7 @@ func TestWithNoRouteATunnelsPacketsGoNoFurtherThanTheContainmentsTunnel(t *testi
 	g := needNFCheck(t, ns)
 	send := kernelVXLAN(t, up.dst)
 	dropHostAddress(t, up)
-	ipOK(t, "-6", "route", "del", "fd00:2620::/64", "dev", up.hostIf)
+	ipOK(t, "-6", "route", "del", "fd00:b::/64", "dev", up.hostIf)
 	held := heldBy(g)
 	send(50, 2*time.Millisecond)
 	time.Sleep(200 * time.Millisecond)
@@ -524,7 +524,7 @@ func TestAMasqueradedPacketNeverLeavesFromTheAgentsAddress(t *testing.T) {
 	got := up.listen(t, 7)
 	ns, _ := hostTUNAs(t, tSelf5)
 	g := needNFCheck(t, ns)
-	// A container behind the host: fd00:2656::2, routed out through the host, masqueraded on the uplink.
+	// A container behind the host: fd00:c::2, routed out through the host, masqueraded on the uplink.
 	cname := fmt.Sprintf("wcc%d", os.Getpid())
 	hostIf, peerIf := fmt.Sprintf("wccA%d", os.Getpid()%1000), fmt.Sprintf("wccB%d", os.Getpid()%1000)
 	ipOK(t, "netns", "add", cname)
@@ -534,13 +534,13 @@ func TestAMasqueradedPacketNeverLeavesFromTheAgentsAddress(t *testing.T) {
 	ipOK(t, "link", "set", peerIf, "netns", cname)
 	// The host's side holds only a link-local address, as a routed container network's often does: a global
 	// one there would itself be the source NAT picks.
-	ipOK(t, "-6", "addr", "add", "fe80::2656:1/64", "dev", hostIf, "nodad")
+	ipOK(t, "-6", "addr", "add", "fe80::c:1/64", "dev", hostIf, "nodad")
 	ipOK(t, "link", "set", hostIf, "up")
-	ipOK(t, "-6", "route", "add", "fd00:2656::/64", "dev", hostIf)
-	ipOK(t, "-n", cname, "-6", "addr", "add", "fd00:2656::2/64", "dev", peerIf, "nodad")
-	ipOK(t, "-n", cname, "-6", "addr", "add", "fe80::2656:2/64", "dev", peerIf, "nodad")
+	ipOK(t, "-6", "route", "add", "fd00:c::/64", "dev", hostIf)
+	ipOK(t, "-n", cname, "-6", "addr", "add", "fd00:c::2/64", "dev", peerIf, "nodad")
+	ipOK(t, "-n", cname, "-6", "addr", "add", "fe80::c:2/64", "dev", peerIf, "nodad")
 	ipOK(t, "-n", cname, "link", "set", peerIf, "up")
-	ipOK(t, "-n", cname, "-6", "route", "add", "default", "via", "fe80::2656:1", "dev", peerIf)
+	ipOK(t, "-n", cname, "-6", "route", "add", "default", "via", "fe80::c:1", "dev", peerIf)
 	fwd := "/proc/sys/net/ipv6/conf/all/forwarding"
 	was, _ := os.ReadFile(fwd)
 	if err := os.WriteFile(fwd, []byte("1"), 0o644); err != nil {
@@ -559,7 +559,7 @@ func TestAMasqueradedPacketNeverLeavesFromTheAgentsAddress(t *testing.T) {
 	nft("add", "rule", "ip6", "outmasq", "post", "oifname", up.hostIf, "masquerade")
 	send := func(n int) {
 		inNamespace(t, cname, func() {
-			c, err := net.Dial("udp6", "[fd00:2620::2]:7")
+			c, err := net.Dial("udp6", "[fd00:b::2]:7")
 			if err != nil {
 				return
 			}
@@ -882,7 +882,7 @@ func TestAKernelWithoutTheCheckStillContainsAndSaysSo(t *testing.T) {
 	// The note names the host's tunnels that are up, and only those: a device that is down sends nothing.
 	up1, down1 := fmt.Sprintf("wcxu%d", os.Getpid()%10000), fmt.Sprintf("wcxd%d", os.Getpid()%10000)
 	for i, d := range []string{up1, down1} {
-		ipOK(t, "link", "add", d, "type", "vxlan", "id", fmt.Sprint(2652+i), "remote", up.dst.String(), "dstport", "4789")
+		ipOK(t, "link", "add", d, "type", "vxlan", "id", fmt.Sprint(101+i), "remote", up.dst.String(), "dstport", "4789")
 		t.Cleanup(func() { _ = exec.Command("ip", "link", "del", d).Run() })
 	}
 	ipOK(t, "link", "set", up1, "up")

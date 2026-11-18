@@ -7,6 +7,7 @@ package enforce
 
 import (
 	"bufio"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,6 +17,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -52,6 +55,7 @@ type networkdInstance struct {
 	pid       int    // 0 for one that does not run but would start
 	host      bool   // it runs on the host itself, in PID 1's pid namespace, not in a container
 	ownNS     bool   // it manages the namespace this command and the process are in
+	initNS    bool   // it manages PID 1's network namespace, where systemd-nsresourced puts its devices
 	nsPid     int    // a process in the namespace it manages (itself, or the init that would start it)
 	why       string // how it comes to manage a new device there
 	container string // the container it runs in, for the refusal ("" on the host)
@@ -68,6 +72,10 @@ type networkdInstance struct {
 // tests can give it a configuration.
 var findNetworkd = networkdInstances
 
+// findNsresourced says why systemd-nsresourced would make a device in PID 1's network namespace for an unprivileged
+// caller now, or ""; a variable so the check's tests can give it an answer.
+var findNsresourced = nsresourcedPlaces
+
 // placedCheckWait bounds the whole check: whatever it reads, it answers in this time, or refuses.
 var placedCheckWait = 60 * time.Second
 
@@ -76,8 +84,8 @@ var placedCheckWait = 60 * time.Second
 // too when it cannot finish in placedCheckWait.
 func checkPlacedDevices(pid int, st procStatus) error {
 	done := make(chan error, 1)
-	find := findNetworkd // read here, so a check left running past its deadline reads nothing a caller may change
-	go func() { done <- checkPlacedDevicesNow(pid, st, find) }()
+	find, nsr := findNetworkd, findNsresourced // read here, so a check left running past its deadline reads nothing a caller may change
+	go func() { done <- checkPlacedDevicesNow(pid, st, find, nsr) }()
 	select {
 	case err := <-done:
 		return err
@@ -87,7 +95,7 @@ func checkPlacedDevices(pid int, st procStatus) error {
 	}
 }
 
-func checkPlacedDevicesNow(pid int, st procStatus, find func(procStatus) ([]networkdInstance, error)) error {
+func checkPlacedDevicesNow(pid int, st procStatus, find func(procStatus) ([]networkdInstance, error), nsr func() string) error {
 	instances, err := find(st)
 	if err != nil {
 		return containErr("pid %d was not contained: this command could not tell whether systemd-networkd would bring up a "+
@@ -111,6 +119,12 @@ func checkPlacedDevicesNow(pid int, st procStatus, find func(procStatus) ([]netw
 				why, nsDelCommand(nsPid, link))
 		}
 	}
+	return judgePlaced(pid, st, instances, nsr)
+}
+
+// judgePlaced is the rest of the check, once no device placed before is up: what each networkd would do with a
+// device the kernel, or systemd-nsresourced, would place in its namespace.
+func judgePlaced(pid int, st procStatus, instances []networkdInstance, nsr func() string) error {
 	type judged struct {
 		in      networkdInstance
 		views   [][]networkFile // one per networkd release the files are read for: the running one, or the newest and the oldest
@@ -142,8 +156,12 @@ func checkPlacedDevicesNow(pid int, st procStatus, find func(procStatus) ([]netw
 			}
 		}
 		open := len(j.changed) > 0
+		gate := placeKinds
+		if in.initNS {
+			gate = append(slices.Clone(placeKinds), nsresourcedKind) // its own property can match where a veth's does not
+		}
 		for _, files := range j.views {
-			open = open || len(findPlacedPaths(files, j.in.taken, j.in.facts, j.in.fwd, in.host, placeKinds)) > 0
+			open = open || len(findPlacedPaths(files, j.in.taken, j.in.facts, j.in.fwd, in.host, gate)) > 0
 		}
 		if open {
 			candidates = append(candidates, j)
@@ -153,21 +171,40 @@ func checkPlacedDevicesNow(pid int, st procStatus, find func(procStatus) ([]netw
 		return nil
 	}
 	probe := probePlacement()
-	kinds := probe.placeable()
-	if len(kinds) == 0 {
-		return nil // this kernel places no device in a namespace its creator holds no capability over
+	kinds := probe.placeable() // none: this kernel places no device in a namespace its creator holds no capability over
+	// systemd-nsresourced places a veth in its own namespace, PID 1's, on any kernel, for any caller.
+	nsrWhy := ""
+	if slices.ContainsFunc(candidates, func(j judged) bool { return j.in.initNS }) {
+		nsrWhy = nsr()
+	}
+	if len(kinds) == 0 && nsrWhy == "" {
+		return nil
 	}
 	var findings []placedFinding
 	for _, j := range candidates {
 		in := j.in
+		k := kinds
+		if in.initNS && nsrWhy != "" {
+			k = append(slices.Clone(kinds), nsresourcedKind)
+		}
+		if len(k) == 0 {
+			continue
+		}
 		f := placedFinding{where: in.where(), why: in.why, host: in.host, running: in.pid > 0, pid: in.pid,
-			container: quoteText(in.container), inUse: linksConfiguredBy(in), initPid: in.initPid, keeps: in.keeps}
+			container: quoteText(in.container), inUse: linksConfiguredBy(in), initPid: in.initPid, keeps: in.keeps,
+			kernelToo: len(kinds) > 0}
+		if in.initNS {
+			f.nsresourced = nsrWhy
+		}
 		var files []networkFile
 		for _, v := range j.views { // the first release whose reading finds a way out
-			if p := findPlacedPaths(v, in.taken, in.facts, in.fwd, in.host, kinds); len(p) > 0 {
+			if p := findPlacedPaths(v, in.taken, in.facts, in.fwd, in.host, k); len(p) > 0 {
 				f.paths, files = p, v
 				break
 			}
+		}
+		if f.paths == nil && len(j.changed) == 0 {
+			continue // the kinds that can be placed here find no way out
 		}
 		if len(j.changed) > 0 {
 			f.unknown, f.stale = true, j.changed
@@ -176,7 +213,10 @@ func checkPlacedDevicesNow(pid int, st procStatus, find func(procStatus) ([]netw
 			}
 		}
 		if in.host && files != nil {
-			f.leftover = findPlacedPaths(withUnmanagedFirst(files), in.taken, in.facts, in.fwd, true, kinds)
+			f.leftover = findPlacedPaths(withUnmanagedFirst(files), in.taken, in.facts, in.fwd, true, k)
+			if f.nsresourced != "" && !f.kernelToo {
+				f.nsrMasks, f.nsrEdits = nsresourcedFix(files, in.taken, in.facts, in.fwd)
+			}
 			f.unread = fixFileUnreadable(in)
 			if f.running && !f.keeps && in.ownNS {
 				f.foreign = foreignRules()
@@ -184,7 +224,14 @@ func checkPlacedDevicesNow(pid int, st procStatus, find func(procStatus) ([]netw
 		}
 		findings = append(findings, f)
 	}
-	return &ContainError{Msg: placedRefusal(pid, quoteText(st.Name), findings, probe.sentence(kinds))}
+	if len(findings) == 0 {
+		return nil
+	}
+	sentence := ""
+	if len(kinds) > 0 {
+		sentence = probe.sentence(kinds)
+	}
+	return &ContainError{Msg: placedRefusal(pid, quoteText(st.Name), findings, sentence)}
 }
 
 // instancePids are the processes whose namespaces the instances manage.
@@ -327,7 +374,7 @@ func networkdInstances(st procStatus) ([]networkdInstance, error) {
 		}
 		covered[ino] = true
 		root := filepath.Join(procRoot, e.Name(), "root")
-		in := networkdInstance{pid: pid, nsPid: pid, ownNS: ino == self.Ino, reader: networkdReader{root: root, access: credsAccess(pid)},
+		in := networkdInstance{pid: pid, nsPid: pid, ownNS: ino == self.Ino, initNS: namespaceSameOrUnread(e.Name(), "net"), reader: networkdReader{root: root, access: credsAccess(pid)},
 			version: runningVersion(pid), host: sameNamespace(e.Name(), "1", "pid")}
 		// A container runs its own init in a pid namespace of its own; a service of the host's (networkd has a mount
 		// namespace of its own, from its unit's sandboxing) shares PID 1's.
@@ -365,7 +412,7 @@ func networkdInstances(st procStatus) ([]networkdInstance, error) {
 			continue
 		}
 		covered[ino] = true
-		in := networkdInstance{nsPid: ip, ownNS: ino == self.Ino, host: ip == 1, why: why, version: installedVersion(root),
+		in := networkdInstance{nsPid: ip, ownNS: ino == self.Ino, initNS: ip == 1 || namespaceSameOrUnread(strconv.Itoa(ip), "net"), host: ip == 1, why: why, version: installedVersion(root),
 			reader: networkdReader{root: root, access: passwdAccess(root)}}
 		if conf, err := readNetworkdConf(networkdReader{root: root}); err == nil {
 			in.keeps = conf.keeps
@@ -1603,4 +1650,269 @@ func addPair(kind, name, peer string, target []byte) error {
 	body := append(ifinfo(0, 0, 0), nlAttr(unix.IFLA_IFNAME, []byte(name+"\x00"))...)
 	body = append(body, nlAttr(unix.IFLA_LINKINFO|unix.NLA_F_NESTED, info)...)
 	return r.do(unix.RTM_NEWLINK, unix.NLM_F_CREATE|unix.NLM_F_EXCL, body)
+}
+
+// nsresourcedSocket is where systemd-nsresourced listens; its socket unit makes it 0666, so any process may ask.
+const nsresourcedSocket = "/run/systemd/io.systemd.NamespaceResource"
+
+// serviceUnitDirs are every directory systemd reads a system unit or its drop-ins from, highest priority first.
+var serviceUnitDirs = []string{"/etc/systemd/system.control", "/run/systemd/system.control", "/run/systemd/transient",
+	"/run/systemd/generator.early", "/etc/systemd/system", "/etc/systemd/system.attached", "/run/systemd/system",
+	"/run/systemd/system.attached", "/run/systemd/generator", "/usr/local/lib/systemd/system", "/usr/lib/systemd/system",
+	"/lib/systemd/system", "/run/systemd/generator.late"}
+
+// nsresourcedPlaces says why systemd-nsresourced would make a veth in PID 1's network namespace for an unprivileged
+// caller now, or "". It counts when an instance runs there holding CAP_NET_ADMIN in its bounding set (measured:
+// Debian 13's systemd 257.13 leaves it out, and every request then fails with EPERM), or when its socket listens and
+// the service the next request starts would hold it: systemd's own answer (systemctl show) where it can be had, the
+// unit and drop-ins on disk too where PID 1 has not reloaded them, and the disk alone where systemctl cannot answer.
+// Whatever cannot be read counts. One enabled but not listening is not counted: it starts at the next boot, which no
+// contained process outlives.
+func nsresourcedPlaces() string {
+	if pid := nsresourcedRunning(); pid > 0 {
+		return fmt.Sprintf("it runs as pid %d", pid)
+	}
+	root := filepath.Join(procRoot, "1", "root")
+	listening, known := nsresourcedListening(root)
+	if known && !listening {
+		return ""
+	}
+	if !nsresourcedWouldHoldNetAdmin(root) {
+		return ""
+	}
+	if !known {
+		return "its socket is there and whether it listens cannot be read, so any request is taken to start it"
+	}
+	return "it does not run, but its socket listens, so any request starts it"
+}
+
+// nsresourcedListening reports whether systemd-nsresourced.socket listens, as PID 1 tells it, or failing that whether
+// its socket is there; known is false when neither can be read.
+func nsresourcedListening(root string) (listening, known bool) {
+	if v, ok := showUnit("systemd-nsresourced.socket", "SubState"); ok {
+		return v["SubState"] == "listening" || v["SubState"] == "running", true
+	}
+	_, fi, err := readUnder(root, nsresourcedSocket)
+	if err != nil {
+		return false, false
+	}
+	if fi == nil || fi.Mode()&fs.ModeSocket == 0 {
+		return false, true
+	}
+	return true, false // a socket file stays after a stop: only systemd can say it listens
+}
+
+// nsresourcedWouldHoldNetAdmin reports whether the service a request starts would hold CAP_NET_ADMIN: by PID 1's
+// loaded unit, and by the files on disk when PID 1 says they changed since it read them (either counts) or cannot
+// say at all. A masked or absent unit starts nothing.
+func nsresourcedWouldHoldNetAdmin(root string) bool {
+	if v, ok := showUnit("systemd-nsresourced.service", "LoadState", "CapabilityBoundingSet", "NeedDaemonReload"); ok {
+		if v["LoadState"] == "masked" {
+			return false
+		}
+		// not-found falls through to the disk: systemd loads a unit installed since, on the request that needs it
+		if v["LoadState"] != "not-found" {
+			loaded := v["LoadState"] != "loaded" || strings.Contains(" "+strings.ToLower(v["CapabilityBoundingSet"])+" ", " cap_net_admin ")
+			if v["NeedDaemonReload"] != "yes" {
+				return loaded
+			}
+			if loaded {
+				return true
+			}
+		}
+	}
+	units, present, known := serviceUnits(root, "systemd-nsresourced.service")
+	if !known {
+		return true
+	}
+	if !present {
+		return false
+	}
+	has, parsed := boundingHasNetAdmin(units)
+	return has || !parsed
+}
+
+// showUnit is systemctlShow; a variable so the check's tests can give PID 1's answers.
+var showUnit = systemctlShow
+
+// systemctlBinaries are where the host's systemctl is, tried in order; never a PATH lookup.
+var systemctlBinaries = []string{"/usr/bin/systemctl", "/bin/systemctl"}
+
+// systemctlShow asks PID 1 for properties of a unit, with a deadline; ok is false when it cannot answer.
+func systemctlShow(unit string, props ...string) (map[string]string, bool) {
+	for _, bin := range systemctlBinaries {
+		if _, err := os.Stat(bin); err != nil {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		args := []string{"show", "--no-pager"}
+		for _, p := range props {
+			args = append(args, "-p", p)
+		}
+		out, err := exec.CommandContext(ctx, bin, append(args, "--", unit)...).Output()
+		cancel()
+		if err != nil {
+			return nil, false
+		}
+		v := map[string]string{}
+		for _, line := range strings.Split(string(out), "\n") {
+			if k, val, ok := strings.Cut(line, "="); ok {
+				v[k] = val
+			}
+		}
+		for _, p := range props {
+			if _, ok := v[p]; !ok {
+				return nil, false
+			}
+		}
+		return v, true
+	}
+	return nil, false
+}
+
+// nsresourcedRunning finds a systemd-nsresourced process (the service or one of its workers) that could make a veth in
+// PID 1's network namespace: root in PID 1's user namespace (a copy any user runs in a user namespace of its own, with
+// its bounding set cut, is neither), running systemd's own program, with CAP_NET_ADMIN in its bounding set. Something
+// about such a process that cannot be read counts.
+func nsresourcedRunning() int {
+	ents, err := os.ReadDir(procRoot)
+	if err != nil {
+		return 0
+	}
+	for _, e := range ents {
+		p, err := strconv.Atoi(e.Name())
+		if err != nil {
+			continue
+		}
+		comm, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "comm"))
+		if err != nil || strings.TrimSpace(string(comm)) != "systemd-nsresou" { // the kernel cuts names to 15 bytes
+			continue
+		}
+		exe, err := os.Readlink(filepath.Join(procRoot, e.Name(), "exe"))
+		if err != nil {
+			continue // gone, or a kernel thread: nothing that makes a veth
+		}
+		switch filepath.Base(strings.TrimSuffix(exe, " (deleted)")) {
+		case "systemd-nsresourced", "systemd-nsresourcework":
+		default:
+			continue // any process can take the name
+		}
+		if !namespaceSameOrUnread(e.Name(), "user") || !namespaceSameOrUnread(e.Name(), "net") {
+			continue
+		}
+		st, err := os.ReadFile(filepath.Join(procRoot, e.Name(), "status"))
+		if err != nil {
+			return p
+		}
+		uid, bnd, ok := statusUidAndBounding(string(st))
+		if !ok {
+			return p
+		}
+		if uid == 0 && bnd&(1<<capNetAdmin) != 0 {
+			return p
+		}
+	}
+	return 0
+}
+
+// statusUidAndBounding reads the real uid and the capability bounding set from a /proc status file.
+func statusUidAndBounding(status string) (uid int, bounding uint64, ok bool) {
+	uid, haveUid, haveBnd := -1, false, false
+	for _, line := range strings.Split(status, "\n") {
+		if v, found := strings.CutPrefix(line, "Uid:"); found {
+			if f := strings.Fields(v); len(f) > 0 {
+				if n, err := strconv.Atoi(f[0]); err == nil {
+					uid, haveUid = n, true
+				}
+			}
+		}
+		if v, found := strings.CutPrefix(line, "CapBnd:"); found {
+			if b, err := strconv.ParseUint(strings.TrimSpace(v), 16, 64); err == nil {
+				bounding, haveBnd = b, true
+			}
+		}
+	}
+	return uid, bounding, haveUid && haveBnd
+}
+
+// namespaceSameOrUnread reports whether pid is in PID 1's namespace of kind, or either cannot be read, which counts as
+// the same.
+func namespaceSameOrUnread(pid, kind string) bool {
+	var a, b unix.Stat_t
+	if unix.Stat(filepath.Join(procRoot, pid, "ns", kind), &a) != nil || unix.Stat(filepath.Join(procRoot, "1", "ns", kind), &b) != nil {
+		return true
+	}
+	return a.Dev == b.Dev && a.Ino == b.Ino
+}
+
+// serviceUnits reads a system service's unit file and its drop-ins under root, in the order systemd applies them:
+// the unit from the first directory that has it, then every .conf of name.d, of each prefix of its name ending in a
+// dash, longest first (systemd-.service.d), and of service.d, the first directory and the most specific drop-in
+// directory to hold a name hiding the rest, sorted by name. present is false when the unit is masked or not there;
+// known is false when something could not be read, which the caller counts.
+func serviceUnits(root, name string) (units []string, present, known bool) {
+	var unit []byte
+	for _, d := range serviceUnitDirs {
+		b, fi, err := readUnder(root, filepath.Join(d, name))
+		if err != nil {
+			return nil, false, false
+		}
+		if fi == nil {
+			continue
+		}
+		if !fi.Mode().IsRegular() || len(b) == 0 {
+			return nil, false, true // masked: a link to /dev/null, or empty
+		}
+		unit = b
+		break
+	}
+	if unit == nil {
+		return nil, false, true
+	}
+	base, typ, _ := strings.Cut(name, ".")
+	dropDirs := []string{name + ".d"}
+	for i := len(base) - 1; i > 0; i-- {
+		if base[i] == '-' {
+			dropDirs = append(dropDirs, base[:i+1]+"."+typ+".d")
+		}
+	}
+	dropDirs = append(dropDirs, typ+".d")
+	byName := map[string][]byte{}
+	for _, d := range serviceUnitDirs {
+		for _, dd := range dropDirs {
+			names, _, err := listUnder(root, filepath.Join(d, dd))
+			if err != nil && !errors.Is(err, fs.ErrNotExist) {
+				return nil, true, false
+			}
+			for _, n := range names {
+				if !strings.HasSuffix(n, ".conf") {
+					continue
+				}
+				if _, seen := byName[n]; seen {
+					continue
+				}
+				b, fi, err := readUnder(root, filepath.Join(d, dd, n))
+				if err != nil {
+					return nil, true, false
+				}
+				if fi == nil || !fi.Mode().IsRegular() {
+					byName[n] = nil // a masked drop-in hides the name and adds nothing
+					continue
+				}
+				byName[n] = b
+			}
+		}
+	}
+	keys := make([]string, 0, len(byName))
+	for n := range byName {
+		keys = append(keys, n)
+	}
+	sort.Strings(keys)
+	units = []string{string(unit)}
+	for _, n := range keys {
+		if byName[n] != nil {
+			units = append(units, string(byName[n]))
+		}
+	}
+	return units, true, true
 }

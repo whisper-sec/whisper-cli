@@ -125,7 +125,7 @@ func TestThisKernelsBTFGivesTheCheckItsOffsets(t *testing.T) {
 // words, and the offsets it was given; it returns only NF_DROP or NF_ACCEPT, and declares the licence the kernel
 // asks of a program that reads kernel memory.
 func TestTheCheckIsBuiltForItsDeviceAndAddress(t *testing.T) {
-	self := netip.MustParseAddr("2001:db8:2651::46")
+	self := netip.MustParseAddr("2001:db8:46::46")
 	o := nfOffsets{out: 16, ifindex: 224, head: 200, networkHeader: 182}
 	spec := nfSourceSpec(self, 77, 1, 0x2a, o, 99)
 	if spec.Name != "wsc_nf_002a" || spec.Type != ebpf.Netfilter || spec.AttachType != ebpf.AttachNetfilter ||
